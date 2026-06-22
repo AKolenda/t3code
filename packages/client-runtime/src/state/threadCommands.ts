@@ -1,17 +1,16 @@
 import * as Crypto from "effect/Crypto";
 import { Atom } from "effect/unstable/reactivity";
-import { WS_METHODS } from "@t3tools/contracts";
 
-import {
-  createAtomCommandScheduler,
-  createEnvironmentCommand,
-  createEnvironmentRpcCommand,
-} from "./runtime.ts";
+import { createAtomCommandScheduler, createEnvironmentCommand } from "./runtime.ts";
 import {
   type ArchiveThreadInput,
   type CreateThreadInput,
   type DeleteThreadInput,
   type InterruptThreadTurnInput,
+  type ForkThreadFromRunInput,
+  type MergeThreadBackInput,
+  type PromoteQueuedRunInput,
+  type ReorderQueuedRunInput,
   type RespondToThreadApprovalInput,
   type RespondToThreadUserInputInput,
   type DismissThreadUserInputInput,
@@ -34,6 +33,10 @@ import {
   createThread,
   deleteThread,
   interruptThreadTurn,
+  forkThreadFromRun,
+  mergeThreadBack,
+  promoteQueuedRun,
+  reorderQueuedRun,
   respondToThreadApproval,
   respondToThreadUserInput,
   dismissThreadUserInput,
@@ -60,6 +63,10 @@ export type {
   CreateThreadInput,
   DeleteThreadInput,
   InterruptThreadTurnInput,
+  ForkThreadFromRunInput,
+  MergeThreadBackInput,
+  PromoteQueuedRunInput,
+  ReorderQueuedRunInput,
   RespondToThreadApprovalInput,
   RespondToThreadUserInputInput,
   DismissThreadUserInputInput,
@@ -223,9 +230,34 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
-    uploadFeedback: createEnvironmentRpcCommand(runtime, {
-      label: "environment-data:commands:thread:upload-feedback",
-      tag: WS_METHODS.providerUploadFeedback,
+    forkFromRun: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:fork-from-run",
+      execute: (input: ForkThreadFromRunInput) => forkThreadFromRun(input),
+      scheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) => JSON.stringify([environmentId, input.sourceThreadId]),
+      },
+    }),
+    mergeBack: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:merge-back",
+      execute: (input: MergeThreadBackInput) => mergeThreadBack(input),
+      scheduler,
+      concurrency: {
+        mode: "serial",
+        key: ({ environmentId, input }) =>
+          JSON.stringify([environmentId, input.sourceThreadId, input.targetThreadId]),
+      },
+    }),
+    reorderQueuedRun: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:reorder-queued-run",
+      execute: (input: ReorderQueuedRunInput) => reorderQueuedRun(input),
+      scheduler,
+      concurrency,
+    }),
+    promoteQueuedRun: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:promote-queued-run",
+      execute: (input: PromoteQueuedRunInput) => promoteQueuedRun(input),
       scheduler,
       concurrency,
     }),
