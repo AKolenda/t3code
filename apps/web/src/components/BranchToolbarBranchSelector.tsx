@@ -1,4 +1,3 @@
-import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   isAtomCommandInterrupted,
@@ -6,7 +5,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import type { ContextMenuItem, EnvironmentId, VcsRef, ThreadId } from "@t3tools/contracts";
 import { LegendList, type LegendListRef } from "@legendapp/list/react";
-import { ChevronDownIcon, GitBranchIcon, SearchIcon } from "lucide-react";
+import { ChevronDownIcon, GitBranchIcon, RefreshCwIcon, SearchIcon } from "lucide-react";
 import {
   useCallback,
   useDeferredValue,
@@ -33,9 +32,12 @@ import { threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
 import { vcsEnvironment } from "../state/vcs";
 import { cn } from "../lib/utils";
+import {
+  THREAD_DETAILS_PANEL_ICON_CLASS,
+  THREAD_DETAILS_PANEL_ROW_CLASS,
+} from "./chat/threadDetailsPanelStyles";
 import { parsePullRequestReference } from "../pullRequestReference";
 import { getSourceControlPresentation } from "../sourceControlPresentation";
-import { composerFloatingLayerProps } from "./chat/composerEventScope";
 import {
   deriveLocalBranchNameFromRemoteRef,
   resolveBranchTriggerLabel,
@@ -47,7 +49,11 @@ import {
   sanitizeNewRefName,
   shouldIncludeBranchPickerItem,
 } from "./BranchToolbar.logic";
-import { ChangeRequestStatusIcon, prStatusIndicator } from "./ThreadStatusIndicators";
+import {
+  ChangeRequestStatusIcon,
+  prStatusIndicator,
+  resolveThreadPr,
+} from "./ThreadStatusIndicators";
 import { Button } from "./ui/button";
 import { Switch } from "./ui/switch";
 import { getVirtualizedScrollFadeClassName } from "./ui/scroll-area";
@@ -66,6 +72,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 interface BranchToolbarBranchSelectorProps {
   className?: string;
+  displayMode?: "toolbar" | "panel";
   environmentId: EnvironmentId;
   threadId: ThreadId;
   draftId?: DraftId;
@@ -85,6 +92,7 @@ function toBranchActionErrorMessage(error: unknown): string {
 
 export function BranchToolbarBranchSelector({
   className,
+  displayMode = "toolbar",
   environmentId,
   threadId,
   draftId,
@@ -153,7 +161,7 @@ export function BranchToolbarBranchSelector({
   // Thread branch mutation (colocated — only this component calls it)
   // ---------------------------------------------------------------------------
   const setThreadBranch = useCallback(
-    (branch: string | null, worktreePath: string | null, automatic = false) => {
+    (branch: string | null, worktreePath: string | null) => {
       if (!activeThreadId || !activeProject) return;
       if (serverSession && worktreePath !== activeWorktreePath) {
         void stopThreadSession({
@@ -184,7 +192,6 @@ export function BranchToolbarBranchSelector({
         branch,
         worktreePath,
         envMode: nextDraftEnvMode,
-        environmentSelection: automatic ? (draftThread?.environmentSelection ?? "auto") : "manual",
         projectRef: scopeProjectRef(environmentId, activeProject.id),
       });
     },
@@ -200,7 +207,6 @@ export function BranchToolbarBranchSelector({
       threadRef,
       environmentId,
       effectiveEnvMode,
-      draftThread?.environmentSelection,
       stopThreadSession,
       updateThreadMetadata,
     ],
@@ -507,7 +513,7 @@ export function BranchToolbarBranchSelector({
     ) {
       return;
     }
-    setThreadBranch(worktreeBaseBranchCandidate, null, true);
+    setThreadBranch(worktreeBaseBranchCandidate, null);
   }, [
     activeThreadBranch,
     activeWorktreePath,
@@ -615,14 +621,13 @@ export function BranchToolbarBranchSelector({
   });
 
   // PR pill shown next to the branch selector when the active branch has one.
-  const branchPrBranch = resolveBranchToolbarPrBranch({
-    activeThreadBranch,
-    resolvedActiveBranch,
+  const branchPr = resolveThreadPr({
+    threadBranch: resolveBranchToolbarPrBranch({
+      activeThreadBranch,
+      resolvedActiveBranch,
+    }),
+    gitStatus: branchStatusQuery.data ?? null,
   });
-  const branchPr =
-    branchPrBranch !== null && branchStatusQuery.data?.refName === branchPrBranch
-      ? (branchStatusQuery.data.pr ?? null)
-      : null;
   const branchPrStatus = prStatusIndicator(branchPr, branchStatusQuery.data?.sourceControlProvider);
   // Action-oriented tooltip (the pill opens the PR), distinct from the sidebar's
   // state-description tooltip.
@@ -729,8 +734,11 @@ export function BranchToolbarBranchSelector({
       value={resolvedActiveBranch}
     >
       <div
-        className={cn("flex min-w-0 items-center gap-1", className)}
-        data-composer-context-control
+        className={cn(
+          "flex min-w-0 items-center gap-1",
+          displayMode === "panel" && "w-full",
+          className,
+        )}
       >
         {branchPr && branchPrStatus ? (
           <Tooltip>
@@ -747,61 +755,44 @@ export function BranchToolbarBranchSelector({
                 />
               }
             >
-              <ChangeRequestStatusIcon
-                state={branchPr.state}
-                isDraft={branchPr.isDraft}
-                className="size-3"
-              />
-              <span
-                data-composer-label
-                className="min-w-0 max-w-12 overflow-hidden group-data-[compact]/composer-context:max-w-0"
-              >
-                <span
-                  data-composer-label-motion
-                  className="block w-full min-w-0 max-w-12 truncate transition-opacity duration-180 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
-                >
-                  #{branchPr.number}
-                </span>
-              </span>
+              <ChangeRequestStatusIcon className="size-3" />
+              <span>#{branchPr.number}</span>
             </TooltipTrigger>
             <TooltipPopup side="top">{branchPrTooltip}</TooltipPopup>
           </Tooltip>
         ) : null}
-        {/* Context menu lives on the wrapper: the disabled Button has
-            pointer-events-none, so the trigger itself never sees right-clicks
-            while refs are loading or a branch action is pending. */}
-        <span
-          className="flex min-w-0"
-          onContextMenu={(event) => handleBranchContextMenu(event, resolvedActiveBranch)}
+        <ComboboxTrigger
+          render={<Button variant="ghost" size={displayMode === "panel" ? "sm" : "xs"} />}
+          className={cn(
+            "min-w-0 text-muted-foreground/70 hover:text-foreground/80",
+            displayMode === "panel" && THREAD_DETAILS_PANEL_ROW_CLASS,
+          )}
+          disabled={isInitialBranchesLoadPending || isBranchActionPending}
         >
-          <ComboboxTrigger
-            render={<Button variant="ghost" size="xs" />}
-            // No press-scale: the popup aligns live to this trigger, so a
-            // momentary 0.97 shrink would drag the open popup ~3px sideways.
-            className="min-w-0 max-w-full font-normal text-muted-foreground/70 text-xs! hover:text-foreground/80 active:scale-100"
-            disabled={isInitialBranchesLoadPending || isBranchActionPending}
+          <GitBranchIcon
+            className={cn(
+              "size-3 shrink-0 opacity-70",
+              displayMode === "panel" && THREAD_DETAILS_PANEL_ICON_CLASS,
+            )}
+          />
+          <span
+            data-composer-label
+            className={cn(
+              "min-w-0 max-w-[240px] truncate",
+              displayMode === "panel"
+                ? "max-w-none flex-1 text-left"
+                : "transition-[max-width,opacity] duration-300 ease-out group-data-[compact]/composer-context:max-w-0 group-data-[compact]/composer-context:opacity-0",
+            )}
           >
-            <GitBranchIcon className="size-3 shrink-0 opacity-70" />
-            <span
-              data-composer-label
-              className="min-w-0 max-w-[240px] group-data-[compact]/composer-context:max-w-0"
-            >
-              <span
-                data-composer-label-motion
-                className="block w-full min-w-0 max-w-[240px] truncate transition-opacity duration-180 ease-[cubic-bezier(0.32,0.72,0,1)] group-data-[compact]/composer-context:opacity-0 motion-reduce:transition-none"
-              >
-                {triggerLabel}
-              </span>
-            </span>
-            <ChevronDownIcon className="size-3 shrink-0 opacity-50" />
-          </ComboboxTrigger>
-        </span>
+            {triggerLabel}
+          </span>
+          <ChevronDownIcon className="size-3 shrink-0 opacity-50" />
+        </ComboboxTrigger>
       </div>
       <ComboboxPopup
-        align="end"
-        side="top"
+        align={displayMode === "panel" ? "start" : "end"}
+        side={displayMode === "panel" ? "bottom" : "top"}
         className="flex w-80 flex-col"
-        {...composerFloatingLayerProps}
       >
         <div className="shrink-0 px-3 pt-2.5">
           <div className="relative -translate-y-px border-b border-border/70 pb-1.5 transition-colors focus-within:border-ring">
@@ -868,13 +859,13 @@ export function BranchToolbarBranchSelector({
                     className="flex cursor-pointer items-center justify-between gap-3 border-t border-border/60 px-3 py-2 text-xs"
                   >
                     <span className="flex min-w-0 items-center gap-1.5 font-medium text-muted-foreground">
-                      <RefreshIcon aria-hidden="true" className="size-3 shrink-0 opacity-70" />
+                      <RefreshCwIcon aria-hidden="true" className="size-3 shrink-0 opacity-70" />
                       <span className="truncate">Start from origin</span>
                     </span>
                     <Switch
                       id={startFromOriginSwitchId}
                       checked={startFromOrigin}
-                      size="sm"
+                      className="[--thumb-size:--spacing(3.5)]"
                       aria-label="Start worktree from origin"
                       onCheckedChange={(checked) => onStartFromOriginChange(Boolean(checked))}
                     />
