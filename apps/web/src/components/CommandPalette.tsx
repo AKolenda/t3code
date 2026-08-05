@@ -110,7 +110,6 @@ import {
   resolveProjectPickerTarget,
   resolveWslProjectSelection,
 } from "../wslPaths";
-import { type Project } from "../types";
 import {
   ADDON_ICON_CLASS,
   browseInputEndPaddingClass,
