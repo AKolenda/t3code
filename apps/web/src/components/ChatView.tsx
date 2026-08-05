@@ -5069,6 +5069,7 @@ function ChatViewContent(props: ChatViewProps) {
 
   const onSend = async (
     e?: { preventDefault: () => void },
+    dispatchMode: ComposerDispatchMode = "auto",
     directAnnotation?: {
       annotation: PreviewAnnotationPayload;
       image: ComposerImageAttachment | null;
@@ -6210,7 +6211,7 @@ function ChatViewContent(props: ChatViewProps) {
           configuredUrls={configuredPreviewUrls}
           visible
           onSendAnnotation={(annotation, image) => {
-            void onSend(undefined, { annotation, image });
+            void onSend(undefined, "auto", { annotation, image });
           }}
         />
       </Suspense>
@@ -6376,7 +6377,14 @@ function ChatViewContent(props: ChatViewProps) {
     </div>
   );
   const panelLayoutControls = (
-    <div className="workspace-titlebar-controls z-50 gap-1 [-webkit-app-region:no-drag]">
+    <div
+      className={cn(
+        "workspace-titlebar-controls z-50 gap-1 [-webkit-app-region:no-drag]",
+        rightPanelOpen && !shouldUsePlanSidebarSheet
+          ? "right-2 wco:right-[var(--workspace-controls-right)]"
+          : "mr-px",
+      )}
+    >
       {rightPanelOpen && !shouldUsePlanSidebarSheet ? (
         <RightPanelMaximizeControl
           maximized={rightPanelMaximized}
