@@ -422,6 +422,7 @@ export const revokeEnvironmentLinkRecord = Effect.fn(
   readonly userId: string;
   readonly environmentId: string;
   readonly environmentPublicKey: string;
+  readonly linkUpdatedAt?: string;
 }) {
   const transactions = yield* RelayDb.RelayTransactions;
   const links = yield* EnvironmentLinks.EnvironmentLinks;
@@ -431,6 +432,7 @@ export const revokeEnvironmentLinkRecord = Effect.fn(
       const revoked = yield* links.revokeForUser({
         userId: input.userId,
         environmentId: input.environmentId,
+        ...(input.linkUpdatedAt === undefined ? {} : { expectedUpdatedAt: input.linkUpdatedAt }),
       });
       if (revoked) {
         yield* credentials.revokeForEnvironmentPublicKey({
@@ -447,10 +449,6 @@ export const unlinkEnvironmentRecord = Effect.fn("relay.api.client.unlinkEnviron
   function* (input: { readonly userId: string; readonly environmentId: string }) {
     const links = yield* EnvironmentLinks.EnvironmentLinks;
     const managedEndpointProvider = yield* ManagedEndpointProvider.ManagedEndpointProvider;
-    const deprovisionTarget = yield* managedEndpointProvider.prepareDeprovision({
-      userId: input.userId,
-      environmentId: input.environmentId,
-    });
     const link = yield* links.getForUser({
       userId: input.userId,
       environmentId: input.environmentId,
@@ -462,6 +460,19 @@ export const unlinkEnvironmentRecord = Effect.fn("relay.api.client.unlinkEnviron
         environmentId: input.environmentId,
         includeRevoked: true,
       }));
+    const deprovisionTarget = yield* managedEndpointProvider.prepareDeprovision({
+      userId: input.userId,
+      environmentId: input.environmentId,
+    });
+    if (
+      link === null &&
+      (yield* links.getForUser({
+        userId: input.userId,
+        environmentId: input.environmentId,
+      })) !== null
+    ) {
+      return false;
+    }
     const unlinked =
       link === null
         ? false
@@ -469,7 +480,14 @@ export const unlinkEnvironmentRecord = Effect.fn("relay.api.client.unlinkEnviron
             userId: input.userId,
             environmentId: link.environmentId,
             environmentPublicKey: link.environmentPublicKey,
+            linkUpdatedAt: link.updatedAt,
           });
+
+    // A generation mismatch means a relink replaced the row after our lookup.
+    // Its endpoint and connector belong to the newer link and must survive.
+    if (link !== null && !unlinked) {
+      return false;
+    }
 
     // External teardown cannot share the SQL transaction. Run it only after
     // revocation commits so a database failure leaves a fully usable active
@@ -659,6 +677,13 @@ export const clientApi = HttpApiBuilder.group(
             request: args.payload,
             preferredProvider: config.preferredManagedEndpointProvider,
           });
+          if (args.payload.managedTunnelsEnabled && managedEndpointProvider === null) {
+            return yield* new RelayEnvironmentLinkUnavailableError({
+              code: "environment_link_unavailable",
+              reason: "managed_endpoint_provider_unsupported",
+              traceId: yield* currentTraceId,
+            });
+          }
           const jti = yield* crypto.randomUUIDv4.pipe(
             Effect.catch(() => relayInternalErrorResponse("internal_error")),
           );
