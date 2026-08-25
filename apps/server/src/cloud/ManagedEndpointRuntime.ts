@@ -229,7 +229,6 @@ export const make = Effect.gen(function* () {
 
   const observeConnectorOutput = (connector: ActiveConnector) => {
     let rejectedRegistrations = 0;
-    let recoveryRequested = false;
 
     return connector.child.all.pipe(
       Stream.decodeText(),
@@ -251,11 +250,8 @@ export const make = Effect.gen(function* () {
           case "warning":
             if (isRejectedRelayClientTunnelOutput(line)) {
               rejectedRegistrations += 1;
-              if (
-                !recoveryRequested &&
-                rejectedRegistrations >= TUNNEL_AUTHORIZATION_FAILURES_BEFORE_RECOVERY
-              ) {
-                recoveryRequested = true;
+              if (rejectedRegistrations >= TUNNEL_AUTHORIZATION_FAILURES_BEFORE_RECOVERY) {
+                rejectedRegistrations = 0;
                 return Effect.logWarning(
                   "Relay client tunnel was rejected; requesting recovery",
                   attributes,
