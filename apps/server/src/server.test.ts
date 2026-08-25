@@ -1121,6 +1121,8 @@ const buildAppUnderTest = (options?: {
           CloudManagedEndpointRuntime.CloudManagedEndpointRuntime,
           CloudManagedEndpointRuntime.CloudManagedEndpointRuntime.of({
             applyConfig: () => Effect.succeed({ status: "disabled" }),
+            recoveryRequests: Stream.empty,
+            requestRecovery: () => Effect.void,
             ...options?.layers?.cloudManagedEndpointRuntime,
           }),
         ),
@@ -3233,6 +3235,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
   it.effect("unlinks local cloud state and disables the managed endpoint runtime", () =>
     Effect.gen(function* () {
       const appliedRuntimeConfigs: Array<unknown> = [];
+      const requestedRecoveryConfigs: Array<unknown> = [];
       yield* buildAppUnderTest({
         layers: {
           cloudManagedEndpointRuntime: {
@@ -3249,6 +3252,10 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                 ...(config.tunnelName ? { tunnelName: config.tunnelName } : {}),
               });
             },
+            requestRecovery: (config) =>
+              Effect.sync(() => {
+                requestedRecoveryConfigs.push(config);
+              }),
           },
         },
       });
@@ -3322,6 +3329,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
           tunnelName: "tunnel-name",
         },
         null,
+      ]);
+      assert.deepEqual(requestedRecoveryConfigs, [
+        {
+          providerKind: "cloudflare_tunnel",
+          connectorToken: "connector-token",
+          tunnelId: "tunnel-id",
+          tunnelName: "tunnel-name",
+        },
       ]);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
