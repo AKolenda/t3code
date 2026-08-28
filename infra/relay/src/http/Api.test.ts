@@ -198,6 +198,7 @@ function relayUnlinkTestLayer(input?: {
   readonly prepareDeprovision?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["prepareDeprovision"];
   readonly deprovision?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["deprovision"];
   readonly provision?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["provision"];
+  readonly reconcileOrigin?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["reconcileOrigin"];
   readonly release?: ManagedEndpointProvider.ManagedEndpointProvider["Service"]["release"];
 }) {
   return Layer.mergeAll(
@@ -231,6 +232,7 @@ function relayUnlinkTestLayer(input?: {
       ManagedEndpointProvider.ManagedEndpointProvider,
       ManagedEndpointProvider.ManagedEndpointProvider.of({
         provision: input?.provision ?? (() => Effect.die("unused provision")),
+        reconcileOrigin: input?.reconcileOrigin ?? (() => Effect.succeed("ready")),
         prepareDeprovision: input?.prepareDeprovision ?? (() => Effect.succeed(null)),
         deprovision: input?.deprovision ?? (() => Effect.succeed(true)),
         release: input?.release ?? (() => Effect.die("unused release")),
@@ -308,9 +310,52 @@ describe("relay managed tunnel recovery", () => {
           environmentId: "environment-1",
           environmentPublicKey: keyPair.publicKey,
           tunnelId: "existing-tunnel",
+          origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
         }),
       );
       expect(wrongAction).toMatchObject({ _tag: "Unauthorized" });
+    }).pipe(Effect.provideService(RelayConfiguration.RelayConfiguration, relaySettings)),
+  );
+
+  it.effect("rejects a signed registration proof for a different origin", () =>
+    Effect.gen(function* () {
+      const keyPair = NodeCrypto.generateKeyPairSync("ed25519", {
+        privateKeyEncoding: { format: "pem", type: "pkcs8" },
+        publicKeyEncoding: { format: "pem", type: "spki" },
+      });
+      const now = yield* DateTime.now;
+      const issuedAt = Math.floor(now.epochMilliseconds / 1_000);
+      const proof = yield* signRelayJwt({
+        privateKey: keyPair.privateKey,
+        typ: RELAY_MANAGED_TUNNEL_RECOVERY_TYP,
+        payload: {
+          iss: "t3-env:environment-1",
+          aud: "https://relay.example.test",
+          sub: "environment-1",
+          jti: "registration-origin-proof",
+          iat: issuedAt,
+          exp: issuedAt + 60,
+          action: "register",
+          environmentId: "environment-1",
+          cloudUserId: "user-1",
+          tunnelId: "existing-tunnel",
+          origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
+        },
+      });
+
+      const error = yield* Effect.flip(
+        verifyEnvironmentTunnelRecoveryProof({
+          action: "register",
+          proof,
+          userId: "user-1",
+          environmentId: "environment-1",
+          environmentPublicKey: keyPair.publicKey,
+          tunnelId: "existing-tunnel",
+          origin: { localHttpHost: "127.0.0.1", localHttpPort: 5432 },
+        }),
+      );
+
+      expect(error).toMatchObject({ _tag: "Unauthorized" });
     }).pipe(Effect.provideService(RelayConfiguration.RelayConfiguration, relaySettings)),
   );
 
@@ -320,6 +365,7 @@ describe("relay managed tunnel recovery", () => {
       readonly environmentId: string;
       readonly tunnelId: string;
       readonly environmentPublicKey: string;
+      readonly origin: { readonly localHttpHost: string; readonly localHttpPort: number };
     } | null = null;
 
     return Effect.gen(function* () {
@@ -329,13 +375,15 @@ describe("relay managed tunnel recovery", () => {
           environmentId: "environment-1",
           environmentPublicKey: "public-key",
           tunnelId: "existing-tunnel",
+          origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
         }),
-      ).toEqual({ ok: true });
+      ).toEqual({ status: "ready" });
       expect(recoveryEnabledFor).toEqual({
         userId: "user-1",
         environmentId: "environment-1",
         tunnelId: "existing-tunnel",
         environmentPublicKey: "public-key",
+        origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
       });
     }).pipe(
       Effect.provide(
@@ -356,6 +404,39 @@ describe("relay managed tunnel recovery", () => {
     );
   });
 
+  it.effect("requests recovery without enabling a stale tunnel", () => {
+    let recoveryEnabled = false;
+
+    return Effect.gen(function* () {
+      expect(
+        yield* registerEnvironmentTunnelRecovery({
+          userId: "user-1",
+          environmentId: "environment-1",
+          environmentPublicKey: "public-key",
+          tunnelId: "deleted-tunnel",
+          origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
+        }),
+      ).toEqual({ status: "recovery_required" });
+      expect(recoveryEnabled).toBe(false);
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          relayUnlinkTestLayer({
+            getForUser: () => Effect.succeed(linkedEnvironmentRecord),
+            reconcileOrigin: () => Effect.succeed("recovery_required"),
+          }),
+          Layer.mock(ManagedEndpointAllocations.ManagedEndpointAllocations)({
+            enableRecovery: () =>
+              Effect.sync(() => {
+                recoveryEnabled = true;
+                return true;
+              }),
+          }),
+        ),
+      ),
+    );
+  });
+
   it.effect("rejects recovery registration for a different environment key", () => {
     let recoveryEnabled = false;
 
@@ -366,6 +447,7 @@ describe("relay managed tunnel recovery", () => {
           environmentId: "environment-1",
           environmentPublicKey: "different-public-key",
           tunnelId: "existing-tunnel",
+          origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
         }),
       );
 
@@ -397,6 +479,7 @@ describe("relay managed tunnel recovery", () => {
           environmentId: "environment-1",
           environmentPublicKey: "public-key",
           tunnelId: "stale-tunnel",
+          origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
         }),
       );
 
@@ -445,6 +528,7 @@ describe("relay managed tunnel recovery", () => {
         environmentId: "environment-1",
         tunnelId: "replacement-tunnel",
         environmentPublicKey: "public-key",
+        origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
       });
     }).pipe(
       Effect.provide(
@@ -616,6 +700,7 @@ describe("relay managed tunnel recovery", () => {
       tunnelName: "environment-1-tunnel",
       dnsRecordId: "dns-1",
       readyAt: "2026-07-28T00:00:00.000Z",
+      origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
       updatedAt: "replacement-generation",
       generation: 3,
     } satisfies ManagedEndpointProvider.ManagedEndpointDeprovisionTarget;
@@ -708,6 +793,7 @@ describe("relay environment unlink", () => {
       tunnelName: "environment-1-tunnel",
       dnsRecordId: "dns-1",
       readyAt: "2026-07-28T00:00:00.000Z",
+      origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
       updatedAt: "generation-before-unlink",
       generation: 1,
     } satisfies ManagedEndpointProvider.ManagedEndpointDeprovisionTarget;
@@ -853,6 +939,7 @@ describe("relay environment unlink", () => {
       tunnelName: "environment-1-tunnel",
       dnsRecordId: "dns-1",
       readyAt: "2026-07-28T00:00:00.000Z",
+      origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
       updatedAt: "original-generation",
       generation: 1,
     } satisfies ManagedEndpointProvider.ManagedEndpointDeprovisionTarget;
