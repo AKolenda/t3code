@@ -489,6 +489,7 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
     threadManagement: Schema.Boolean,
     incrementalThreadRead: Schema.Boolean,
     scheduledTasks: Schema.Boolean,
+    queuedWork: Schema.optional(Schema.Boolean),
     maxBatchThreads: Schema.Number,
   }),
 });
