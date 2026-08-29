@@ -37,6 +37,11 @@ rename a thread, regenerate its title, or link and unlink a pull request. These 
 appear on web, desktop, and mobile without requiring the originating browser to remain
 open.
 
+Agents connected through T3 Code can organize threads too. They can pin, snooze,
+settle, archive, or change read state in the current project. T3 Code applies the
+same rules as the sidebar. For example, an agent cannot settle a thread while work
+or a user request is still pending.
+
 ## Settle finished work
 
 Choose **Settle thread** from its menu to move finished work out of the active list
