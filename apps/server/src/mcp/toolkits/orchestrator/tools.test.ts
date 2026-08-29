@@ -5,6 +5,8 @@ import {
   CreateThreadsTool,
   DelegateTaskTool,
   ScheduleTaskTool,
+  ThreadConfigurationTool,
+  ThreadConfigureTool,
   ThreadUpdateTool,
 } from "./tools.ts";
 
@@ -76,5 +78,29 @@ describe("orchestrator MCP tool guidance", () => {
       "clientRequestId",
     ]);
     assert.include(ThreadUpdateTool.description ?? "", "Workspace and branch changes");
+  });
+
+  it("publishes discoverable root objects for conversation configuration", () => {
+    const readSchema = Tool.getJsonSchema(ThreadConfigurationTool) as {
+      readonly type?: unknown;
+      readonly properties?: Readonly<Record<string, unknown>>;
+    };
+    const configureSchema = Tool.getJsonSchema(ThreadConfigureTool) as {
+      readonly type?: unknown;
+      readonly properties?: Readonly<Record<string, unknown>>;
+    };
+
+    assert.equal(readSchema.type, "object");
+    assert.hasAllKeys(readSchema.properties ?? {}, ["threadId"]);
+    assert.equal(configureSchema.type, "object");
+    assert.hasAllKeys(configureSchema.properties ?? {}, [
+      "threadId",
+      "providerInstanceId",
+      "model",
+      "options",
+      "runtimeMode",
+      "interactionMode",
+      "clientRequestId",
+    ]);
   });
 });
