@@ -6,6 +6,7 @@ import {
   DelegateTaskTool,
   ScheduleTaskTool,
   ThreadForkTool,
+  ThreadMergeBackTool,
   ThreadTransfersTool,
   ThreadUpdateTool,
 } from "./tools.ts";
@@ -90,6 +91,11 @@ describe("orchestrator MCP tool guidance", () => {
       readonly type?: unknown;
       readonly properties?: Readonly<Record<string, unknown>>;
     };
+    const mergeSchema = Tool.getJsonSchema(ThreadMergeBackTool) as {
+      readonly type?: unknown;
+      readonly properties?: Readonly<Record<string, unknown>>;
+      readonly required?: ReadonlyArray<string>;
+    };
 
     assert.equal(forkSchema.type, "object");
     assert.hasAllKeys(forkSchema.properties ?? {}, [
@@ -102,5 +108,14 @@ describe("orchestrator MCP tool guidance", () => {
     assert.include(forkSchema.required ?? [], "clientRequestId");
     assert.equal(transfersSchema.type, "object");
     assert.hasAllKeys(transfersSchema.properties ?? {}, ["threadId", "type", "limit"]);
+    assert.equal(mergeSchema.type, "object");
+    assert.hasAllKeys(mergeSchema.properties ?? {}, [
+      "sourceThreadId",
+      "targetThreadId",
+      "sourcePoint",
+      "clientRequestId",
+    ]);
+    assert.include(mergeSchema.required ?? [], "sourcePoint");
+    assert.include(mergeSchema.required ?? [], "clientRequestId");
   });
 });
