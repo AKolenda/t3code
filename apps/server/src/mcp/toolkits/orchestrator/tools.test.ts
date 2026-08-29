@@ -5,6 +5,7 @@ import {
   CreateThreadsTool,
   DelegateTaskTool,
   ScheduleTaskTool,
+  ThreadDeferOrganizationTool,
   ThreadUpdateTool,
 } from "./tools.ts";
 
@@ -59,6 +60,12 @@ describe("orchestrator MCP tool guidance", () => {
     assert.isAtLeast(schema.properties?.schedule?.anyOf?.length ?? 0, 2);
     assert.include(ScheduleTaskTool.description ?? "", "STRUCTURED OBJECT");
     assert.include(ScheduleTaskTool.description ?? "", "nextRunAt");
+  });
+
+  it("describes safe, calling-run-bound deferred organization", () => {
+    assert.include(ThreadDeferOrganizationTool.description ?? "", "THIS calling thread");
+    assert.include(ThreadDeferOrganizationTool.description ?? "", "current run");
+    assert.include(ThreadDeferOrganizationTool.description ?? "", "approval-blocked");
   });
 
   it("publishes thread metadata actions from an object-root schema", () => {
