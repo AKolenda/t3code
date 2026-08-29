@@ -5,6 +5,8 @@ import {
   CreateThreadsTool,
   DelegateTaskTool,
   ScheduleTaskTool,
+  ThreadForkTool,
+  ThreadTransfersTool,
   ThreadUpdateTool,
 } from "./tools.ts";
 
@@ -76,5 +78,29 @@ describe("orchestrator MCP tool guidance", () => {
       "clientRequestId",
     ]);
     assert.include(ThreadUpdateTool.description ?? "", "Workspace and branch changes");
+  });
+
+  it("publishes discoverable root-object schemas for conversation transfers", () => {
+    const forkSchema = Tool.getJsonSchema(ThreadForkTool) as {
+      readonly type?: unknown;
+      readonly properties?: Readonly<Record<string, unknown>>;
+      readonly required?: ReadonlyArray<string>;
+    };
+    const transfersSchema = Tool.getJsonSchema(ThreadTransfersTool) as {
+      readonly type?: unknown;
+      readonly properties?: Readonly<Record<string, unknown>>;
+    };
+
+    assert.equal(forkSchema.type, "object");
+    assert.hasAllKeys(forkSchema.properties ?? {}, [
+      "sourceThreadId",
+      "sourcePoint",
+      "title",
+      "clientRequestId",
+    ]);
+    assert.include(forkSchema.required ?? [], "sourcePoint");
+    assert.include(forkSchema.required ?? [], "clientRequestId");
+    assert.equal(transfersSchema.type, "object");
+    assert.hasAllKeys(transfersSchema.properties ?? {}, ["threadId", "type", "limit"]);
   });
 });
