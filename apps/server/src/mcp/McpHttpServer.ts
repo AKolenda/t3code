@@ -15,6 +15,7 @@ import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import * as PendingRequestMcpService from "./PendingRequestMcpService.ts";
 import { OrchestratorToolkitHandlersLive } from "./toolkits/orchestrator/handlers.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import {
@@ -26,6 +27,8 @@ import {
   PreviewSnapshotToolkit,
   PreviewStandardToolkit,
 } from "./toolkits/preview/tools.ts";
+import { PendingRequestToolkitHandlersLive } from "./toolkits/pendingRequest/handlers.ts";
+import { PendingRequestToolkit } from "./toolkits/pendingRequest/tools.ts";
 import { WorktreeToolkitHandlersLive } from "./toolkits/worktree/handlers.ts";
 import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
 import * as WorktreeMcpService from "./WorktreeMcpService.ts";
@@ -228,6 +231,11 @@ export const OrchestratorToolkitRegistrationLive = McpServer.toolkit(Orchestrato
   Layer.provide(ThreadMetadataMcpService.layer),
 );
 
+export const PendingRequestToolkitRegistrationLive = McpServer.toolkit(PendingRequestToolkit).pipe(
+  Layer.provide(PendingRequestToolkitHandlersLive),
+  Layer.provide(PendingRequestMcpService.layer),
+);
+
 export const WorktreeToolkitRegistrationLive = McpServer.toolkit(WorktreeToolkit).pipe(
   Layer.provide(WorktreeToolkitHandlersLive),
   Layer.provide(WorktreeMcpService.layer),
@@ -243,5 +251,6 @@ const McpTransportLive = McpServer.layerHttp({
 export const layer = Layer.mergeAll(
   PreviewToolkitRegistrationLive,
   OrchestratorToolkitRegistrationLive,
+  PendingRequestToolkitRegistrationLive,
   WorktreeToolkitRegistrationLive,
 ).pipe(Layer.provideMerge(McpTransportLive));
