@@ -2340,6 +2340,18 @@ describe("orchestrator MCP toolkit", () => {
               threadId: parentThreadId,
               interactionMode: "plan",
             });
+            yield* orchestrator.dispatch({
+              type: "thread.runtime-mode.set",
+              commandId: CommandId.make("command:mcp-merge:lower-target-runtime"),
+              threadId: promptedThread.threadId,
+              runtimeMode: "approval-required",
+            });
+            yield* orchestrator.dispatch({
+              type: "thread.interaction-mode.set",
+              commandId: CommandId.make("command:mcp-merge:lower-target-interaction"),
+              threadId: promptedThread.threadId,
+              interactionMode: "plan",
+            });
             const deniedMergeBackCall = yield* invoke("t3_thread_merge_back", {
               ...mergeBackInput,
               clientRequestId: "merge-fork-result-back-denied-ceiling",
@@ -2347,6 +2359,7 @@ describe("orchestrator MCP toolkit", () => {
             expect(deniedMergeBackCall.structuredContent).toMatchObject({
               _tag: "OrchestratorMcpFailure",
               code: "runtime_mode_escalation_denied",
+              message: expect.stringContaining("source thread"),
             });
             yield* orchestrator.dispatch({
               type: "thread.runtime-mode.set",
@@ -2377,6 +2390,19 @@ describe("orchestrator MCP toolkit", () => {
               })
               .pipe(Effect.flip);
             expect(deniedMergeAtMutation._tag).toBe("OrchestratorDispatchError");
+            expect(String(deniedMergeAtMutation.cause)).toContain("Merge-back source runtime mode");
+            yield* orchestrator.dispatch({
+              type: "thread.runtime-mode.set",
+              commandId: CommandId.make("command:mcp-merge:restore-target-runtime"),
+              threadId: promptedThread.threadId,
+              runtimeMode: "full-access",
+            });
+            yield* orchestrator.dispatch({
+              type: "thread.interaction-mode.set",
+              commandId: CommandId.make("command:mcp-merge:restore-target-interaction"),
+              threadId: promptedThread.threadId,
+              interactionMode: "default",
+            });
             const mergeBackCall = yield* invoke("t3_thread_merge_back", mergeBackInput);
             expect(mergeBackCall.isError).toBe(false);
             const mergeBack = yield* decodeConversationMergeBackResult(
@@ -2393,12 +2419,24 @@ describe("orchestrator MCP toolkit", () => {
             });
             expect(mergeBack.basePoint.runId).toBe(forked.canonicalSourcePoint.runId);
 
+            yield* orchestrator.dispatch({
+              type: "thread.runtime-mode.set",
+              commandId: CommandId.make("command:mcp-merge:lower-caller-after-acceptance"),
+              threadId: parentThreadId,
+              runtimeMode: "approval-required",
+            });
             const repeatedMergeBackCall = yield* invoke("t3_thread_merge_back", mergeBackInput);
             const repeatedMergeBack = yield* decodeConversationMergeBackResult(
               repeatedMergeBackCall.structuredContent,
             ).pipe(Effect.orDie);
             expect(repeatedMergeBack.transfer.id).toBe(mergeBack.transfer.id);
             expect(repeatedMergeBack.receipt).toEqual(mergeBack.receipt);
+            yield* orchestrator.dispatch({
+              type: "thread.runtime-mode.set",
+              commandId: CommandId.make("command:mcp-merge:restore-caller-after-acceptance"),
+              threadId: parentThreadId,
+              runtimeMode: "full-access",
+            });
 
             const replacementMergeCall = yield* invoke("t3_thread_merge_back", {
               ...mergeBackInput,
