@@ -1720,13 +1720,14 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
           worktreePath: `/tmp/${threadId}`,
         });
       }
+      const activeMessageId = MessageId.make("runtime-layer-queued-archived-target-active");
       yield* orchestrator.dispatch({
         type: "message.dispatch",
         createdBy: "user",
         creationSource: "web",
         commandId: CommandId.make("runtime-layer-queued-archived-target-active"),
         threadId: targetThreadId,
-        messageId: MessageId.make("runtime-layer-queued-archived-target-active"),
+        messageId: activeMessageId,
         text: "Keep the target active.",
         attachments: [],
         modelSelection,
@@ -1745,9 +1746,10 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
         modelSelection,
         dispatchMode: { type: "queue_after_active" },
       });
-      const queuedRun = (yield* orchestrator.getThreadProjection(targetThreadId)).runs.find(
-        (run) => run.userMessageId === queuedMessageId,
-      );
+      const beforeMutation = yield* orchestrator.getThreadProjection(targetThreadId);
+      const activeRun = beforeMutation.runs.find((run) => run.userMessageId === activeMessageId);
+      const queuedRun = beforeMutation.runs.find((run) => run.userMessageId === queuedMessageId);
+      assert.isDefined(activeRun);
       assert.isDefined(queuedRun);
       yield* orchestrator.dispatch({
         type: "thread.archive",
@@ -1771,17 +1773,19 @@ it.layer(TestLayer)("OrchestrationV2LayerLive lifecycle", (it) => {
         })
         .pipe(Effect.flip);
       assert.equal(editError._tag, "OrchestratorDispatchError");
+      assert.match(String(editError.cause), /Caller thread .* is not an active thread/);
       const promoteError = yield* orchestrator
         .dispatch({
           type: "queued-message.promote-to-steer",
           commandId: CommandId.make("runtime-layer-queued-archived-caller-promote"),
           threadId: targetThreadId,
           queuedRunId: queuedRun.id,
-          targetRunId: RunId.make("runtime-layer-queued-archived-target-active-run"),
+          targetRunId: activeRun.id,
           policyCeiling,
         })
         .pipe(Effect.flip);
       assert.equal(promoteError._tag, "OrchestratorDispatchError");
+      assert.match(String(promoteError.cause), /Caller thread .* is not an active thread/);
 
       const projection = yield* orchestrator.getThreadProjection(targetThreadId);
       assert.equal(
