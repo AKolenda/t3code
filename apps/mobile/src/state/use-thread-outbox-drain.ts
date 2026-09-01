@@ -1057,8 +1057,7 @@ export function useThreadOutboxDrain(): void {
             appAtomRegistry.get(environmentThreadShells.threadShellsAtom),
             nextQueuedMessage,
           );
-          const liveThreadBusy =
-            liveThread?.session?.status === "running" || liveThread?.session?.status === "starting";
+          const liveThreadBusy = threadRuntimeIsActive(liveThread?.runtime);
           const liveDeliveryAction = resolveThreadOutboxDeliveryAction({
             isCreation: creation !== undefined,
             threadExists: liveThread !== undefined,
