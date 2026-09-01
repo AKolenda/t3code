@@ -18,6 +18,7 @@ import {
 import * as Schema from "effect/Schema";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
+import type * as Option from "effect/Option";
 
 import type { ProjectionRepositoryError } from "../Errors.ts";
 
@@ -44,6 +45,13 @@ export const ListProjectionApprovalLifecycleInput = Schema.Struct({
   requestId: ApprovalRequestId,
 });
 export type ListProjectionApprovalLifecycleInput = typeof ListProjectionApprovalLifecycleInput.Type;
+
+export const GetLatestProjectionThreadTaskActivityInput = Schema.Struct({
+  threadId: ThreadId,
+  taskId: Schema.String,
+});
+export type GetLatestProjectionThreadTaskActivityInput =
+  typeof GetLatestProjectionThreadTaskActivityInput.Type;
 
 export const DeleteProjectionThreadActivitiesInput = Schema.Struct({
   threadId: ThreadId,
@@ -92,6 +100,13 @@ export interface ProjectionThreadActivityRepositoryShape {
   readonly listApprovalLifecycleByRequestId: (
     input: ListProjectionApprovalLifecycleInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
+
+  /**
+   * Read the latest persisted task-start or task-progress activity for a task.
+   */
+  readonly getLatestTaskActivity: (
+    input: GetLatestProjectionThreadTaskActivityInput,
+  ) => Effect.Effect<Option.Option<ProjectionThreadActivity>, ProjectionRepositoryError>;
 
   /**
    * Delete projected thread activity rows by thread.
