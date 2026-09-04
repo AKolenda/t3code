@@ -21,9 +21,9 @@ import {
 import * as ServiceLauncherClient from "../cloud/serviceLauncherClient.ts";
 import {
   makePersistedServerRuntimeState,
-  persistServerRuntimeState,
   type PersistedServerRuntimeState,
 } from "../serverRuntimeState.ts";
+import { persistServerRuntimeState } from "../serverOwnership.ts";
 import {
   DevServerNotProxiableError,
   resolveDirectPairingBaseUrl,

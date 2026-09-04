@@ -16,6 +16,7 @@ import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawne
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as BootService from "./bootService.ts";
+import { acquireServerOwnership } from "../serverOwnership.ts";
 import { pinnedRuntimePaths } from "./pinnedRuntime.ts";
 import {
   parseServiceState,
@@ -207,10 +208,71 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       ),
     );
   const service = yield* makeService();
-  return { service, makeService, fs, statePath, commands, timeouts, control, runtime };
+  return { service, makeService, fs, baseDir, statePath, commands, timeouts, control, runtime };
 });
 
 it.layer(NodeServices.layer)("boot service install", (it) => {
+  it.effect("requires an explicit SSH shutdown before installing the service", () =>
+    Effect.gen(function* () {
+      const { service, fs, baseDir, commands } = yield* makeHarness();
+      const path = yield* Path.Path;
+      const runtimePath = path.join(baseDir, "userdata", "server-runtime.json");
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const sshOwner = yield* acquireServerOwnership(runtimePath);
+          yield* sshOwner.publish({
+            version: 1,
+            pid: process.pid,
+            port: 3773,
+            origin: "http://127.0.0.1:3773",
+            startedAt: "2026-09-04T00:00:00.000Z",
+          });
+          const before = yield* fs.readFileString(runtimePath);
+          const error = yield* service.install().pipe(Effect.flip);
+          expect(error._tag).toBe("ServerAlreadyRunningError");
+          expect(error.message).toContain("Finish active agent work");
+          expect(commands).toEqual([]);
+          expect(yield* fs.readFileString(runtimePath)).toBe(before);
+        }),
+      );
+      yield* service.install();
+      expect(commands).toContain("systemctl --user restart t3code.service");
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const managedOwner = yield* acquireServerOwnership(runtimePath);
+          yield* managedOwner.publish({
+            version: 1,
+            pid: process.pid,
+            port: 45731,
+            origin: "http://127.0.0.1:45731",
+            startedAt: "2026-09-04T01:00:00.000Z",
+          });
+          expect(yield* fs.readFileString(runtimePath)).toContain("45731");
+        }),
+      );
+    }),
+  );
+
+  it.effect("does not activate an installed unit while an unmanaged owner remains", () =>
+    Effect.gen(function* () {
+      const { service, fs, baseDir, commands, statePath } = yield* makeHarness();
+      yield* service.install();
+      commands.length = 0;
+      const before = yield* fs.readFileString(statePath);
+      const path = yield* Path.Path;
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          yield* acquireServerOwnership(path.join(baseDir, "userdata", "server-runtime.json"));
+          const error = yield* service.install().pipe(Effect.flip);
+          expect(error._tag).toBe("ServerAlreadyRunningError");
+          expect(commands).toContain("systemctl --user stop t3code.service");
+          expect(commands).not.toContain("systemctl --user restart t3code.service");
+          expect(yield* fs.readFileString(statePath)).toBe(before);
+        }),
+      );
+    }),
+  );
+
   it.effect(
     "fails before installing files or validating a runtime when lingering needs an administrator",
     () =>

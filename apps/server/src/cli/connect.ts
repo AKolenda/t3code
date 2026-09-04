@@ -48,6 +48,7 @@ import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ExternalLauncher from "../process/externalLauncher.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
+import { requireServerStopped } from "../serverOwnership.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 import { resolveCliCommand } from "./invocation.ts";
 import {
@@ -689,6 +690,18 @@ export const connectCommand = Command.make("connect", {
         // authorization code for a different account) is visible before the
         // machine is brought online.
         yield* Console.log(`✓ Authorized${connectedAs(linked.identity)}`);
+
+        const config = yield* ServerConfig.ServerConfig;
+        const stopped = yield* requireServerStopped(config.serverRuntimeStatePath).pipe(
+          Effect.as(true),
+          Effect.catch((error) => Console.warn(error.message).pipe(Effect.as(false))),
+        );
+        if (!stopped) {
+          yield* Console.log(
+            "Authorization is saved. The existing server is unchanged. Restart it after active work finishes to apply T3 Connect setup.",
+          );
+          return;
+        }
 
         // Authorization is stored. If service setup fails, preserve it and
         // show how to run the server manually.
