@@ -319,21 +319,23 @@ it("does not let old process cleanup delete a newer owner's record", async () =>
   }
 });
 
-it.effect("refuses a live legacy owner and replaces stale ownership despite PID reuse", () =>
+it.live("refuses a live legacy owner and replaces stale ownership despite PID reuse", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ownership-test-" });
     const statePath = NodePath.join(root, "server-runtime.json");
-    const state = {
-      version: 1 as const,
-      pid: process.pid,
+    const state = yield* ServerRuntimeState.makePersistedServerRuntimeState({
+      config: { host: "127.0.0.1", devUrl: undefined },
       port: 4971,
-      origin: "http://127.0.0.1:4971",
-      startedAt: "2026-09-04T00:00:00.000Z",
-    };
+    });
     yield* fs.writeFileString(statePath, encodeRuntimeState(state));
     const error = yield* Effect.scoped(acquireServerOwnership(statePath)).pipe(Effect.flip);
     assert.equal(error._tag, "ServerAlreadyRunningError");
+    yield* fs.writeFileString(
+      statePath,
+      encodeRuntimeState({ ...state, startedAt: "1970-01-01T00:00:00.000Z" }),
+    );
+    yield* Effect.scoped(acquireServerOwnership(statePath));
     yield* fs.writeFileString(
       statePath,
       encodeRuntimeState({

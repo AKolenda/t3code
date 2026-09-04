@@ -1,5 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - Publication must finish synchronously while the scope holds ownership.
 import * as NodeCrypto from "node:crypto";
+import * as NodeChildProcess from "node:child_process";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
@@ -42,6 +44,41 @@ export class ServerOwnershipReleasedError extends Schema.TaggedErrorClass<Server
 }
 
 const encodeRuntimeState = Schema.encodeSync(Schema.fromJsonString(PersistedServerRuntimeState));
+
+/** Treat a legacy record as stale only when process start time proves PID reuse. */
+const legacyOwnerIsLive = Effect.fn("legacyOwnerIsLive")(function* (
+  state: PersistedServerRuntimeState,
+) {
+  if (!isProcessAlive(state.pid)) return false;
+  const recordedAt = Date.parse(state.startedAt);
+  if (!Number.isFinite(recordedAt)) return true;
+  const platform = yield* HostProcessPlatform;
+  const windows = platform === "win32";
+  const startedAt = yield* Effect.promise(
+    () =>
+      new Promise<number | undefined>((resolve) => {
+        NodeChildProcess.execFile(
+          windows ? "powershell.exe" : "ps",
+          windows
+            ? [
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                `(Get-Process -Id ${state.pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`,
+              ]
+            : ["-p", String(state.pid), "-o", "lstart="],
+          { env: { ...process.env, LC_ALL: "C", TZ: "UTC" }, timeout: 2_000, maxBuffer: 16_384 },
+          (error, stdout) => {
+            const time = Date.parse(windows ? stdout.trim() : `${stdout.trim()} UTC`);
+            resolve(error || !Number.isFinite(time) ? undefined : time);
+          },
+        );
+      }),
+  );
+  // ps reports whole seconds. Unknown identity stays conservative, and no
+  // process is ever signalled based on this comparison.
+  return startedAt === undefined || startedAt <= recordedAt + 1_000;
+});
 
 /**
  * Hold an OS file lock until the server and its finalizers stop. This separate
@@ -92,12 +129,13 @@ export const acquireServerOwnership = Effect.fn("acquireServerOwnership")(functi
   );
 
   // Older releases have no lock. Do not replace their record while their PID
-  // exists. New records with a free lock belong to a crashed or stopped owner.
+  // still identifies that process. New records with a free lock belong to a
+  // crashed or stopped owner.
   const previous = yield* readPersistedServerRuntimeState(resource.path);
   if (
     Option.isSome(previous) &&
     previous.value.ownerId === undefined &&
-    isProcessAlive(previous.value.pid)
+    (yield* legacyOwnerIsLive(previous.value))
   ) {
     return yield* new ServerAlreadyRunningError({ stateDir: resource.lock.stateDir });
   }

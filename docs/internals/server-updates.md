@@ -22,9 +22,11 @@ an OS lock through shutdown. Never delete or replace `server-owner.sqlite`,
 including during rollback. Replacing the file would let another server lock a
 different file while the first still runs. A crash releases the lock automatically.
 
-Older releases do not honor this lock. A known live legacy runtime record blocks
-takeover. PID existence never authorizes a stop. Service setup requires an
-explicit stop of unmanaged servers rather than terminating active agent work.
+Older releases do not honor this lock. A legacy record with a live PID blocks
+startup unless its process start time proves PID reuse. An unknown start time
+keeps the refusal in place. PID existence never authorizes a stop. Service setup
+requires an explicit stop of unmanaged servers rather than terminating active
+agent work.
 
 ## Commit boundary
 
