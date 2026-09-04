@@ -315,6 +315,7 @@ const LIVE_ACTIVITY_ROW_ID = "live-activity-row";
 interface AgentSpawnSummary {
   count: number;
   working: number;
+  idle: number;
   failed: number;
   stopped: number;
 }
@@ -339,7 +340,7 @@ function deriveAgentSpawnSummaries(entries: ReadonlyArray<TimelineEntry>) {
           : `run:${item.runId}`;
     let summary = groups.get(key);
     if (!summary) {
-      summary = { count: 0, working: 0, failed: 0, stopped: 0 };
+      summary = { count: 0, working: 0, idle: 0, failed: 0, stopped: 0 };
       groups.set(key, summary);
       byItemId.set(item.id, summary);
     } else {
@@ -348,6 +349,8 @@ function deriveAgentSpawnSummaries(entries: ReadonlyArray<TimelineEntry>) {
     summary.count += 1;
     if (item.status === "pending" || item.status === "running" || item.status === "waiting") {
       summary.working += 1;
+    } else if (item.status === "idle") {
+      summary.idle += 1;
     } else if (item.status === "failed") {
       summary.failed += 1;
     } else if (item.status === "cancelled" || item.status === "interrupted") {
@@ -1561,6 +1564,7 @@ function isRowUnchanged(a: MessagesTimelineRow, b: MessagesTimelineRow): boolean
         a.createdAt === bs.createdAt &&
         a.count === bs.count &&
         a.working === bs.working &&
+        a.idle === bs.idle &&
         a.failed === bs.failed &&
         a.stopped === bs.stopped
       );
