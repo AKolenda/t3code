@@ -824,6 +824,39 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
     }),
   );
 
+  it.effect("skips stale project discovery without deleting the record", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-project-stale-test-" });
+      const config = yield* makeCliTestServerConfig(baseDir);
+      let requests = 0;
+      const server = yield* Effect.acquireRelease(
+        Effect.callback<NodeHttp.Server>((resume) => {
+          const server = NodeHttp.createServer((_request, response) => {
+            requests += 1;
+            response.writeHead(503);
+            response.end();
+          });
+          server.listen(0, "127.0.0.1", () => resume(Effect.succeed(server)));
+        }),
+        (server) => Effect.sync(() => server.close()),
+      );
+      const address = server.address();
+      if (!address || typeof address === "string") return yield* Effect.die("Expected TCP address");
+      yield* persistServerRuntimeState({
+        path: config.serverRuntimeStatePath,
+        state: {
+          ...(yield* makePersistedServerRuntimeState({ config, port: address.port })),
+          pid: 2147483647,
+        },
+      });
+      const before = yield* fs.readFileString(config.serverRuntimeStatePath);
+      yield* runCliWithRuntime(["project", "add", baseDir, "--base-dir", baseDir]);
+      assert.equal(requests, 0);
+      assert.equal(yield* fs.readFileString(config.serverRuntimeStatePath), before);
+    }),
+  );
+
   it.effect("keeps a replacement runtime record when a project CLI request fails", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

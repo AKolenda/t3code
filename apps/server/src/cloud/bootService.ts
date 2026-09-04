@@ -776,6 +776,8 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
 
     // Stopping a managed unit does not stop an SSH or foreground server.
     // Check again after preparation and before changing service configuration.
+    // Keep this outside restart recovery. An older installed runtime may not
+    // honor the lock, so restarting it could duplicate the unmanaged owner.
     yield* requireServerStopped(runtimeStatePath).pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
     );
