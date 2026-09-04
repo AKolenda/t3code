@@ -1163,7 +1163,14 @@ function OpenCommandPaletteDialog(props: {
         projectTitleById,
         sortOrder: clientSettings.sidebarThreadSortOrder,
         icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
-        renderLeadingContent: (thread) => <ThreadRowLeadingStatus thread={thread} />,
+        renderLeadingContent: (thread) => (
+          <ThreadRowLeadingStatus
+            thread={thread}
+            snapshot={changeRequestSnapshotByKey.get(
+              scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+            )}
+          />
+        ),
         renderTrailingContent: (thread) => <ThreadRowTrailingStatus thread={thread} />,
         renderDescription: (thread, { projectTitle }) => {
           const modelInstanceId =
@@ -1215,6 +1222,7 @@ function OpenCommandPaletteDialog(props: {
       }),
     [
       activeThreadId,
+      changeRequestSnapshotByKey,
       clientSettings.sidebarThreadSortOrder,
       navigate,
       projectCwdById,
