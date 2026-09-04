@@ -19,7 +19,7 @@ export class ServerAlreadyRunningError extends Schema.TaggedErrorClass<ServerAlr
   { stateDir: Schema.String },
 ) {
   override get message(): string {
-    return `A T3 Code server already owns ${this.stateDir}. Finish active agent work, stop that server through the app or terminal that started it, then run \`t3 service install\` with the same home directory. No server was stopped.`;
+    return `A T3 Code server already owns ${this.stateDir}. Finish active agent work, stop that server through the app or terminal that started it, then retry this command with the same home directory. No server was stopped.`;
   }
 }
 
@@ -29,6 +29,15 @@ export class ServerOwnershipError extends Schema.TaggedErrorClass<ServerOwnershi
 ) {
   override get message(): string {
     return `Could not acquire or update server ownership at ${this.statePath}.`;
+  }
+}
+
+export class ServerOwnershipReleasedError extends Schema.TaggedErrorClass<ServerOwnershipReleasedError>()(
+  "ServerOwnershipReleasedError",
+  { statePath: Schema.String },
+) {
+  override get message(): string {
+    return `Cannot publish server runtime state after ownership was released at ${this.statePath}.`;
   }
 }
 
@@ -95,20 +104,26 @@ export const acquireServerOwnership = Effect.fn("acquireServerOwnership")(functi
 
   return {
     publish: (state: PersistedServerRuntimeState) =>
-      Effect.try({
-        try: () => {
-          if (!resource.active) throw new Error("Server ownership has been released.");
-          const temporaryPath = `${resource.path}.${ownerId}.tmp`;
-          try {
-            NodeFS.writeFileSync(temporaryPath, `${encodeRuntimeState({ ...state, ownerId })}\n`, {
-              mode: 0o600,
-            });
-            NodeFS.renameSync(temporaryPath, resource.path);
-          } finally {
-            NodeFS.rmSync(temporaryPath, { force: true });
-          }
-        },
-        catch: (cause) => new ServerOwnershipError({ statePath, cause }),
+      Effect.suspend<void, ServerOwnershipError | ServerOwnershipReleasedError, never>(() => {
+        if (!resource.active) return Effect.fail(new ServerOwnershipReleasedError({ statePath }));
+        return Effect.try({
+          try: () => {
+            const temporaryPath = `${resource.path}.${ownerId}.tmp`;
+            try {
+              NodeFS.writeFileSync(
+                temporaryPath,
+                `${encodeRuntimeState({ ...state, ownerId })}\n`,
+                {
+                  mode: 0o600,
+                },
+              );
+              NodeFS.renameSync(temporaryPath, resource.path);
+            } finally {
+              NodeFS.rmSync(temporaryPath, { force: true });
+            }
+          },
+          catch: (cause) => new ServerOwnershipError({ statePath, cause }),
+        });
       }),
   };
 });

@@ -364,16 +364,21 @@ it.effect("rejects publication after ownership has been released", () =>
     const fs = yield* FileSystem.FileSystem;
     const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-old-owner-test-" });
     const statePath = NodePath.join(root, "server-runtime.json");
-    const old = yield* Effect.scoped(acquireServerOwnership(statePath));
-    const current = yield* acquireServerOwnership(statePath);
     const state = yield* ServerRuntimeState.makePersistedServerRuntimeState({
       config: { host: "127.0.0.1", devUrl: undefined },
       port: 45731,
     });
+    const stalePublish = yield* Effect.scoped(
+      Effect.gen(function* () {
+        const old = yield* acquireServerOwnership(statePath);
+        return old.publish({ ...state, port: 3773 });
+      }),
+    );
+    const current = yield* acquireServerOwnership(statePath);
     yield* current.publish(state);
     const before = yield* fs.readFileString(statePath);
-    const failure = yield* old.publish({ ...state, port: 3773 }).pipe(Effect.flip);
-    assert.equal(failure._tag, "ServerOwnershipError");
+    const failure = yield* stalePublish.pipe(Effect.flip);
+    assert.equal(failure._tag, "ServerOwnershipReleasedError");
     assert.equal(yield* fs.readFileString(statePath), before);
   }).pipe(Effect.provide(NodeServices.layer)),
 );
