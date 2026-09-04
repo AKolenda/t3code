@@ -710,6 +710,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     if (!installed)
       yield* requireServerStopped(runtimeStatePath).pipe(
         Effect.provideService(FileSystem.FileSystem, fs),
+        Effect.provideService(ProcessRunner.ProcessRunner, runner),
       );
 
     // A permissions failure must not leave a partial install or stop a working server.
@@ -780,6 +781,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     // honor the lock, so restarting it could duplicate the unmanaged owner.
     yield* requireServerStopped(runtimeStatePath).pipe(
       Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.provideService(ProcessRunner.ProcessRunner, runner),
     );
 
     yield* Effect.gen(function* () {

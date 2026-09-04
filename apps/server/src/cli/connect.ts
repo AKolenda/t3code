@@ -49,6 +49,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ExternalLauncher from "../process/externalLauncher.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { requireServerStopped } from "../serverOwnership.ts";
+import * as ProcessRunner from "../processRunner.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 import { resolveCliCommand } from "./invocation.ts";
 import {
@@ -431,6 +432,7 @@ const runCloudCommand = Effect.fn("cloud.cli.run_cloud_command")(function* <A, E
     | FileSystem.FileSystem
     | HttpClient.HttpClient
     | Prompt.Environment
+    | ProcessRunner.ProcessRunner
     | ServerConfig.ServerConfig
     | ServerEnvironment.ServerEnvironmentIdentity
   >,
@@ -450,6 +452,7 @@ const runCloudCommand = Effect.fn("cloud.cli.run_cloud_command")(function* <A, E
     RelayClient.layerCloudflared({ baseDir: config.baseDir }),
     EnvironmentAuth.runtimeLayer,
     bootServiceLayer(config),
+    ProcessRunner.layer,
     headlessRelayClientTracingLayer,
   ).pipe(
     Layer.provideMerge(FetchHttpClient.layer),

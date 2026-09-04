@@ -1,6 +1,8 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as ProcessRunner from "./processRunner.ts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
@@ -13,6 +15,8 @@ import {
   SERVICE_LAUNCHER_PROTOCOL,
   SERVICE_STOP_MARKER_FILE,
 } from "./cloud/serviceProtocol.ts";
+
+const TestPlatformLayer = ProcessRunner.layer.pipe(Layer.provideMerge(NodeServices.layer));
 
 it("accepts only exact semantic versions", () => {
   for (const version of ["0.0.0", "1.2.3", "1.2.3-alpha.1", "1.2.3-0", "1.2.3+001"]) {
@@ -76,7 +80,7 @@ it("rejects contradictory service state", () => {
   );
 });
 
-it.layer(NodeServices.layer)("service state persistence", (it) => {
+it.layer(TestPlatformLayer)("service state persistence", (it) => {
   it.effect("durably replaces and strictly reads one state document", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

@@ -24,6 +24,8 @@ import {
   serviceStateHasPendingUpdate,
 } from "./serviceProtocol.ts";
 
+const TestPlatformLayer = ProcessRunner.layer.pipe(Layer.provideMerge(NodeServices.layer));
+
 it("keeps systemd pinned to the stable launcher rather than a versioned server", () => {
   const unit = BootService.renderBootServiceUnit({
     nodePath: "/usr/bin/node",
@@ -211,7 +213,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
   return { service, makeService, fs, baseDir, statePath, commands, timeouts, control, runtime };
 });
 
-it.layer(NodeServices.layer)("boot service install", (it) => {
+it.layer(TestPlatformLayer)("boot service install", (it) => {
   it.effect("requires an explicit SSH shutdown before installing the service", () =>
     Effect.gen(function* () {
       const { service, fs, baseDir, commands } = yield* makeHarness();
@@ -353,7 +355,10 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
 
   it.effect.each([
     { command: "systemctl --user show-environment", problem: "user-manager-unavailable" },
-    { command: "loginctl show-user 501 --property=Linger --value", problem: "linger-unavailable" },
+    {
+      command: "loginctl show-user 501 --property=Linger --value",
+      problem: "linger-unavailable",
+    },
   ])("reports failed prerequisite probes without installing: $command", ({ command, problem }) =>
     Effect.gen(function* () {
       const { service, fs, statePath, control } = yield* makeHarness();

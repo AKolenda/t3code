@@ -6,7 +6,7 @@ import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeEvents from "node:events";
 import * as NodeUtil from "node:util";
-import { assert, describe, it } from "@effect/vitest";
+import { assert, describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NetService from "@t3tools/shared/Net";
 import * as Duration from "effect/Duration";
@@ -549,6 +549,85 @@ itOnPosix.for(["missing", "mismatch", "matching"] as const)(
       }
     } finally {
       child.kill("SIGTERM");
+      await exited;
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  },
+);
+
+itOnPosix.for(["reused", "missing", "matching"] as const)(
+  "checks saved PID identity before blocking SSH reconnect: %s",
+  async (identity) => {
+    const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-ssh-reuse-test-"));
+    const stateDir = NodePath.join(home, ".t3", "ssh-launch", "test");
+    const marker = NodePath.join(home, "launched-pid");
+    const entry = NodePath.join(home, "server.mjs");
+    const unrelated = NodeChildProcess.spawn(process.execPath, ["-e", "process.stdin.resume()"], {
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    const exited = NodeEvents.EventEmitter.once(unrelated, "exit");
+    const reservation = NodeHttp.createServer();
+    reservation.listen(0, "127.0.0.1");
+    await NodeEvents.EventEmitter.once(reservation, "listening");
+    const address = reservation.address();
+    if (!address || typeof address === "string") throw new Error("Expected TCP address");
+    await new Promise<void>((resolve) => reservation.close(() => resolve()));
+    try {
+      await NodeFSP.mkdir(stateDir, { recursive: true });
+      await NodeFSP.writeFile(NodePath.join(stateDir, "pid"), String(unrelated.pid));
+      await NodeFSP.writeFile(NodePath.join(stateDir, "port"), String(address.port));
+      await NodeFSP.writeFile(NodePath.join(stateDir, "managed"), "managed");
+      if (identity !== "missing") {
+        const actual = await NodeUtil.promisify(NodeChildProcess.execFile)(
+          "ps",
+          ["-p", String(unrelated.pid), "-o", "lstart="],
+          { env: { ...process.env, LC_ALL: "C" } },
+        );
+        await NodeFSP.writeFile(
+          NodePath.join(stateDir, "started-at"),
+          identity === "matching" ? actual.stdout : "old process start time",
+        );
+      }
+      await NodeFSP.writeFile(
+        entry,
+        `
+import * as http from "node:http";
+import * as fs from "node:fs";
+fs.writeFileSync(${JSON.stringify(marker)}, String(process.pid));
+const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
+const server = http.createServer((_request, response) => {
+  response.end("ready");
+  server.close();
+});
+server.listen(port, "127.0.0.1");
+`,
+      );
+      const run = NodeUtil.promisify(NodeChildProcess.execFile)(
+        "sh",
+        ["-c", buildRemoteLaunchScript({ nodeScriptPath: entry }), "sh", "test"],
+        { env: { ...process.env, HOME: home } },
+      );
+      if (identity === "matching") {
+        await expect(run).rejects.toThrow("still running but is not ready");
+        await expect(NodeFSP.readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+      } else {
+        const result = await run;
+        assert.equal(JSON.parse(result.stdout).serverKind, "managed");
+        assert.notEqual(Number(await NodeFSP.readFile(marker, "utf8")), unrelated.pid);
+      }
+      assert.equal(unrelated.exitCode, null);
+      assert.equal(unrelated.signalCode, null);
+    } finally {
+      const pid = await NodeFSP.readFile(marker, "utf8").catch(() => undefined);
+      if (pid !== undefined) {
+        // This PID was captured by the fixture at spawn, not found by a process scan.
+        try {
+          process.kill(Number(pid), "SIGTERM");
+        } catch {
+          /* The one-request fixture already exited. */
+        }
+      }
+      unrelated.kill("SIGTERM");
       await exited;
       await NodeFSP.rm(home, { recursive: true, force: true });
     }

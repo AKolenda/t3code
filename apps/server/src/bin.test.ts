@@ -7,6 +7,7 @@ import * as NodeChildProcess from "node:child_process";
 
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as ProcessRunner from "./processRunner.ts";
 import {
   CommandId,
   EnvironmentOrchestrationHttpApi,
@@ -404,7 +405,9 @@ const withLiveProjectCliServer = <A, E, R>(baseDir: string, run: () => Effect.Ef
     );
   });
 
-it.layer(NodeServices.layer)("bin cli parsing", (it) => {
+const TestPlatformLayer = ProcessRunner.layer.pipe(Layer.provideMerge(NodeServices.layer));
+
+it.layer(TestPlatformLayer)("bin cli parsing", (it) => {
   it.effect("accepts the built-in lowercase log-level flag values", () =>
     Effect.gen(function* () {
       const { output } = yield* captureStdout(runCli(["--log-level", "debug", "--version"]));

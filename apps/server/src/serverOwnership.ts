@@ -1,13 +1,14 @@
 // @effect-diagnostics nodeBuiltinImport:off - Publication must finish synchronously while the scope holds ownership.
 import * as NodeCrypto from "node:crypto";
-import * as NodeChildProcess from "node:child_process";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 import * as Effect from "effect/Effect";
+import * as Duration from "effect/Duration";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
+import * as ProcessRunner from "./processRunner.ts";
 import { acquireServerOwnershipLock } from "./serverOwnershipLock.ts";
 
 import {
@@ -54,30 +55,29 @@ const legacyOwnerIsLive = Effect.fn("legacyOwnerIsLive")(function* (
   if (!Number.isFinite(recordedAt)) return true;
   const platform = yield* HostProcessPlatform;
   const windows = platform === "win32";
-  const startedAt = yield* Effect.promise(
-    () =>
-      new Promise<number | undefined>((resolve) => {
-        NodeChildProcess.execFile(
-          windows ? "powershell.exe" : "ps",
-          windows
-            ? [
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                `(Get-Process -Id ${state.pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`,
-              ]
-            : ["-p", String(state.pid), "-o", "lstart="],
-          { env: { ...process.env, LC_ALL: "C", TZ: "UTC" }, timeout: 2_000, maxBuffer: 16_384 },
-          (error, stdout) => {
-            const time = Date.parse(windows ? stdout.trim() : `${stdout.trim()} UTC`);
-            resolve(error || !Number.isFinite(time) ? undefined : time);
-          },
-        );
-      }),
-  );
+  const runner = yield* ProcessRunner.ProcessRunner;
+  const result = yield* runner
+    .run({
+      command: windows ? "powershell.exe" : "ps",
+      args: windows
+        ? [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            `(Get-Process -Id ${state.pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`,
+          ]
+        : ["-p", String(state.pid), "-o", "lstart="],
+      env: { LC_ALL: "C", TZ: "UTC" },
+      timeout: Duration.seconds(2),
+      maxOutputBytes: 16_384,
+    })
+    .pipe(Effect.option);
+  if (Option.isNone(result) || result.value.code !== 0) return true;
+  const output = result.value.stdout.trim();
+  const startedAt = Date.parse(windows ? output : `${output} UTC`);
   // ps reports whole seconds. Unknown identity stays conservative, and no
   // process is ever signalled based on this comparison.
-  return startedAt === undefined || startedAt <= recordedAt + 1_000;
+  return !Number.isFinite(startedAt) || startedAt <= recordedAt + 1_000;
 });
 
 /**

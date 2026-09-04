@@ -53,7 +53,8 @@ Servers discovered through the current runtime record, and old cache entries
 without a start time, must survive a client disconnect. Reconnection prefers the
 current runtime record over the saved SSH port, then restores the forward before
 opening the application transport. This lets SSH follow a service takeover
-without stopping the service or launching another server.
+without stopping the service or launching another server. If a stale PID causes a
+new launch attempt, server startup still enforces state-directory ownership.
 
 Remote servers can outlive several client releases. Clients must use advertised
 capabilities and handle their absence, rather than assume their own version

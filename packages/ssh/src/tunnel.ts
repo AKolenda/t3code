@@ -555,8 +555,17 @@ if [ "$REMOTE_MANAGED" = "external" ]; then
   fi
 elif [ -n "$REMOTE_PID" ] && [ -n "$REMOTE_PORT" ] && kill -0 "$REMOTE_PID" 2>/dev/null; then
   if ! wait_ready "@@T3_REUSE_READY_TIMEOUT_MS@@"; then
-    printf 'The saved SSH server is still running but is not ready. Finish active work and stop it through its original launcher before reconnecting.\\n' >&2
-    exit 1
+    REMOTE_STARTED_AT="$(cat "$STARTED_FILE" 2>/dev/null || true)"
+    CURRENT_STARTED_AT="$(LC_ALL=C ps -p "$REMOTE_PID" -o lstart= 2>/dev/null || true)"
+    if [ -n "$REMOTE_STARTED_AT" ] && [ "$REMOTE_STARTED_AT" = "$CURRENT_STARTED_AT" ]; then
+      printf 'The saved SSH server is still running but is not ready. Finish active work and stop it through its original launcher before reconnecting.\\n' >&2
+      exit 1
+    fi
+    # A stale or unverified PID is only a hint. The new server's ownership
+    # check decides whether this state directory can accept another server.
+    REMOTE_PID=""
+    REMOTE_PORT=""
+    REMOTE_MANAGED=""
   fi
 else
   REMOTE_PID=""

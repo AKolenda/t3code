@@ -7,6 +7,7 @@ import * as NodeEvents from "node:events";
 import * as NodeURL from "node:url";
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as ProcessRunner from "./processRunner.ts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -18,6 +19,8 @@ import * as Schema from "effect/Schema";
 
 import * as ServerRuntimeState from "./serverRuntimeState.ts";
 import { acquireServerOwnership, persistServerRuntimeState } from "./serverOwnership.ts";
+
+const TestPlatformLayer = ProcessRunner.layer.pipe(Layer.provideMerge(NodeServices.layer));
 
 const encodeRuntimeState = Schema.encodeSync(
   Schema.fromJsonString(ServerRuntimeState.PersistedServerRuntimeState),
@@ -55,7 +58,7 @@ describe("serverRuntimeState", () => {
       const { ownerId, ...restoredState } = Option.getOrThrow(restored);
       assert.isString(ownerId);
       assert.deepEqual(restoredState, state);
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(TestPlatformLayer)),
   );
 
   it.effect("records the dev web URL when the server fronts a dev server", () =>
@@ -89,7 +92,7 @@ describe("serverRuntimeState", () => {
       );
 
       assert.isTrue(Option.isNone(restored));
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(TestPlatformLayer)),
   );
 
   it.effect("preserves malformed state decode failures", () => {
@@ -193,7 +196,7 @@ describe("serverRuntimeState", () => {
         assert.equal(error.statePath, statePath);
         assert.instanceOf(error.cause, Error);
       }
-    }).pipe(Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.provide(TestPlatformLayer)),
   );
 });
 
@@ -203,6 +206,9 @@ const ownerProcessSource = `
 import * as Effect from "effect/Effect";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { acquireServerOwnership } from "./src/serverOwnership.ts";
+import * as ProcessRunner from "./src/processRunner.ts";
+import * as Layer from "effect/Layer";
+const TestPlatformLayer = ProcessRunner.layer.pipe(Layer.provideMerge(NodeServices.layer));
 let stop;
 const stopped = new Promise(resolve => { stop = resolve; });
 process.on("message", message => {
@@ -214,7 +220,7 @@ process.on("message", message => {
       origin: "http://127.0.0.1:45731", startedAt: "2026-09-04T00:00:00.000Z" });
     process.send("acquired");
     yield* Effect.promise(() => stopped);
-  })).pipe(Effect.provide(NodeServices.layer))).then(
+  })).pipe(Effect.provide(TestPlatformLayer))).then(
     () => process.exit(0),
     error => { process.send(error._tag ?? error.message); process.exit(1); },
   );
@@ -358,7 +364,7 @@ it.live("refuses a live legacy owner and replaces stale ownership despite PID re
       }),
     );
     yield* Effect.scoped(acquireServerOwnership(statePath));
-  }).pipe(Effect.provide(NodeServices.layer)),
+  }).pipe(Effect.provide(TestPlatformLayer)),
 );
 
 it.effect("rejects publication after ownership has been released", () =>
@@ -382,5 +388,5 @@ it.effect("rejects publication after ownership has been released", () =>
     const failure = yield* stalePublish.pipe(Effect.flip);
     assert.equal(failure._tag, "ServerOwnershipReleasedError");
     assert.equal(yield* fs.readFileString(statePath), before);
-  }).pipe(Effect.provide(NodeServices.layer)),
+  }).pipe(Effect.provide(TestPlatformLayer)),
 );
