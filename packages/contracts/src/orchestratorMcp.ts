@@ -70,6 +70,12 @@ const OrchestratorMcpWellFormedClientRequestId = TrimmedNonEmptyString.check(
   ),
 );
 
+const OrchestratorMcpWellFormedScheduledTaskId = ScheduledTaskId.check(
+  Schema.makeFilter(
+    (value) => isWellFormedUnicode(value) || "Scheduled task id must contain well-formed Unicode.",
+  ),
+);
+
 /**
  * OpenCode 1.15 has been observed serializing nested MCP union objects as JSON
  * strings. Keep the structured object as the documented form while accepting
@@ -590,7 +596,7 @@ export type OrchestratorMcpDeleteScheduledTaskResult =
   typeof OrchestratorMcpDeleteScheduledTaskResult.Type;
 
 export const OrchestratorMcpRunScheduledTaskNowInput = Schema.Struct({
-  scheduledTaskId: ScheduledTaskId,
+  scheduledTaskId: OrchestratorMcpWellFormedScheduledTaskId,
   clientRequestId: OrchestratorMcpWellFormedClientRequestId.annotate({
     description:
       "Required stable idempotency key. Reuse it only when retrying this exact manual run.",
