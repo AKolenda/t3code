@@ -179,16 +179,6 @@ function AutocompleteEmpty({ className, ...props }: AutocompletePrimitive.Empty.
   );
 }
 
-function AutocompleteRow({ className, ...props }: AutocompletePrimitive.Row.Props) {
-  return (
-    <AutocompletePrimitive.Row className={className} data-slot="autocomplete-row" {...props} />
-  );
-}
-
-function AutocompleteValue({ ...props }: AutocompletePrimitive.Value.Props) {
-  return <AutocompletePrimitive.Value data-slot="autocomplete-value" {...props} />;
-}
-
 function AutocompleteList({ className, ...props }: AutocompletePrimitive.List.Props) {
   return (
     <ScrollArea scrollbarGutter scrollFade>
@@ -216,19 +206,6 @@ function AutocompleteClear({ className, ...props }: AutocompletePrimitive.Clear.
   );
 }
 
-function AutocompleteStatus({ className, ...props }: AutocompletePrimitive.Status.Props) {
-  return (
-    <AutocompletePrimitive.Status
-      className={cn(
-        "px-3 py-2 font-medium text-muted-foreground text-xs empty:m-0 empty:p-0",
-        className,
-      )}
-      data-slot="autocomplete-status"
-      {...props}
-    />
-  );
-}
-
 function AutocompleteCollection({ ...props }: AutocompletePrimitive.Collection.Props) {
   return <AutocompletePrimitive.Collection data-slot="autocomplete-collection" {...props} />;
 }
@@ -249,23 +226,15 @@ function AutocompleteTrigger({
   );
 }
 
-const useAutocompleteFilter = AutocompletePrimitive.useFilter;
-
 export {
   Autocomplete,
   AutocompleteInput,
-  AutocompleteTrigger,
   AutocompletePopup,
   AutocompleteItem,
   AutocompleteSeparator,
   AutocompleteGroup,
   AutocompleteGroupLabel,
   AutocompleteEmpty,
-  AutocompleteValue,
   AutocompleteList,
-  AutocompleteClear,
-  AutocompleteStatus,
-  AutocompleteRow,
   AutocompleteCollection,
-  useAutocompleteFilter,
 };
