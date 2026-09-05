@@ -679,7 +679,7 @@ export function PullRequestDetailPanel({
       )
     : null;
   const branchRefsQuery = useEnvironmentQuery(
-    detail === null
+    detail?.workspaceRoot == null
       ? null
       : vcsEnvironment.listRefs({
           environmentId,
@@ -765,6 +765,9 @@ export function PullRequestDetailPanel({
   const { environments } = useEnvironments();
   const projects = useProjects();
   const unavailableGitHubUrl = useMemo(() => {
+    if (reference.projectId === null) {
+      return `https://github.com/${reference.repository}/pull/${reference.number}`;
+    }
     const identity = projects.find(
       (project) => project.id === reference.projectId && project.environmentId === environmentId,
     )?.repositoryIdentity;
@@ -774,7 +777,7 @@ export function PullRequestDetailPanel({
   // the thread is already on one server's copy of the branch.
   const pickableEnvironments = useMemo(
     () =>
-      context === "page"
+      context === "page" && reference.projectId !== null
         ? resolvePickableEnvironments(
             { environmentId, projectId: reference.projectId },
             projects,
@@ -980,8 +983,10 @@ export function PullRequestDetailPanel({
       });
       return;
     }
+    const projectId = acting?.projectId ?? detail.projectId;
+    if (projectId === null) return;
     setHandoff(kind);
-    const projectRef = scopeProjectRef(actingEnvironmentId, acting?.projectId ?? detail.projectId);
+    const projectRef = scopeProjectRef(actingEnvironmentId, projectId);
     const opened = await openThreadWithTask(projectRef, task);
     setHandoff(null);
     if (opened === null) {
@@ -1025,6 +1030,8 @@ export function PullRequestDetailPanel({
       });
       return;
     }
+    const projectId = acting?.projectId ?? detail.projectId;
+    if (projectId === null) return;
     setHandoff(kind);
     // The menu closes on the press and takes its "Preparing..." label with it, so this is the
     // only thing answering for the checkout. It carries no timeout of its own: a loading toast
@@ -1035,7 +1042,7 @@ export function PullRequestDetailPanel({
     });
     // Wherever the reader chose to act: the thread, the checkout it is pointed at and the composer
     // the task lands in are all one server's, and picking another one moves all three.
-    const projectRef = scopeProjectRef(actingEnvironmentId, acting?.projectId ?? detail.projectId);
+    const projectRef = scopeProjectRef(actingEnvironmentId, projectId);
     // The thread is opened before the checkout rather than after it, because the project's setup
     // script only runs for a checkout that knows which thread it is for — and a worktree with no
     // dependencies installed is not something anyone can test.
@@ -1455,7 +1462,7 @@ export function PullRequestDetailPanel({
                   It asks where, because the two answers are not interchangeable: one leaves your
                   work where it is, the other moves the repository you are standing in. Only on
                   the page: beside a thread the branch is already checked out right there. */}
-              {context === "page" ? (
+              {context === "page" && detail.projectId !== null ? (
                 <Menu>
                   <MenuTrigger
                     disabled={handoff !== null}
@@ -1686,7 +1693,12 @@ export function PullRequestDetailPanel({
                     />
                     Refresh
                   </MenuItem>
-                  <MenuItem disabled={handoff !== null} onClick={askAboutPullRequest}>
+                  <MenuItem
+                    disabled={
+                      handoff !== null || (detail.projectId === null && attachTarget === null)
+                    }
+                    onClick={askAboutPullRequest}
+                  >
                     <MessageCircleQuestionIcon className="mt-0.5 size-3.5 shrink-0 self-start" />
                     <span className="flex min-w-0 flex-col">
                       <span>{handoff === "ask" ? "Opening..." : "Ask a question"}</span>
@@ -1697,7 +1709,12 @@ export function PullRequestDetailPanel({
                       </span>
                     </span>
                   </MenuItem>
-                  <MenuItem disabled={handoff !== null} onClick={explainPullRequest}>
+                  <MenuItem
+                    disabled={
+                      handoff !== null || (detail.projectId === null && attachTarget === null)
+                    }
+                    onClick={explainPullRequest}
+                  >
                     <BookOpenIcon className="mt-0.5 size-3.5 shrink-0 self-start" />
                     <span className="flex min-w-0 flex-col">
                       <span>{handoff === "explain" ? "Opening..." : "Explain this PR"}</span>
@@ -1706,7 +1723,12 @@ export function PullRequestDetailPanel({
                       </span>
                     </span>
                   </MenuItem>
-                  <MenuItem disabled={handoff !== null} onClick={startFixFindings}>
+                  <MenuItem
+                    disabled={
+                      handoff !== null || (detail.projectId === null && attachTarget === null)
+                    }
+                    onClick={startFixFindings}
+                  >
                     <HammerIcon className="size-3.5" />
                     {handoff === "findings" ? "Preparing..." : handoffLabels.fixFindings}
                   </MenuItem>

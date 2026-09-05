@@ -1428,7 +1428,7 @@ function PullRequestsRouteView() {
           environmentId: activePullRequestSurface.environmentId,
           repository: activePullRequestSurface.repository,
           number: activePullRequestSurface.number,
-          projectId: activePullRequestSurface.projectId as ProjectId,
+          projectId: activePullRequestSurface.projectId as ProjectId | null,
         }
       : null;
 
@@ -1439,7 +1439,7 @@ function PullRequestsRouteView() {
         : {
             repository: surface.repository,
             number: surface.number,
-            selectedProjectId: surface.projectId as ProjectId,
+            selectedProjectId: (surface.projectId ?? undefined) as ProjectId | undefined,
             ...(surface.environmentId === undefined
               ? {}
               : { selectedEnvironmentId: surface.environmentId as EnvironmentId }),
