@@ -7424,9 +7424,7 @@ export const layerFromThreadCommandExecutor: Layer.Layer<
   | ThreadForkServiceV2
 > = Layer.effect(OrchestratorV2, makeOrchestrator());
 
-export const layer = layerFromThreadCommandExecutor.pipe(
-  Layer.provide(threadCommandExecutorLayer),
-);
+export const layer = layerFromThreadCommandExecutor.pipe(Layer.provide(threadCommandExecutorLayer));
 
 export const layerUnavailable: Layer.Layer<OrchestratorV2> = Layer.succeed(
   OrchestratorV2,
