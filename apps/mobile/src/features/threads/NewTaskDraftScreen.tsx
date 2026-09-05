@@ -21,6 +21,7 @@ import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { useFontFamily } from "../../lib/useFontFamily";
 
 import {
+  AuthOrchestrationOperateScope,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   resolveEnvironmentMachineKind,
 } from "@t3tools/contracts";
@@ -101,6 +102,7 @@ import { useIncomingShare } from "../sharing/IncomingShareProvider";
 import { selectIncomingShareAttachmentsForServer } from "../sharing/incoming-share-model";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { serverEnvironment } from "../../state/server";
+import { readEnvironmentScope, useEnvironmentScope } from "../../state/session";
 
 function NewTaskWorkspaceIcon(props: {
   readonly workspaceMode: "local" | "worktree";
@@ -175,6 +177,12 @@ export function NewTaskDraftScreen(props: {
     connectedEnvironments.find(
       (environment) => environment.environmentId === selectedProject.environmentId,
     )?.connectionState === "connected";
+  const canOperate = useEnvironmentScope(
+    selectedProject?.environmentId ?? null,
+    AuthOrchestrationOperateScope,
+  );
+  const taskPermissionReason =
+    environmentConnected && !canOperate ? "This connection cannot start tasks." : null;
   const modelUnavailable = environmentConnected && flow.selectedModelOption?.isUnavailable === true;
   const uploadStates = useAtomValue(composerAttachmentUploadsAtom);
   const attachmentBlockReason = selectedProject
@@ -946,6 +954,12 @@ export function NewTaskDraftScreen(props: {
     if (!selectedProject || !draftKey) {
       return;
     }
+    if (
+      environmentConnected &&
+      !readEnvironmentScope(selectedProject.environmentId, AuthOrchestrationOperateScope)
+    ) {
+      return;
+    }
     const draft = getComposerDraftSnapshot(draftKey);
     // Read the latest explicit pick. Antigravity selections stay unchanged
     // when setup or a catalog change makes them unavailable.
@@ -1094,6 +1108,7 @@ export function NewTaskDraftScreen(props: {
 
   const isAndroid = Platform.OS === "android";
   const canStart =
+    taskPermissionReason === null &&
     attachmentBlockReason === null &&
     !modelUnavailable &&
     Boolean(flow.selectedProject) &&
@@ -1270,6 +1285,10 @@ export function NewTaskDraftScreen(props: {
       ) : null}
       <View className="pb-1">{workspaceControls}</View>
 
+      {taskPermissionReason ? (
+        <Text className="px-3 py-2 text-xs text-muted-foreground">{taskPermissionReason}</Text>
+      ) : null}
+
       {modelUnavailable ? (
         <Pressable
           accessibilityRole="button"
@@ -1395,6 +1414,7 @@ export function NewTaskDraftScreen(props: {
               {voicePresentation.showsSend ? (
                 <ComposerActionButton
                   accessibilityLabel={
+                    taskPermissionReason ??
                     attachmentBlockReason ??
                     (flow.submitting
                       ? "Starting task"
