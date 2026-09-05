@@ -1467,6 +1467,7 @@ const make = Effect.gen(function* () {
                           freshParent.thread.deletedAt !== null ||
                           freshParent.thread.archivedAt !== null ||
                           freshParentRun === undefined ||
+                          freshParentRun.id !== parentRun.id ||
                           freshParentRun.rootNodeId === null ||
                           freshParentRun.providerInstanceId !== scope.providerInstanceId
                         ) {
