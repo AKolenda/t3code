@@ -11,8 +11,6 @@ import {
 } from "~/components/ui/dialog-styles";
 import { ScrollArea } from "~/components/ui/scroll-area";
 
-const DialogCreateHandle = DialogPrimitive.createHandle;
-
 const Dialog = DialogPrimitive.Root;
 
 const DialogPortal = DialogPrimitive.Portal;
@@ -165,19 +163,13 @@ function DialogPanel({
 }
 
 export {
-  DialogCreateHandle,
   Dialog,
   DialogTrigger,
-  DialogPortal,
   DialogClose,
-  DialogBackdrop,
-  DialogBackdrop as DialogOverlay,
   DialogPopup,
-  DialogPopup as DialogContent,
   DialogHeader,
   DialogFooter,
   DialogTitle,
   DialogDescription,
   DialogPanel,
-  DialogViewport,
 };
