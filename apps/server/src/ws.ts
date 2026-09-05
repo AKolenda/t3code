@@ -2613,7 +2613,7 @@ const makeWsRpcLayer = (
               Effect.acquireRelease(
                 terminalManager.attachStream(input, (event) => Queue.offer(queue, event)),
                 (unsubscribe) => Effect.sync(unsubscribe),
-              ),
+              ).pipe(Effect.catchCause((cause) => Queue.failCause(queue, cause))),
             ),
             { "rpc.aggregate": "terminal" },
           ),
@@ -2628,7 +2628,7 @@ const makeWsRpcLayer = (
               Effect.acquireRelease(
                 terminalManager.observeStream(input, (event) => Queue.offer(queue, event)),
                 (unsubscribe) => Effect.sync(unsubscribe),
-              ),
+              ).pipe(Effect.catchCause((cause) => Queue.failCause(queue, cause))),
             ),
             { "rpc.aggregate": "terminal" },
           ),
