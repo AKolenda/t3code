@@ -2513,7 +2513,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
-  it.effect("reads only user-input activities when refreshing shell summaries", () =>
+  it.effect("counts pending questions without decoding retained question history", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
       const eventStore = yield* OrchestrationEventStore;
@@ -2571,7 +2571,34 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         },
       });
 
-      // Invalid JSON proves the summary query filters tool rows before decoding payloads.
+      // Large resolved payloads must not be loaded into the shell. Invalid tone
+      // values prove the count does not decode complete activity rows.
+      yield* sql`
+        WITH RECURSIVE history(n) AS (
+          SELECT 1
+          UNION ALL
+          SELECT n + 1 FROM history WHERE n < 1000
+        ), lifecycle(kind) AS (
+          SELECT 'user-input.requested'
+          UNION ALL
+          SELECT 'user-input.resolved'
+        )
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at
+        )
+        SELECT
+          'history-' || kind || '-' || n,
+          'thread-stale-user-input',
+          NULL,
+          'invalid-tone',
+          kind,
+          'Old question activity',
+          json_object('requestId', 'history-' || n, 'questions', ${"x".repeat(4096)}),
+          '2026-02-25T12:00:00.000Z'
+        FROM history CROSS JOIN lifecycle
+      `;
+
+      // Invalid JSON proves the count excludes unrelated tool payloads too.
       yield* sql`
         INSERT INTO projection_thread_activities (
           activity_id,
@@ -3112,6 +3139,20 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         },
       });
 
+      // A failed reply must not decode other requests or tool output.
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at
+        ) VALUES
+          ('nonstale-approval-tool', 'thread-nonstale-approval', NULL, 'info', 'tool.completed',
+            'Tool output', '{not-json', '2026-02-26T12:45:02.000Z'),
+          ('nonstale-other-request', 'thread-nonstale-approval', NULL, 'invalid-tone',
+            'approval.requested', '', json_object('requestId', 'other-request'), '2026-02-26T12:45:02.000Z'),
+          ('nonstale-other-thread', 'thread-nonstale-approval-other', NULL, 'info',
+            'approval.resolved', '', json_object('requestId', 'approval-request-nonstale-existing'),
+            '2026-02-26T12:45:02.000Z')
+      `;
+
       yield* appendAndProject({
         type: "thread.activity-appended",
         eventId: EventId.make("evt-nonstale-approval-4"),
@@ -3268,7 +3309,7 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
     }),
   );
 
-  it.effect("does not fallback-retain messages whose turnId is removed by revert", () =>
+  it.effect("retains checkpointed messages and recomputes questions after revert", () =>
     Effect.gen(function* () {
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
       const eventStore = yield* OrchestrationEventStore;
@@ -3435,6 +3476,52 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         },
       });
 
+      const questionActivities = [
+        { kind: "user-input.requested", requestId: "revert-question", turnId: null },
+        {
+          kind: "user-input.resolved",
+          requestId: "revert-question",
+          turnId: TurnId.make("turn-2"),
+        },
+        {
+          kind: "user-input.requested",
+          requestId: "retained-question",
+          turnId: TurnId.make("turn-1"),
+        },
+        { kind: "user-input.resolved", requestId: "retained-question", turnId: null },
+      ];
+      for (const [index, activity] of questionActivities.entries()) {
+        yield* appendAndProject({
+          type: "thread.activity-appended",
+          eventId: EventId.make(`evt-revert-question-${index}`),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-revert"),
+          occurredAt: "2026-02-26T12:00:03.200Z",
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          payload: {
+            threadId: ThreadId.make("thread-revert"),
+            activity: {
+              id: EventId.make(`activity-revert-question-${index}`),
+              tone: "info",
+              kind: activity.kind,
+              summary: "Question activity",
+              payload: { requestId: activity.requestId },
+              turnId: activity.turnId,
+              createdAt: "2026-02-26T12:00:03.200Z",
+            },
+          },
+        });
+      }
+
+      const beforeRevert = yield* sql<{ readonly count: number }>`
+        SELECT pending_user_input_count AS count
+        FROM projection_threads WHERE thread_id = 'thread-revert'
+      `;
+      assert.deepEqual(beforeRevert, [{ count: 0 }]);
+
       yield* appendAndProject({
         type: "thread.reverted",
         eventId: EventId.make("evt-revert-8"),
@@ -3471,6 +3558,11 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
           role: "assistant",
         },
       ]);
+      const afterRevert = yield* sql<{ readonly count: number }>`
+        SELECT pending_user_input_count AS count
+        FROM projection_threads WHERE thread_id = 'thread-revert'
+      `;
+      assert.deepEqual(afterRevert, [{ count: 1 }]);
     }),
   );
 });

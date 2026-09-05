@@ -1,6 +1,7 @@
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import * as SqlSchema from "effect/unstable/sql/SqlSchema";
 import { NonNegativeInt } from "@t3tools/contracts";
+import { legacyStaleRequestFailureDetails } from "@t3tools/shared/requestActivity";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -10,6 +11,7 @@ import { toPersistenceDecodeError, toPersistenceSqlError } from "../Errors.ts";
 
 import {
   DeleteProjectionThreadActivitiesInput,
+  ListProjectionApprovalLifecycleInput,
   ListProjectionThreadActivitiesInput,
   ProjectionThreadActivity,
   ProjectionThreadActivityRepository,
@@ -151,6 +153,76 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
       `,
   });
 
+  // A terminal event closes its request regardless of activity order. Group in
+  // SQLite so shell refreshes do not decode retained question payloads.
+  const countPendingUserInputRows = SqlSchema.findOne({
+    Request: ListProjectionThreadActivitiesInput,
+    Result: Schema.Struct({ count: NonNegativeInt }),
+    execute: ({ threadId }) => sql`
+      SELECT COUNT(*) AS count
+      FROM (
+        SELECT json_extract(payload_json, '$.requestId')
+        FROM projection_thread_activities
+        WHERE thread_id = ${threadId}
+          AND CASE
+            WHEN kind IN (
+              'user-input.requested',
+              'user-input.resolved',
+              'provider.user-input.respond.failed'
+            ) THEN json_type(payload_json, '$.requestId') = 'text'
+            ELSE 0
+          END
+        GROUP BY json_extract(payload_json, '$.requestId')
+        HAVING MAX(kind = 'user-input.requested') = 1
+          AND MAX(CASE
+            WHEN kind = 'user-input.resolved' THEN 1
+            WHEN kind = 'provider.user-input.respond.failed' AND (
+              json_extract(payload_json, '$.reason') = 'request-not-found'
+              OR (
+                json_type(payload_json, '$.reason') IS NULL
+                AND json_type(payload_json, '$.detail') = 'text'
+                AND ${sql.or(
+                  legacyStaleRequestFailureDetails["provider.user-input.respond.failed"].map(
+                    (detail) =>
+                      sql`instr(lower(json_extract(payload_json, '$.detail')), ${detail}) > 0`,
+                  ),
+                )}
+              )
+            ) THEN 1
+            ELSE 0
+          END) = 0
+      )
+    `,
+  });
+
+  const listApprovalLifecycleRows = SqlSchema.findAll({
+    Request: ListProjectionApprovalLifecycleInput,
+    Result: ProjectionThreadActivityDbRowSchema,
+    execute: ({ threadId, requestId }) => sql`
+      SELECT
+        activity_id AS "activityId",
+        thread_id AS "threadId",
+        turn_id AS "turnId",
+        tone,
+        kind,
+        summary,
+        payload_json AS "payload",
+        sequence,
+        created_at AS "createdAt"
+      FROM projection_thread_activities
+      WHERE thread_id = ${threadId}
+        AND CASE
+          WHEN kind IN (
+            'approval.requested',
+            'approval.resolved',
+            'provider.approval.respond.failed'
+          ) THEN json_type(payload_json, '$.requestId') = 'text'
+            AND json_extract(payload_json, '$.requestId') = ${requestId}
+          ELSE 0
+        END
+    `,
+  });
+
   const upsert: ProjectionThreadActivityRepositoryShape["upsert"] = (row) =>
     upsertProjectionThreadActivityRow(row).pipe(
       Effect.mapError(
@@ -191,10 +263,36 @@ const makeProjectionThreadActivityRepository = Effect.gen(function* () {
       ),
     );
 
+  const countPendingUserInputsByThreadId: ProjectionThreadActivityRepositoryShape["countPendingUserInputsByThreadId"] =
+    (input) =>
+      countPendingUserInputRows(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionThreadActivityRepository.countPendingUserInputsByThreadId:query",
+            "ProjectionThreadActivityRepository.countPendingUserInputsByThreadId:decodeRows",
+          ),
+        ),
+        Effect.map((row) => row.count),
+      );
+
+  const listApprovalLifecycleByRequestId: ProjectionThreadActivityRepositoryShape["listApprovalLifecycleByRequestId"] =
+    (input) =>
+      listApprovalLifecycleRows(input).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionThreadActivityRepository.listApprovalLifecycleByRequestId:query",
+            "ProjectionThreadActivityRepository.listApprovalLifecycleByRequestId:decodeRows",
+          ),
+        ),
+        Effect.map(mapActivityRows),
+      );
+
   return {
     upsert,
     listByThreadId,
     listUserInputLifecycleByThreadId,
+    countPendingUserInputsByThreadId,
+    listApprovalLifecycleByRequestId,
     deleteByThreadId,
   } satisfies ProjectionThreadActivityRepositoryShape;
 });

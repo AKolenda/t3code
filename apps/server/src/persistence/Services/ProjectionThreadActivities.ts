@@ -7,6 +7,7 @@
  * @module ProjectionThreadActivityRepository
  */
 import {
+  ApprovalRequestId,
   EventId,
   IsoDateTime,
   NonNegativeInt,
@@ -37,6 +38,12 @@ export const ListProjectionThreadActivitiesInput = Schema.Struct({
   threadId: ThreadId,
 });
 export type ListProjectionThreadActivitiesInput = typeof ListProjectionThreadActivitiesInput.Type;
+
+export const ListProjectionApprovalLifecycleInput = Schema.Struct({
+  threadId: ThreadId,
+  requestId: ApprovalRequestId,
+});
+export type ListProjectionApprovalLifecycleInput = typeof ListProjectionApprovalLifecycleInput.Type;
 
 export const DeleteProjectionThreadActivitiesInput = Schema.Struct({
   threadId: ThreadId,
@@ -74,6 +81,16 @@ export interface ProjectionThreadActivityRepositoryShape {
    */
   readonly listUserInputLifecycleByThreadId: (
     input: ListProjectionThreadActivitiesInput,
+  ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
+
+  /** Count requested questions that have no terminal response in the retained activity. */
+  readonly countPendingUserInputsByThreadId: (
+    input: ListProjectionThreadActivitiesInput,
+  ) => Effect.Effect<number, ProjectionRepositoryError>;
+
+  /** Read one approval's lifecycle without loading the rest of the thread history. */
+  readonly listApprovalLifecycleByRequestId: (
+    input: ListProjectionApprovalLifecycleInput,
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
 
   /**

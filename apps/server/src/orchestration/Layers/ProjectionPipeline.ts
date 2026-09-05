@@ -141,31 +141,6 @@ function shouldRefreshThreadShellSummary(event: OrchestrationEvent): boolean {
   }
 }
 
-function derivePendingUserInputCountFromActivities(
-  activities: ReadonlyArray<ProjectionThreadActivity>,
-): number {
-  const openRequestIds = new Set<string>();
-  const closedRequestIds = new Set<string>();
-
-  for (const activity of activities) {
-    const requestId = extractActivityRequestId(activity.payload);
-    if (requestId === null) {
-      continue;
-    }
-    if (activity.kind === "user-input.requested") {
-      if (!closedRequestIds.has(requestId)) openRequestIds.add(requestId);
-      continue;
-    }
-
-    if (activity.kind === "user-input.resolved" || isRequestResponseStale(activity)) {
-      closedRequestIds.add(requestId);
-      openRequestIds.delete(requestId);
-    }
-  }
-
-  return openRequestIds.size;
-}
-
 function deriveHasActionableProposedPlan(input: {
   readonly latestTurnId: string | null;
   readonly proposedPlans: ReadonlyArray<ProjectionThreadProposedPlan>;
@@ -564,15 +539,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         return;
       }
 
-      const [latestUserMessageAt, proposedPlans, activities, pendingApprovalCount] =
+      const [latestUserMessageAt, proposedPlans, pendingUserInputCount, pendingApprovalCount] =
         yield* Effect.all([
           projectionThreadMessageRepository.getLatestUserMessageAt({ threadId }),
           projectionThreadProposedPlanRepository.listByThreadId({ threadId }),
-          projectionThreadActivityRepository.listUserInputLifecycleByThreadId({ threadId }),
+          projectionThreadActivityRepository.countPendingUserInputsByThreadId({ threadId }),
           projectionPendingApprovalRepository.countPendingByThreadId({ threadId }),
         ]);
 
-      const pendingUserInputCount = derivePendingUserInputCountFromActivities(activities);
       const hasActionableProposedPlan = deriveHasActionableProposedPlan({
         latestTurnId: existingRow.value.latestTurnId,
         proposedPlans,
@@ -1697,9 +1671,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             // Sending a reply clears the badge before the provider accepts it.
             // A failed reply must restore the request unless a terminal event
             // already closed it, including a reply from another client.
-            const requestActivities = (yield* projectionThreadActivityRepository.listByThreadId({
-              threadId: existingRow.value.threadId,
-            })).filter((activity) => extractActivityRequestId(activity.payload) === requestId);
+            const requestActivities =
+              yield* projectionThreadActivityRepository.listApprovalLifecycleByRequestId({
+                threadId: existingRow.value.threadId,
+                requestId,
+              });
             const wasRequested = requestActivities.some(
               (activity) => activity.kind === "approval.requested",
             );
@@ -1722,8 +1698,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           // Only approval-requested activities should create pending-approval
           // rows.  Other activity kinds that happen to carry a requestId
           // (e.g. user-input.requested / user-input.resolved) must not
-          // pollute this projection — they have their own accounting via
-          // derivePendingUserInputCountFromActivities.
+          // create pending approvals. Questions have a separate count.
           if (event.payload.activity.kind !== "approval.requested") {
             return;
           }
