@@ -136,16 +136,6 @@ function AutocompleteItem({ className, children, ...props }: AutocompletePrimiti
   );
 }
 
-function AutocompleteSeparator({ className, ...props }: AutocompletePrimitive.Separator.Props) {
-  return (
-    <AutocompletePrimitive.Separator
-      className={cn("mx-2 my-1 h-px bg-border last:hidden", className)}
-      data-slot="autocomplete-separator"
-      {...props}
-    />
-  );
-}
-
 function AutocompleteGroup({ className, ...props }: AutocompletePrimitive.Group.Props) {
   return (
     <AutocompletePrimitive.Group
@@ -231,7 +221,6 @@ export {
   AutocompleteInput,
   AutocompletePopup,
   AutocompleteItem,
-  AutocompleteSeparator,
   AutocompleteGroup,
   AutocompleteGroupLabel,
   AutocompleteEmpty,
