@@ -61,9 +61,17 @@ type MessageEntry = {
   info: {
     id: string;
     role: "user" | "assistant";
+    sessionID?: string;
+    parentID?: string;
+    [key: string]: unknown;
   };
   parts: Array<unknown>;
 };
+
+const decodeUnknownRecord = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
+const Json = Schema.fromJsonString(Schema.Unknown);
+const encodeJson = Schema.encodeEffect(Json);
+const decodeJson = Schema.decodeUnknownEffect(Json);
 
 const runtimeMock = {
   state: {
@@ -97,6 +105,8 @@ const runtimeMock = {
     promptEchoEvents: [] as Array<unknown>,
     closeError: null as Error | null,
     messages: [] as MessageEntry[],
+    messagesBySessionId: new Map<string, MessageEntry[]>(),
+    connectionInputs: [] as Array<Parameters<OpenCodeRuntimeShape["connectToOpenCodeServer"]>[0]>,
     subscribedEvents: [] as Array<unknown | Promise<unknown>>,
     eventSubscribeObserved: null as (() => void) | null,
     eventStreamError: null as ((cause: unknown) => void) | null,
@@ -120,6 +130,7 @@ const runtimeMock = {
     missingSessionIds: new Set<string>(),
     transientErrorSessionIds: new Set<string>(),
     sessionDirectoryById: new Map<string, string>(),
+    sessionRevertById: new Map<string, { messageID: string; partID?: string }>(),
     sessionParentById: new Map<string, string>(),
     pendingPermissions: [] as Array<PermissionRequest>,
     pendingQuestions: [] as Array<QuestionRequest>,
@@ -128,7 +139,8 @@ const runtimeMock = {
     permissionListImplementation: null as (() => Promise<Array<PermissionRequest>>) | null,
     questionListImplementation: null as (() => Promise<Array<QuestionRequest>>) | null,
     sessionUpdateCalls: [] as Array<{ sessionID: string; permission: unknown }>,
-    forkCalls: [] as Array<{ sessionID: string; directory?: string }>,
+    forkCalls: [] as Array<{ sessionID: string; directory?: string; messageID?: string }>,
+    forkAfterCopy: null as ((sessionId: string) => Promise<string | void>) | null,
   },
   reset() {
     this.state.startCalls.length = 0;
@@ -157,6 +169,8 @@ const runtimeMock = {
     this.state.promptEchoEvents.length = 0;
     this.state.closeError = null;
     this.state.messages = [];
+    this.state.messagesBySessionId.clear();
+    this.state.connectionInputs.length = 0;
     this.state.subscribedEvents = [];
     this.state.eventSubscribeObserved = null;
     this.state.eventStreamError = null;
@@ -175,6 +189,7 @@ const runtimeMock = {
     this.state.missingSessionIds.clear();
     this.state.transientErrorSessionIds.clear();
     this.state.sessionDirectoryById.clear();
+    this.state.sessionRevertById.clear();
     this.state.sessionParentById.clear();
     this.state.pendingPermissions = [];
     this.state.pendingQuestions = [];
@@ -184,6 +199,7 @@ const runtimeMock = {
     this.state.questionListImplementation = null;
     this.state.sessionUpdateCalls.length = 0;
     this.state.forkCalls.length = 0;
+    this.state.forkAfterCopy = null;
   },
 };
 
@@ -208,8 +224,10 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
         isRunning: Effect.succeed(true),
       };
     }),
-  connectToOpenCodeServer: ({ serverUrl, serverPassword }) =>
+  connectToOpenCodeServer: (input) =>
     Effect.gen(function* () {
+      runtimeMock.state.connectionInputs.push(input);
+      const { serverUrl, serverPassword } = input;
       const url = serverUrl ?? "http://127.0.0.1:4301";
       // Always register a finalizer so the closeCalls/closeError probes fire;
       // production attaches none for external servers.
@@ -230,7 +248,7 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       };
     }),
   runOpenCodeCommand: () => Effect.succeed({ stdout: "", stderr: "", code: 0 }),
-  createOpenCodeSdkClient: ({ baseUrl, serverPassword }) =>
+  createOpenCodeSdkClient: ({ baseUrl, serverPassword, directory: clientDirectory }) =>
     ({
       session: {
         create: async (input: Record<string, unknown>) => {
@@ -261,14 +279,18 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
           }
           const directory = runtimeMock.state.sessionDirectoryById.get(sessionID);
           const parentID = runtimeMock.state.sessionParentById.get(sessionID);
+          const revert = runtimeMock.state.sessionRevertById.get(sessionID);
           return {
             data: {
               id: sessionID,
               ...(runtimeMock.state.revertMessageID
                 ? { revert: { messageID: runtimeMock.state.revertMessageID } }
                 : {}),
-              ...(directory ? { directory } : {}),
+              projectID: "project-test",
+              time: { created: 1 },
+              directory: directory ?? clientDirectory,
               ...(parentID ? { parentID } : {}),
+              ...(revert ? { revert } : {}),
             },
           };
         },
@@ -276,14 +298,64 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
           runtimeMock.state.sessionUpdateCalls.push({ sessionID, permission });
           return { data: { id: sessionID } };
         },
-        fork: async ({ sessionID, directory }: { sessionID: string; directory?: string }) => {
-          // Fork clones history into a new session bound to the directory.
-          const forkedId = `${sessionID}_fork`;
-          runtimeMock.state.forkCalls.push({ sessionID, ...(directory ? { directory } : {}) });
+        fork: async (input: { sessionID: string; directory?: string; messageID?: string }) => {
+          const { sessionID, directory, messageID } = input;
+          const earlierForks = runtimeMock.state.forkCalls.filter(
+            (call) => call.sessionID === sessionID,
+          ).length;
+          const forkedId = `${sessionID}_fork${earlierForks === 0 ? "" : `_${earlierForks + 1}`}`;
+          runtimeMock.state.forkCalls.push(input);
           if (directory) {
             runtimeMock.state.sessionDirectoryById.set(forkedId, directory);
           }
-          return { data: { id: forkedId, ...(directory ? { directory } : {}) } };
+          const messages =
+            runtimeMock.state.messagesBySessionId.get(sessionID) ?? runtimeMock.state.messages;
+          const cutoff = messageID
+            ? messages.findIndex((message) => message.info.id === messageID)
+            : messages.length;
+          const messageIds = new Map<string, string>();
+          // Native fork copies strictly before the cutoff, or everything when
+          // the cutoff is absent. It rewrites only these identity fields.
+          const copied = messages
+            .slice(0, cutoff < 0 ? messages.length : cutoff)
+            .map((message, index) => {
+              const id = `${forkedId}_message_${index}`;
+              messageIds.set(message.info.id, id);
+              const parentID =
+                message.info.role === "assistant" && message.info.parentID
+                  ? messageIds.get(message.info.parentID)
+                  : undefined;
+              return {
+                info: {
+                  ...structuredClone(message.info),
+                  id,
+                  sessionID: forkedId,
+                  ...(parentID ? { parentID } : {}),
+                },
+                parts: message.parts.map((rawPart, partIndex) => {
+                  const part = decodeUnknownRecord(rawPart);
+                  return {
+                    ...structuredClone(part),
+                    id: `${id}_part_${partIndex}`,
+                    sessionID: forkedId,
+                    messageID: id,
+                    ...(part.type === "compaction" && typeof part.tail_start_id === "string"
+                      ? { tail_start_id: messageIds.get(part.tail_start_id) }
+                      : {}),
+                  };
+                }),
+              };
+            });
+          runtimeMock.state.messagesBySessionId.set(forkedId, copied);
+          const responseId = (await runtimeMock.state.forkAfterCopy?.(forkedId)) ?? forkedId;
+          return {
+            data: {
+              id: responseId,
+              projectID: "project-test",
+              time: { created: 1 },
+              directory: directory ?? clientDirectory,
+            },
+          };
         },
         abort: async ({ sessionID }: { sessionID: string }, options?: { signal?: AbortSignal }) => {
           runtimeMock.state.abortCalls.push(sessionID);
@@ -355,7 +427,9 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
           runtimeMock.state.summarizeCalls.push(input);
           return { data: true };
         },
-        messages: async () => ({ data: runtimeMock.state.messages }),
+        messages: async ({ sessionID }: { sessionID: string }) => ({
+          data: runtimeMock.state.messagesBySessionId.get(sessionID) ?? runtimeMock.state.messages,
+        }),
         message: async ({ sessionID, messageID }: { sessionID: string; messageID: string }) => {
           runtimeMock.state.messageCalls.push({ sessionID, messageID });
           if (runtimeMock.state.messageFailures > 0) {
@@ -598,6 +672,48 @@ const questionRequest = (id: string, sessionID: string): QuestionRequest => ({
     },
   ],
 });
+
+function seedOpenCodeRewindHistory(
+  entries: ReadonlyArray<readonly [string, "user" | "assistant"]> = [
+    ["user-1", "user"],
+    ["assistant-1", "assistant"],
+    ["user-2", "user"],
+    ["assistant-2", "assistant"],
+    ["user-3", "user"],
+    ["assistant-3", "assistant"],
+  ],
+) {
+  const sessionId = "ses_rewind_original";
+  const directory = "/saved/opencode/project";
+  let parentID: string | undefined;
+  const messages: MessageEntry[] = entries.map(([id, role], index) => {
+    if (role === "user") parentID = id;
+    return {
+      info: {
+        id,
+        sessionID: sessionId,
+        role,
+        time: { created: index + 1 },
+        ...(role === "assistant" && parentID !== undefined ? { parentID } : {}),
+      },
+      parts: [{ id: `${id}-part`, sessionID: sessionId, messageID: id, type: "text", text: id }],
+    };
+  });
+  runtimeMock.state.messagesBySessionId.set(sessionId, messages);
+  runtimeMock.state.sessionDirectoryById.set(sessionId, directory);
+  return {
+    sessionId,
+    messages,
+    input: {
+      provider: ProviderDriverKind.make("opencode"),
+      threadId: asThreadId("thread-native-rewind"),
+      runtimeMode: "full-access" as const,
+      cwd: directory,
+      resumeCursor: { schemaVersion: 1, sessionId },
+      numTurns: 1,
+    },
+  };
+}
 
 it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
   it.effect("reuses a configured OpenCode server URL instead of spawning a local server", () =>
@@ -6389,6 +6505,339 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       NodeAssert.deepEqual(emptySnapshot.turns, []);
     }),
   );
+
+  it.effect(
+    "copies an absolute rewind prefix after adapter restart without adopting either session",
+    () =>
+      Effect.gen(function* () {
+        const fixture = seedOpenCodeRewindHistory();
+        const environment = { OPENCODE_CONFIG_DIR: "/saved/opencode/config" };
+        const adapter = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings, { environment });
+        const original = structuredClone(fixture.messages);
+        const target = yield* adapter.conversationRollback.prepare(fixture.input);
+        const serializedTarget = yield* encodeJson(target);
+        const savedTarget = yield* decodeJson(serializedTarget);
+        const restarted = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings, { environment });
+        const cursor = yield* restarted.conversationRollback.fork(savedTarget);
+
+        NodeAssert.deepEqual(cursor, { schemaVersion: 1, sessionId: `${fixture.sessionId}_fork` });
+        NodeAssert.deepEqual(runtimeMock.state.forkCalls, [
+          {
+            sessionID: fixture.sessionId,
+            directory: fixture.input.cwd,
+            messageID: "user-3",
+          },
+        ]);
+        NodeAssert.deepEqual(fixture.messages, original);
+        NodeAssert.equal(
+          runtimeMock.state.messagesBySessionId.get(`${fixture.sessionId}_fork`)?.length,
+          4,
+        );
+        NodeAssert.deepEqual(yield* adapter.listSessions(), []);
+        NodeAssert.deepEqual(yield* restarted.listSessions(), []);
+        NodeAssert.deepEqual(runtimeMock.state.sessionCreateInputs, []);
+        NodeAssert.deepEqual(runtimeMock.state.sessionUpdateCalls, []);
+        NodeAssert.deepEqual(runtimeMock.state.abortCalls, []);
+        NodeAssert.deepEqual(runtimeMock.state.revertCalls, []);
+        NodeAssert.equal(runtimeMock.state.closeCalls.length, 2);
+        NodeAssert.deepEqual(runtimeMock.state.connectionInputs, [
+          {
+            binaryPath: "fake-opencode",
+            directory: fixture.input.cwd,
+            serverUrl: "http://127.0.0.1:9999",
+            serverPassword: "secret-password",
+            environment,
+          },
+          {
+            binaryPath: "fake-opencode",
+            directory: fixture.input.cwd,
+            serverUrl: "http://127.0.0.1:9999",
+            serverPassword: "secret-password",
+            environment,
+          },
+        ]);
+      }),
+  );
+
+  it.effect(
+    "retries the same original prefix after a lost fork response without changing the active session",
+    () =>
+      Effect.gen(function* () {
+        const fixture = seedOpenCodeRewindHistory();
+        const adapter = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings);
+        const active = yield* adapter.startSession(fixture.input);
+        const target = yield* adapter.conversationRollback.prepare(fixture.input);
+        runtimeMock.state.forkAfterCopy = async () => {
+          throw new Error("lost fork response");
+        };
+        const failed = yield* adapter.conversationRollback.fork(target).pipe(Effect.result);
+        NodeAssert.equal(failed._tag, "Failure");
+        runtimeMock.state.forkAfterCopy = null;
+        const cursor = yield* adapter.conversationRollback.fork(target);
+
+        NodeAssert.deepEqual(cursor, {
+          schemaVersion: 1,
+          sessionId: `${fixture.sessionId}_fork_2`,
+        });
+        NodeAssert.deepEqual(
+          runtimeMock.state.forkCalls.map((call) => [call.sessionID, call.messageID]),
+          [
+            [fixture.sessionId, "user-3"],
+            [fixture.sessionId, "user-3"],
+          ],
+        );
+        NodeAssert.equal(
+          runtimeMock.state.messagesBySessionId.get(`${fixture.sessionId}_fork`)?.length,
+          4,
+        );
+        NodeAssert.equal(
+          runtimeMock.state.messagesBySessionId.get(`${fixture.sessionId}_fork_2`)?.length,
+          4,
+        );
+        NodeAssert.equal(fixture.messages.length, 6);
+        NodeAssert.deepEqual(yield* adapter.listSessions(), [active]);
+        NodeAssert.equal(runtimeMock.state.sessionUpdateCalls.length, 1);
+        NodeAssert.deepEqual(runtimeMock.state.abortCalls, []);
+        NodeAssert.deepEqual(runtimeMock.state.revertCalls, []);
+        yield* adapter.stopSession(fixture.input.threadId);
+      }),
+  );
+
+  for (const numTurns of [3, 4]) {
+    it.effect(
+      `returns an empty-history cursor when removing ${numTurns} of three assistant turns`,
+      () =>
+        Effect.gen(function* () {
+          const fixture = seedOpenCodeRewindHistory();
+          const adapter = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings);
+          const target = yield* adapter.conversationRollback.prepare({
+            ...fixture.input,
+            numTurns,
+          });
+          NodeAssert.equal(yield* adapter.conversationRollback.fork(target), null);
+          NodeAssert.equal(fixture.messages.length, 6);
+          NodeAssert.deepEqual(runtimeMock.state.forkCalls, []);
+          NodeAssert.deepEqual(runtimeMock.state.revertCalls, []);
+        }),
+    );
+  }
+
+  it.effect("removes the whole shared user-message group at the native rewind boundary", () =>
+    Effect.gen(function* () {
+      const fixture = seedOpenCodeRewindHistory([
+        ["user-1", "user"],
+        ["assistant-1", "assistant"],
+        ["assistant-2", "assistant"],
+        ["user-2", "user"],
+        ["assistant-3", "assistant"],
+      ]);
+      const adapter = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings);
+      const target = yield* adapter.conversationRollback.prepare({ ...fixture.input, numTurns: 2 });
+      NodeAssert.equal(yield* adapter.conversationRollback.fork(target), null);
+      NodeAssert.equal(fixture.messages.length, 5);
+      NodeAssert.deepEqual(runtimeMock.state.forkCalls, []);
+    }),
+  );
+
+  for (const numTurns of [0, 1]) {
+    it.effect(`excludes native reverted history before removing ${numTurns} more turns`, () =>
+      Effect.gen(function* () {
+        const fixture = seedOpenCodeRewindHistory();
+        runtimeMock.state.sessionRevertById.set(fixture.sessionId, { messageID: "user-3" });
+        const adapter = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings);
+        const target = yield* adapter.conversationRollback.prepare({ ...fixture.input, numTurns });
+        yield* adapter.conversationRollback.fork(target);
+        NodeAssert.equal(
+          runtimeMock.state.forkCalls[0]?.messageID,
+          numTurns === 0 ? "user-3" : "user-2",
+        );
+        NodeAssert.equal(
+          runtimeMock.state.messagesBySessionId.get(`${fixture.sessionId}_fork`)?.length,
+          numTurns === 0 ? 4 : 2,
+        );
+        NodeAssert.equal(fixture.messages.length, 6);
+      }),
+    );
+  }
+
+  for (const change of [
+    "missing-source",
+    "missing-cutoff",
+    "changed-content",
+    "changed-revert",
+    "changed-directory",
+  ] as const) {
+    it.effect(`rejects ${change} before copying a prepared OpenCode rewind`, () =>
+      Effect.gen(function* () {
+        const fixture = seedOpenCodeRewindHistory();
+        const adapter = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings);
+        const target = yield* adapter.conversationRollback.prepare(fixture.input);
+        if (change === "missing-source") runtimeMock.state.missingSessionIds.add(fixture.sessionId);
+        if (change === "missing-cutoff") {
+          runtimeMock.state.messagesBySessionId.set(
+            fixture.sessionId,
+            fixture.messages.filter((message) => message.info.id !== "user-3"),
+          );
+        }
+        if (change === "changed-content") fixture.messages[0]!.parts = [];
+        if (change === "changed-revert")
+          runtimeMock.state.sessionRevertById.set(fixture.sessionId, { messageID: "user-3" });
+        if (change === "changed-directory")
+          runtimeMock.state.sessionDirectoryById.set(fixture.sessionId, "/different/project");
+        const result = yield* adapter.conversationRollback.fork(target).pipe(Effect.result);
+        NodeAssert.equal(result._tag, "Failure");
+        NodeAssert.equal(result.failure._tag, "ProviderAdapterRequestError");
+        NodeAssert.deepEqual(runtimeMock.state.forkCalls, []);
+        NodeAssert.deepEqual(runtimeMock.state.sessionCreateInputs, []);
+      }),
+    );
+  }
+
+  it.effect("rejects a missing saved cutoff even if the original transcript is unchanged", () =>
+    Effect.gen(function* () {
+      const fixture = seedOpenCodeRewindHistory();
+      const adapter = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings);
+      const target = yield* adapter.conversationRollback.prepare(fixture.input);
+      NodeAssert.ok(target !== null && typeof target === "object");
+      const result = yield* adapter.conversationRollback
+        .fork({ ...target, cutoffMessageId: "missing" })
+        .pipe(Effect.result);
+      NodeAssert.equal(result._tag, "Failure");
+      NodeAssert.deepEqual(runtimeMock.state.forkCalls, []);
+    }),
+  );
+
+  it.effect(
+    "rejects partial native reverts and missing cursors without starting a new conversation",
+    () =>
+      Effect.gen(function* () {
+        const fixture = seedOpenCodeRewindHistory();
+        const adapter = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings);
+        const missing = yield* adapter.conversationRollback
+          .prepare({ ...fixture.input, resumeCursor: undefined })
+          .pipe(Effect.result);
+        NodeAssert.equal(missing._tag, "Failure");
+        runtimeMock.state.sessionRevertById.set(fixture.sessionId, {
+          messageID: "user-3",
+          partID: "user-3-part",
+        });
+        const partial = yield* adapter.conversationRollback
+          .prepare(fixture.input)
+          .pipe(Effect.result);
+        NodeAssert.equal(partial._tag, "Failure");
+        NodeAssert.deepEqual(runtimeMock.state.sessionCreateInputs, []);
+        NodeAssert.deepEqual(runtimeMock.state.revertCalls, []);
+      }),
+  );
+
+  it.effect("rejects a compaction reference that native fork would discard", () =>
+    Effect.gen(function* () {
+      const fixture = seedOpenCodeRewindHistory();
+      const retained = fixture.messages[3]!;
+      retained.parts.push({
+        id: "compaction-part",
+        messageID: retained.info.id,
+        sessionID: fixture.sessionId,
+        type: "compaction",
+        auto: true,
+        tail_start_id: "assistant-3",
+      });
+      const adapter = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings);
+      const result = yield* adapter.conversationRollback.prepare(fixture.input).pipe(Effect.result);
+      NodeAssert.equal(result._tag, "Failure");
+      NodeAssert.equal(result.failure._tag, "ProviderAdapterRequestError");
+      NodeAssert.deepEqual(runtimeMock.state.forkCalls, []);
+    }),
+  );
+
+  it.effect(
+    "checks rewritten parent and compaction references while preserving nested tool content",
+    () =>
+      Effect.gen(function* () {
+        const fixture = seedOpenCodeRewindHistory();
+        const retained = fixture.messages[3]!;
+        retained.parts.push(
+          {
+            id: "compaction-part",
+            messageID: retained.info.id,
+            sessionID: fixture.sessionId,
+            type: "compaction",
+            auto: true,
+            tail_start_id: "user-1",
+          },
+          {
+            id: "tool-part",
+            messageID: retained.info.id,
+            sessionID: fixture.sessionId,
+            type: "tool",
+            tool: "read",
+            callID: "tool-call-1",
+            state: {
+              status: "completed",
+              output: "file content",
+              attachments: [
+                {
+                  id: "nested-file-id",
+                  sessionID: fixture.sessionId,
+                  messageID: retained.info.id,
+                  type: "file",
+                  url: "file:///saved/result.txt",
+                },
+              ],
+            },
+          },
+        );
+        const adapter = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings);
+        const target = yield* adapter.conversationRollback.prepare(fixture.input);
+        yield* adapter.conversationRollback.fork(target);
+
+        runtimeMock.state.forkAfterCopy = async (sessionId) => {
+          const copied = runtimeMock.state.messagesBySessionId.get(sessionId)!;
+          const part = decodeUnknownRecord(copied[3]!.parts[2]);
+          const state = decodeUnknownRecord(part.state);
+          NodeAssert.ok(Array.isArray(state.attachments));
+          const attachments = state.attachments.map((attachment: unknown) => ({
+            ...decodeUnknownRecord(attachment),
+            id: "wrong-attachment-id",
+          }));
+          copied[3]!.parts[2] = { ...part, state: { ...state, attachments } };
+        };
+        const altered = yield* adapter.conversationRollback.fork(target).pipe(Effect.result);
+        NodeAssert.equal(altered._tag, "Failure");
+        NodeAssert.equal(altered.failure._tag, "ProviderAdapterRequestError");
+      }),
+  );
+
+  for (const corruption of [
+    "different-content",
+    "extra-message",
+    "wrong-directory",
+    "changed-original",
+    "source-id",
+  ] as const) {
+    it.effect(`does not return a rewind cursor after ${corruption} during a native fork`, () =>
+      Effect.gen(function* () {
+        const fixture = seedOpenCodeRewindHistory();
+        const adapter = yield* makeOpenCodeAdapter(openCodeAdapterTestSettings);
+        const target = yield* adapter.conversationRollback.prepare(fixture.input);
+        runtimeMock.state.forkAfterCopy = async (sessionId) => {
+          const copied = runtimeMock.state.messagesBySessionId.get(sessionId)!;
+          if (corruption === "different-content") copied[0]!.parts = [];
+          if (corruption === "extra-message")
+            copied.push({ info: { id: "extra", sessionID: sessionId, role: "user" }, parts: [] });
+          if (corruption === "wrong-directory")
+            runtimeMock.state.sessionDirectoryById.set(sessionId, "/wrong/project");
+          if (corruption === "changed-original") fixture.messages[0]!.parts = [];
+          if (corruption === "source-id") return fixture.sessionId;
+        };
+        const result = yield* adapter.conversationRollback.fork(target).pipe(Effect.result);
+        NodeAssert.equal(result._tag, "Failure");
+        NodeAssert.equal(result.failure._tag, "ProviderAdapterRequestError");
+        NodeAssert.deepEqual(yield* adapter.listSessions(), []);
+        NodeAssert.deepEqual(runtimeMock.state.revertCalls, []);
+      }),
+    );
+  }
 
   it.effect("classifies a confirmed not-found across the shapes the SDK/runtime can produce", () =>
     Effect.sync(() => {
