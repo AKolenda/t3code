@@ -59,7 +59,9 @@ export interface ProviderAdapterShape<TError> {
   /** Create an unbound native conversation at an absolute history boundary. */
   readonly conversationRollback?: {
     /** The adapter validates its saved target before each fork. */
-    readonly prepare: (threadId: ThreadId, numTurns: number) => Effect.Effect<unknown, TError>;
+    readonly prepare: (
+      input: ProviderSessionStartInput & { readonly numTurns: number },
+    ) => Effect.Effect<unknown, TError>;
     /** The original conversation is unchanged. Null means an empty history. */
     readonly fork: (target: unknown) => Effect.Effect<unknown | null, TError>;
   };
