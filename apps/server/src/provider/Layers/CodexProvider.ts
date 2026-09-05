@@ -352,7 +352,7 @@ export function buildCodexInitializeParams(): CodexSchema.V1InitializeParams {
 export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(function* (input: {
   readonly binaryPath: string;
   readonly homePath?: string | undefined;
-  readonly launchArgs?: string | undefined;
+  readonly launchArgs?: string | ReadonlyArray<string> | undefined;
   readonly cwd: string;
   readonly environment?: NodeJS.ProcessEnv | undefined;
 }) {
@@ -368,7 +368,9 @@ export const withCodexAppServerClient = Effect.fn("withCodexAppServerClient")(fu
   };
   const spawnCommand = yield* resolveSpawnCommand(
     input.binaryPath,
-    codexAppServerArgs(input.launchArgs),
+    typeof input.launchArgs === "string" || input.launchArgs === undefined
+      ? codexAppServerArgs(input.launchArgs)
+      : ["app-server", ...input.launchArgs],
     { env: environment, extendEnv: true },
   );
   const child = yield* spawner

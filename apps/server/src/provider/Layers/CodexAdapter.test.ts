@@ -34,6 +34,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import * as CodexErrors from "effect-codex-app-server/errors";
+import type * as CodexSchema from "effect-codex-app-server/schema";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -50,6 +51,12 @@ import {
   type CodexThreadSnapshot,
 } from "./CodexSessionRuntime.ts";
 import { makeCodexAdapter } from "./CodexAdapter.ts";
+import {
+  CodexConversationRollbackTarget,
+  codexConversationRollbackLaunchArgs,
+  forkCodexConversationRollback,
+  prepareCodexConversationRollback,
+} from "./CodexConversationRollback.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
 
 // Test-local service tag so the rest of the file can keep using `yield* CodexAdapter`.
@@ -61,6 +68,267 @@ const asThreadId = (value: string): ThreadId => ThreadId.make(value);
 const asTurnId = (value: string): TurnId => TurnId.make(value);
 const asEventId = (value: string): EventId => EventId.make(value);
 const asItemId = (value: string): ProviderItemId => ProviderItemId.make(value);
+
+it("enables goals only in the rewind client's parsed launch arguments", () => {
+  NodeAssert.deepStrictEqual(
+    codexConversationRollbackLaunchArgs(
+      "--disable goals --disable=goals --disable other --config 'label=\"two words\"' -c features.goals=false",
+    ),
+    [
+      "--disable",
+      "other",
+      "--config",
+      'label="two words"',
+      "-c",
+      "features.goals=false",
+      "--enable",
+      "goals",
+    ],
+  );
+});
+
+const rollbackSourceId = "native-source";
+const rollbackTurnIds = ["native-turn-1", "native-turn-2", "native-turn-3"];
+const rollbackInput = {
+  threadId: asThreadId("rewind-thread"),
+  providerInstanceId: ProviderInstanceId.make("codex"),
+  cwd: "/workspace",
+  runtimeMode: "full-access" as const,
+  modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-test"),
+  resumeCursor: { threadId: rollbackSourceId },
+  numTurns: 1,
+};
+const rollbackGoal = {
+  threadId: rollbackSourceId,
+  objective: "Finish the saved task",
+  status: "active",
+  tokenBudget: 200,
+  tokensUsed: 40,
+  timeUsedSeconds: 12,
+  createdAt: 1,
+  updatedAt: 2,
+} satisfies CodexSchema.V2ThreadGoalGetResponse__ThreadGoal;
+const RollbackTargetJson = Schema.fromJsonString(CodexConversationRollbackTarget);
+const decodeRollbackTarget = Schema.decodeSync(RollbackTargetJson);
+const encodeRollbackTarget = Schema.encodeSync(RollbackTargetJson);
+const decodeRollbackRequest = Schema.decodeUnknownSync(Schema.Struct({ threadId: Schema.String }));
+
+function rollbackNativeThread(threadId: string, turnIds: ReadonlyArray<string>) {
+  return {
+    id: threadId,
+    sessionId: `session-${threadId}`,
+    cliVersion: "0.149.1",
+    cwd: "/workspace",
+    path: `/codex-home/${threadId}.jsonl`,
+    ephemeral: false,
+    modelProvider: "openai",
+    preview: "Saved conversation",
+    source: "appServer",
+    status: { type: "idle" },
+    createdAt: 1,
+    updatedAt: 2,
+    turns: turnIds.map((id) => ({ id, status: "completed", items: [] })),
+  } satisfies CodexSchema.V2ThreadReadResponse["thread"];
+}
+
+function makeRollbackClient(
+  goal: CodexSchema.V2ThreadGoalGetResponse__ThreadGoal | null = rollbackGoal,
+) {
+  const state = {
+    sourceTurnIds: [...rollbackTurnIds],
+    forkTurnIds: rollbackTurnIds.slice(0, 2),
+    goal,
+    preserveGoal: true,
+    loseNextForkReply: false,
+    failGoalRead: false,
+    forkCount: 0,
+  };
+  const forkGoals = new Map<string, CodexSchema.V2ThreadGoalGetResponse__ThreadGoal | null>();
+  const request = vi.fn(
+    (method: string, payload?: unknown): Effect.Effect<unknown, CodexErrors.CodexAppServerError> =>
+      Effect.suspend((): Effect.Effect<unknown, CodexErrors.CodexAppServerError> => {
+        const { threadId } = decodeRollbackRequest(payload);
+        if (method === "thread/read") {
+          NodeAssert.equal(threadId, rollbackSourceId);
+          return Effect.succeed({ thread: rollbackNativeThread(threadId, state.sourceTurnIds) });
+        }
+        if (method === "thread/goal/get") {
+          if (state.failGoalRead) {
+            return Effect.fail(
+              new CodexErrors.CodexAppServerRequestError({
+                code: -32601,
+                errorMessage: "Goal inventory is unavailable",
+              }),
+            );
+          }
+          return Effect.succeed({
+            goal: threadId === rollbackSourceId ? state.goal : forkGoals.get(threadId),
+          });
+        }
+        if (method !== "thread/fork") {
+          return Effect.die(`Unexpected Codex request: ${method}`);
+        }
+        NodeAssert.equal(threadId, rollbackSourceId);
+        state.forkCount += 1;
+        const forkId = `native-fork-${state.forkCount}`;
+        forkGoals.set(
+          forkId,
+          state.preserveGoal && state.goal ? { ...state.goal, threadId: forkId } : null,
+        );
+        if (state.loseNextForkReply) {
+          state.loseNextForkReply = false;
+          return Effect.fail(new CodexErrors.CodexAppServerInputStreamEndedError({}));
+        }
+        return Effect.succeed({
+          thread: {
+            ...rollbackNativeThread(forkId, state.forkTurnIds),
+            forkedFromId: rollbackSourceId,
+          },
+          approvalPolicy: "never",
+          approvalsReviewer: "user",
+          cwd: "/workspace",
+          model: "gpt-test",
+          modelProvider: "openai",
+          sandbox: { type: "dangerFullAccess" },
+        } satisfies CodexSchema.V2ThreadForkResponse);
+      }),
+  );
+  return { client: { request }, state, request };
+}
+
+it.effect("prepares native rewind IDs without resuming or changing the source", () =>
+  Effect.gen(function* () {
+    const { client, state, request } = makeRollbackClient();
+    const target = yield* prepareCodexConversationRollback(client, rollbackInput, "/codex-home");
+    NodeAssert.deepStrictEqual(target, {
+      schemaVersion: 1,
+      threadId: rollbackInput.threadId,
+      providerInstanceId: rollbackInput.providerInstanceId,
+      sourceThreadId: rollbackSourceId,
+      codexHome: "/codex-home",
+      cwd: "/workspace",
+      runtimeMode: "full-access",
+      modelSelection: rollbackInput.modelSelection,
+      retainedTurnIds: rollbackTurnIds.slice(0, 2),
+      firstRemovedTurnId: rollbackTurnIds[2],
+      goal: rollbackGoal,
+    });
+    NodeAssert.deepStrictEqual(
+      request.mock.calls.map(([method]) => method),
+      ["thread/read", "thread/goal/get"],
+    );
+    NodeAssert.deepStrictEqual(state.sourceTurnIds, rollbackTurnIds);
+  }),
+);
+
+it.effect("retries a lost fork reply against the same saved boundary", () =>
+  Effect.gen(function* () {
+    const { client, state, request } = makeRollbackClient();
+    const prepared = yield* prepareCodexConversationRollback(client, rollbackInput, "/codex-home");
+    const target = decodeRollbackTarget(encodeRollbackTarget(prepared));
+    state.loseNextForkReply = true;
+    const failed = yield* forkCodexConversationRollback(client, target).pipe(Effect.result);
+    NodeAssert.equal(failed._tag, "Failure");
+    const cursor = yield* forkCodexConversationRollback(client, target);
+    NodeAssert.deepStrictEqual(cursor, { threadId: "native-fork-2" });
+    const forks = request.mock.calls.filter(([method]) => method === "thread/fork");
+    NodeAssert.equal(forks.length, 2);
+    NodeAssert.deepStrictEqual(forks[0], forks[1]);
+    NodeAssert.deepStrictEqual(forks[0]?.[1], {
+      cwd: "/workspace",
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+      approvalsReviewer: "user",
+      model: "gpt-test",
+      threadId: rollbackSourceId,
+      lastTurnId: rollbackTurnIds[1],
+      ephemeral: false,
+      deferGoalContinuation: true,
+      config: { "features.goals": true },
+    });
+    NodeAssert.deepStrictEqual(state.sourceTurnIds, rollbackTurnIds);
+    NodeAssert.deepStrictEqual(state.goal, rollbackGoal);
+  }),
+);
+
+it.effect("creates a persistent empty-prefix fork without dropping the native goal", () =>
+  Effect.gen(function* () {
+    const { client, state, request } = makeRollbackClient();
+    const target = yield* prepareCodexConversationRollback(
+      client,
+      { ...rollbackInput, numTurns: 3 },
+      "/codex-home",
+    );
+    state.forkTurnIds = [];
+    NodeAssert.deepStrictEqual(yield* forkCodexConversationRollback(client, target), {
+      threadId: "native-fork-1",
+    });
+    const fork = request.mock.calls.find(([method]) => method === "thread/fork");
+    NodeAssert.deepStrictEqual(fork?.[1], {
+      cwd: "/workspace",
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+      approvalsReviewer: "user",
+      model: "gpt-test",
+      threadId: rollbackSourceId,
+      beforeTurnId: rollbackTurnIds[0],
+      ephemeral: false,
+      deferGoalContinuation: true,
+      config: { "features.goals": true },
+    });
+    NodeAssert.deepStrictEqual(state.sourceTurnIds, rollbackTurnIds);
+  }),
+);
+
+it.effect("rejects a replaced source boundary before creating a fork", () =>
+  Effect.gen(function* () {
+    const { client, state } = makeRollbackClient();
+    const target = yield* prepareCodexConversationRollback(client, rollbackInput, "/codex-home");
+    state.sourceTurnIds[1] = "replacement-turn";
+    const result = yield* forkCodexConversationRollback(client, target).pipe(Effect.result);
+    NodeAssert.equal(result._tag, "Failure");
+    NodeAssert.equal(state.forkCount, 0);
+  }),
+);
+
+it.effect("rejects forks that ignore the cutoff or lose the native goal", () =>
+  Effect.gen(function* () {
+    for (const failure of ["cutoff", "goal"] as const) {
+      const { client, state } = makeRollbackClient();
+      const target = yield* prepareCodexConversationRollback(client, rollbackInput, "/codex-home");
+      if (failure === "cutoff") state.forkTurnIds = [...rollbackTurnIds];
+      else state.preserveGoal = false;
+      const result = yield* forkCodexConversationRollback(client, target).pipe(Effect.result);
+      NodeAssert.equal(result._tag, "Failure");
+      NodeAssert.deepStrictEqual(state.sourceTurnIds, rollbackTurnIds);
+      NodeAssert.deepStrictEqual(state.goal, rollbackGoal);
+    }
+  }),
+);
+
+it.effect("does not guess that unavailable goal inventory means no goal", () =>
+  Effect.gen(function* () {
+    const { client, state } = makeRollbackClient();
+    state.failGoalRead = true;
+    const result = yield* prepareCodexConversationRollback(
+      client,
+      rollbackInput,
+      "/codex-home",
+    ).pipe(Effect.result);
+    NodeAssert.equal(result._tag, "Failure");
+    NodeAssert.equal(state.forkCount, 0);
+  }),
+);
+
+it.effect("rewinds a conversation that has no native goal", () =>
+  Effect.gen(function* () {
+    const { client } = makeRollbackClient(null);
+    const target = yield* prepareCodexConversationRollback(client, rollbackInput, "/codex-home");
+    NodeAssert.deepStrictEqual(yield* forkCodexConversationRollback(client, target), {
+      threadId: "native-fork-1",
+    });
+  }),
+);
 
 class FakeCodexRuntime implements CodexSessionRuntimeShape {
   private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent>());

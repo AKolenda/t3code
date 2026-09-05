@@ -73,14 +73,35 @@ import {
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { resolveCodexLaunchArgs } from "./codexLaunchArgs.ts";
 import { codexRateLimitsToUpdate } from "./codexUsageLimits.ts";
+import {
+  CodexConversationRollbackTarget,
+  codexConversationRollbackLaunchArgs,
+  forkCodexConversationRollback,
+  prepareCodexConversationRollback,
+} from "./CodexConversationRollback.ts";
+import { withCodexAppServerClient } from "./CodexProvider.ts";
 const isCodexAppServerProcessExitedError = Schema.is(CodexErrors.CodexAppServerProcessExitedError);
 const isCodexAppServerTransportError = Schema.is(CodexErrors.CodexAppServerTransportError);
 const isCodexSessionRuntimeThreadIdMissingError = Schema.is(
   CodexSessionRuntimeThreadIdMissingError,
 );
 const isCodexResumeCursorSchema = Schema.is(CodexResumeCursorSchema);
+const decodeConversationRollbackTarget = Schema.decodeUnknownEffect(
+  CodexConversationRollbackTarget,
+);
 
 const PROVIDER = ProviderDriverKind.make("codex");
+const withConversationRollbackDeadline = Effect.timeoutOrElse({
+  duration: "60 seconds",
+  orElse: () =>
+    Effect.fail(
+      new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: "conversationRollback",
+        detail: "Codex did not finish preparing the rewind within 60 seconds. Retry the rewind.",
+      }),
+    ),
+});
 
 export interface CodexAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
@@ -2575,6 +2596,80 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
   };
 
+  const conversationRollback = {
+    prepare: Effect.fn("CodexAdapter.conversationRollback.prepare")(
+      function* (
+        input: Parameters<NonNullable<CodexAdapterShape["conversationRollback"]>["prepare"]>[0],
+      ) {
+        if (input.providerInstanceId !== boundInstanceId || !input.cwd) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "conversationRollback.prepare",
+            issue: "The Codex rewind must use this provider instance and its saved workspace.",
+          });
+        }
+        const { client, initialize } = yield* withCodexAppServerClient({
+          ...codexConfig,
+          // Enable goal reads only in this short-lived client. It never resumes
+          // the source, and forks defer any inherited goal until the next turn.
+          launchArgs: codexConversationRollbackLaunchArgs(
+            resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
+          ),
+          cwd: input.cwd,
+          ...(options?.environment ? { environment: options.environment } : {}),
+        }).pipe(
+          Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "thread/read", cause)),
+        );
+        return yield* prepareCodexConversationRollback(client.raw, input, initialize.codexHome);
+      },
+      Effect.scoped,
+      withConversationRollbackDeadline,
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+    ),
+    fork: Effect.fn("CodexAdapter.conversationRollback.fork")(
+      function* (rawTarget: unknown) {
+        const target = yield* decodeConversationRollbackTarget(rawTarget).pipe(
+          Effect.mapError(
+            () =>
+              new ProviderAdapterValidationError({
+                provider: PROVIDER,
+                operation: "conversationRollback.fork",
+                issue: "The saved Codex rewind target is invalid.",
+              }),
+          ),
+        );
+        if (target.providerInstanceId !== boundInstanceId) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "conversationRollback.fork",
+            issue: "The saved Codex rewind belongs to a different provider instance.",
+          });
+        }
+        const { client, initialize } = yield* withCodexAppServerClient({
+          ...codexConfig,
+          launchArgs: codexConversationRollbackLaunchArgs(
+            resolveCodexLaunchArgs(codexConfig.launchArgs, options?.environment),
+          ),
+          cwd: target.cwd,
+          ...(options?.environment ? { environment: options.environment } : {}),
+        }).pipe(
+          Effect.mapError((cause) => mapCodexRuntimeError(target.threadId, "thread/fork", cause)),
+        );
+        if (initialize.codexHome !== target.codexHome) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "conversationRollback.fork",
+            issue: "The Codex home changed after this rewind was prepared.",
+          });
+        }
+        return yield* forkCodexConversationRollback(client.raw, target);
+      },
+      Effect.scoped,
+      withConversationRollbackDeadline,
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
+    ),
+  } satisfies NonNullable<CodexAdapterShape["conversationRollback"]>;
+
   const uploadFeedback: CodexAdapterShape["uploadFeedback"] = (input) =>
     requireSession(input.threadId).pipe(
       Effect.flatMap((session) => session.runtime.uploadFeedback(input.reason)),
@@ -2675,6 +2770,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     interruptTurn,
     readThread,
     rollbackThread,
+    conversationRollback,
     uploadFeedback,
     respondToRequest,
     respondToUserInput,
