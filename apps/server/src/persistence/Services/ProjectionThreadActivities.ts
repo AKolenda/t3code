@@ -37,6 +37,8 @@ export type ProjectionThreadActivity = typeof ProjectionThreadActivity.Type;
 
 export const ListProjectionThreadActivitiesInput = Schema.Struct({
   threadId: ThreadId,
+  activityKinds: Schema.optional(Schema.Array(Schema.String)),
+  limit: Schema.optional(NonNegativeInt),
 });
 export type ListProjectionThreadActivitiesInput = typeof ListProjectionThreadActivitiesInput.Type;
 
@@ -76,7 +78,7 @@ export interface ProjectionThreadActivityRepositoryShape {
    * List projected thread activity rows for a thread.
    *
    * Returned in ascending runtime sequence order (or creation order when
-   * sequence is unavailable).
+   * sequence is unavailable). A limit selects the newest matching rows.
    */
   readonly listByThreadId: (
     input: ListProjectionThreadActivitiesInput,
@@ -102,7 +104,7 @@ export interface ProjectionThreadActivityRepositoryShape {
   ) => Effect.Effect<ReadonlyArray<ProjectionThreadActivity>, ProjectionRepositoryError>;
 
   /**
-   * Read the latest persisted task-start or task-progress activity for a task.
+   * Read the latest task-start or task-progress activity with a usable title.
    */
   readonly getLatestTaskActivity: (
     input: GetLatestProjectionThreadTaskActivityInput,
