@@ -1711,7 +1711,8 @@ it.layer(
           [undefined, undefined, "truecolor"],
           ["", undefined, "truecolor"],
           ["24bit", undefined, "24bit"],
-          ["24bit", "", "truecolor"],
+          ["24bit", "", ""],
+          [undefined, "", ""],
           ["24bit", "custom", "custom"],
         ] as const) {
           const env = Object.freeze({ COLORTERM: parentColor });
