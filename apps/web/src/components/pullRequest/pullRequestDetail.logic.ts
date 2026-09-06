@@ -1,6 +1,8 @@
 import * as Schema from "effect/Schema";
 
 import {
+  EnvironmentId,
+  ProjectId,
   PullRequestDetail,
   PullRequestSummary,
   type PullRequestAction,
@@ -1077,6 +1079,37 @@ const PullRequestDetailSnapshot = Schema.Struct({
 type PullRequestDetailSnapshot = typeof PullRequestDetailSnapshot.Type;
 const decodeDetailSnapshot = Schema.decodeUnknownOption(PullRequestDetailSnapshot);
 
+const decodeDetailSnapshotReference = Schema.decodeUnknownOption(
+  Schema.Tuple([EnvironmentId, ProjectId, Schema.String, Schema.Number]),
+);
+
+/** Recover URL references from the bounded detail cache, without retaining another payload copy. */
+export function readPullRequestDetailSnapshotReferences(storage: SnapshotStorage | undefined) {
+  if (!storage) return [];
+  return readDetailSnapshotIndex(storage).flatMap((entry) => {
+    try {
+      const ref = decodeDetailSnapshotReference(
+        JSON.parse(entry.key.slice(DETAIL_SNAPSHOT_PREFIX.length)),
+      );
+      if (ref._tag === "None") return [];
+      const [environmentId, projectId, repository, number] = ref.value;
+      const raw = storage.getItem(entry.key);
+      if (!raw || entry.bytes !== 2 * (entry.key.length + raw.length)) return [];
+      const detail = decodeDetailSnapshot(JSON.parse(raw));
+      if (
+        detail._tag === "None" ||
+        detail.value.projectId !== projectId ||
+        detail.value.repository.toLowerCase() !== repository.toLowerCase() ||
+        detail.value.number !== number
+      )
+        return [];
+      return [{ environmentId, input: { projectId, repository, number }, url: detail.value.url }];
+    } catch {
+      return [];
+    }
+  });
+}
+
 /** Hydrates one recent detail after a reload while the live query refreshes it. */
 export function readPullRequestDetailSnapshot(
   storage: SnapshotStorage | undefined,
@@ -1085,10 +1118,29 @@ export function readPullRequestDetailSnapshot(
 ): PullRequestDetailSnapshot | null {
   try {
     if (!storage) return null;
-    const key = pullRequestDetailSnapshotKey(environmentId, reference);
+    const requestedKey = pullRequestDetailSnapshotKey(environmentId, reference);
     const index = readDetailSnapshotIndex(storage);
-    const entry = index.find((entry) => entry.key === key);
+    const entry =
+      index.find((entry) => entry.key === requestedKey) ??
+      index.find((entry) => {
+        try {
+          const decoded = decodeDetailSnapshotReference(
+            JSON.parse(entry.key.slice(DETAIL_SNAPSHOT_PREFIX.length)),
+          );
+          if (decoded._tag === "None") return false;
+          const [savedEnvironment, projectId, repository, number] = decoded.value;
+          return (
+            savedEnvironment === environmentId &&
+            projectId === reference.projectId &&
+            repository.toLowerCase() === reference.repository.toLowerCase() &&
+            number === reference.number
+          );
+        } catch {
+          return false;
+        }
+      });
     if (!entry) return null;
+    const key = entry.key;
     const raw = storage.getItem(key);
     if (!raw || entry.bytes !== 2 * (key.length + raw.length)) return null;
     const decoded = decodeDetailSnapshot(JSON.parse(raw));

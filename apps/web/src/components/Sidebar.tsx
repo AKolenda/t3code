@@ -125,7 +125,7 @@ import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../s
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
 import { useEnvironmentQuery } from "../state/query";
-import { useSharedThreadPullRequest } from "../state/pullRequests";
+import { samePullRequestUrl, useSharedThreadPullRequest } from "../state/pullRequests";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
   buildThreadRouteParams,
@@ -998,7 +998,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     if (nextSnapshot === undefined) return;
     onChangeRequestSnapshot(
       threadKey,
-      nextSnapshot !== null && pr !== null && nextSnapshot.pr.url === pr.url
+      nextSnapshot !== null && pr !== null && samePullRequestUrl(nextSnapshot.pr.url, pr.url)
         ? { ...nextSnapshot, pr }
         : nextSnapshot,
     );

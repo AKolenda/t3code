@@ -173,6 +173,106 @@ describe("scoped pull request state", () => {
     expect(registry.get(state.snapshot(target)).detail).toBe(current);
   });
 
+  it.each([false, true])(
+    "confirms equal-time detail conflicts with fresh draft=%s",
+    async (isDraft) => {
+      const fresh = detail({ isDraft });
+      let confirm = (_value: PullRequestDetail | null) => {};
+      const answer = new Promise<PullRequestDetail | null>((resolve) => {
+        confirm = resolve;
+      });
+      const readFreshDetail = vi.fn(() => answer);
+      state = createPullRequestState(registry, {
+        storage: () => storage,
+        onRevisionChanged: revised,
+        readFreshDetail,
+      });
+      state.observeSummary(target, detail({ isDraft: !isDraft }));
+      state.observeDetail(target, fresh);
+      state.observeDetail(target, { ...fresh });
+      expect(registry.get(state.snapshot(target)).summary?.isDraft).toBe(!isDraft);
+      expect(registry.get(state.snapshot(target)).detail?.body).toBe(fresh.body);
+      expect(readFreshDetail).toHaveBeenCalledExactlyOnceWith(target, expect.any(AbortSignal));
+      confirm(fresh);
+      await answer;
+      expect(registry.get(state.snapshot(target)).summary?.isDraft).toBe(isDraft);
+    },
+  );
+
+  it("does not let a conflict confirmation undo a newer summary", async () => {
+    let confirm = (_value: PullRequestDetail | null) => {};
+    const answer = new Promise<PullRequestDetail | null>((resolve) => {
+      confirm = resolve;
+    });
+    state = createPullRequestState(registry, {
+      storage: () => storage,
+      onRevisionChanged: revised,
+      readFreshDetail: () => answer,
+    });
+    state.observeSummary(target, detail({ isDraft: false }));
+    state.observeDetail(target, detail({ isDraft: true }));
+    state.observeSummary(
+      target,
+      detail({ title: "Later title", isDraft: false, updatedAt: "2026-09-03T00:00:00.000Z" }),
+    );
+    confirm(detail({ isDraft: true }));
+    await answer;
+    expect(registry.get(state.snapshot(target)).summary?.title).toBe("Later title");
+    expect(registry.get(state.snapshot(target)).summary?.isDraft).toBe(false);
+  });
+
+  it("confirms an unseen old summary without undoing accepted detail", async () => {
+    const fresh = detail({ isDraft: false });
+    const answer = Promise.resolve(fresh);
+    const readFreshDetail = vi.fn(() => answer);
+    state = createPullRequestState(registry, {
+      storage: () => storage,
+      onRevisionChanged: revised,
+      readFreshDetail,
+    });
+    state.observeDetail(target, fresh);
+    state.observeSummary(target, detail({ isDraft: true }));
+    expect(registry.get(state.snapshot(target)).summary?.isDraft).toBe(false);
+    await answer;
+    expect(registry.get(state.snapshot(target)).summary?.isDraft).toBe(false);
+    expect(readFreshDetail).toHaveBeenCalledOnce();
+  });
+
+  it("finds a saved detail written with different repository casing", () => {
+    writePullRequestDetailSnapshot(
+      storage,
+      environmentId,
+      { ...reference, repository: "ACME/Web" },
+      detail({ state: "merged" }),
+    );
+    expect(
+      registry.get(state.summaryByUrl(environmentId, reference.projectId, detail().url))?.state,
+    ).toBe("merged");
+  });
+
+  it("aborts conflict confirmation on reset and rejects its late answer", async () => {
+    let confirm = (_value: PullRequestDetail | null) => {};
+    const answer = new Promise<PullRequestDetail | null>((resolve) => {
+      confirm = resolve;
+    });
+    const readFreshDetail = vi.fn((_target: typeof target, _signal: AbortSignal) => answer);
+    state = createPullRequestState(registry, {
+      storage: () => storage,
+      onRevisionChanged: revised,
+      readFreshDetail,
+    });
+    state.observeSummary(target, detail({ isDraft: false }));
+    state.observeDetail(target, detail({ isDraft: true }));
+    const signal = readFreshDetail.mock.calls[0]![1];
+    registry.reset();
+    expect(signal.aborted).toBe(true);
+    confirm(detail({ isDraft: true }));
+    await answer;
+    expect(registry.get(state.snapshot(target)).summary?.isDraft).toBe(false);
+    state.observeDetail(target, detail({ isDraft: true }));
+    expect(readFreshDetail).toHaveBeenCalledTimes(2);
+  });
+
   it("stores summary fields without copying detail permissions or content", () => {
     const current = detail();
     state.observeDetail(target, current);
@@ -323,6 +423,25 @@ describe("scoped pull request state", () => {
       detail({ state: "merged", updatedAt: "2026-09-03T00:00:00.000Z" }),
     );
     registry.reset();
+    // The detected sidebar has only a URL and must not depend on another reader mounting first.
+    expect(
+      registry.get(
+        state.summaryByUrl(
+          environmentId,
+          reference.projectId,
+          "https://GITHUB.com/ACME/WEB/pull/7/?view=checks#top",
+        ),
+      )?.state,
+    ).toBe("merged");
+    expect(
+      registry.get(
+        state.summaryByUrl(
+          environmentId,
+          reference.projectId,
+          "https://github.enterprise.test/acme/web/pull/7",
+        ),
+      ),
+    ).toBeNull();
     expect(registry.get(state.snapshot(target)).summary?.state).toBe("merged");
     expect(
       registry.get(state.snapshot({ ...target, environmentId: otherEnvironmentId })).detail,
@@ -338,6 +457,17 @@ describe("scoped pull request state", () => {
   });
 });
 
+function retainedDetailQuery() {
+  let current: AsyncResult.AsyncResult<PullRequestDetail> = AsyncResult.initial();
+  return Atom.writable(
+    () => current,
+    (context, value: AsyncResult.AsyncResult<PullRequestDetail>) => {
+      current = value;
+      context.setSelf(value);
+    },
+  ).pipe(Atom.keepAlive);
+}
+
 describe("pull request readers", () => {
   let renderer: ReactTestRenderer | undefined;
   let latest: ReturnType<typeof usePullRequestDetail>;
@@ -345,11 +475,7 @@ describe("pull request readers", () => {
   let linkedQuery: PullRequestSummary | null;
   let detected: VcsStatusResult["pr"];
   let paints: Array<{ environmentId: EnvironmentId; title: string | null }>;
-  let queries = Atom.family((_key: string) =>
-    Atom.make<AsyncResult.AsyncResult<PullRequestDetail>>(AsyncResult.initial()).pipe(
-      Atom.keepAlive,
-    ),
-  );
+  let queries = Atom.family((_key: string) => retainedDetailQuery());
 
   function Probe({ selected }: { selected: EnvironmentId }) {
     const current = usePullRequestDetail({ environmentId: selected, input: reference });
@@ -387,10 +513,9 @@ describe("pull request readers", () => {
     appAtomRegistry.reset();
     paints = [];
     linkedQuery = null;
-    queries = Atom.family((_key: string) =>
-      Atom.make<AsyncResult.AsyncResult<PullRequestDetail>>(AsyncResult.initial()).pipe(
-        Atom.keepAlive,
-      ),
+    queries = Atom.family((_key: string) => retainedDetailQuery());
+    vi.spyOn(pullRequestEnvironment.invalidate, "run").mockResolvedValue(
+      AsyncResult.success(undefined),
     );
     vi.spyOn(pullRequestEnvironment, "detail").mockImplementation(({ environmentId }) =>
       queries(environmentId),
@@ -458,9 +583,9 @@ describe("pull request readers", () => {
     await act(() => {
       renderer = create(render(environmentId));
     });
-    await act(() =>
-      appAtomRegistry.set(queries(environmentId), AsyncResult.success(detail({ isDraft: false }))),
-    );
+    await act(async () => {
+      appAtomRegistry.set(queries(environmentId), AsyncResult.success(detail({ isDraft: false })));
+    });
     expect(latest.data?.isDraft).toBe(false);
     expect(linked?.isDraft).toBe(false);
     expect(appAtomRegistry.get(pullRequestState.snapshot(target)).summary?.isDraft).toBe(false);
@@ -472,15 +597,27 @@ describe("pull request readers", () => {
   });
 
   it("does not let held detail undo a same-timestamp summary update", async () => {
+    let invalidate = () => {};
+    vi.mocked(pullRequestEnvironment.invalidate.run).mockReturnValueOnce(
+      new Promise((resolve) => {
+        invalidate = () => resolve(AsyncResult.success(undefined));
+      }),
+    );
+    const held = detail({ isDraft: true });
     await act(() => {
       renderer = create(render(environmentId));
     });
-    await act(() =>
-      appAtomRegistry.set(queries(environmentId), AsyncResult.success(detail({ isDraft: true }))),
-    );
+    await act(() => appAtomRegistry.set(queries(environmentId), AsyncResult.success(held)));
     await act(() => pullRequestState.observeSummary(target, detail({ isDraft: false })));
+    // Conflicting equal timestamps keep the accepted state until a fresh host answer arrives.
+    expect(latest.data?.isDraft).toBe(true);
+    await act(async () => {
+      appAtomRegistry.set(queries(environmentId), AsyncResult.success(detail({ isDraft: false })));
+      invalidate();
+    });
     expect(latest.data?.isDraft).toBe(false);
     expect(linked?.isDraft).toBe(false);
+    await act(() => appAtomRegistry.set(queries(environmentId), AsyncResult.success(held)));
     await act(() => renderer?.unmount());
     await act(() => {
       renderer = create(render(environmentId));
@@ -588,12 +725,12 @@ describe("pull request readers", () => {
         </AppAtomRegistryProvider>,
       );
     });
-    await act(() =>
+    await act(async () => {
       appAtomRegistry.set(
         queries(environmentId),
         AsyncResult.success(detail({ state: "open", isDraft: false })),
-      ),
-    );
+      );
+    });
     await act(() =>
       appAtomRegistry.set(
         lists(otherEnvironmentId),

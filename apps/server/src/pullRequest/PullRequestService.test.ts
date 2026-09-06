@@ -3254,7 +3254,7 @@ it.effect(
       });
       assert.strictEqual(activityCalls, 1);
 
-      yield* service.invalidate({ reference });
+      yield* service.invalidate({ reference: { ...reference, repository: "Acme/WEB" } });
       yield* service.activity(reference);
       assert.strictEqual(activityCalls, 2);
     }),

@@ -3,6 +3,7 @@ import {
   createLinkedPullRequestSummaryAtomFamily,
   createPullRequestEnvironmentAtoms,
 } from "@t3tools/client-runtime/state/pull-requests";
+import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
 import type {
   EnvironmentId,
   ProjectId,
@@ -29,7 +30,9 @@ import {
   type EnvironmentPullRequestEntry,
 } from "../components/pullRequest/pullRequestList.logic";
 import {
+  PULL_REQUEST_DETAIL_SNAPSHOT_MAX_ENTRIES,
   readPullRequestDetailSnapshot,
+  readPullRequestDetailSnapshotReferences,
   writePullRequestDetailSnapshot,
 } from "../components/pullRequest/pullRequestDetail.logic";
 import { formatEnvironmentQueryError, useEnvironmentQuery } from "./query";
@@ -61,6 +64,10 @@ function normalizedPullRequestUrl(url: string): string {
   return url.split(/[?#]/u)[0]!.replace(/\/$/u, "").toLowerCase();
 }
 
+export function samePullRequestUrl(left: string, right: string): boolean {
+  return normalizedPullRequestUrl(left) === normalizedPullRequestUrl(right);
+}
+
 function pullRequestUrlKey(environmentId: EnvironmentId, projectId: ProjectId, url: string) {
   return JSON.stringify([environmentId, projectId, normalizedPullRequestUrl(url)]);
 }
@@ -83,8 +90,7 @@ function matchesPullRequest(
     reference.projectId === value.projectId &&
     reference.repository.toLowerCase() === value.repository.toLowerCase() &&
     reference.number === value.number &&
-    (reference.url === undefined ||
-      normalizedPullRequestUrl(reference.url) === normalizedPullRequestUrl(value.url))
+    (reference.url === undefined || samePullRequestUrl(reference.url, value.url))
   );
 }
 
@@ -144,10 +150,45 @@ function applyPullRequestSummary<T extends PullRequestSummary>(
   return { ...current, ...summary };
 }
 
+function sameSummary(left: PullRequestSummary | null, right: PullRequestSummary | null): boolean {
+  return (
+    left === right ||
+    (left !== null &&
+      right !== null &&
+      Object.entries(left).every(
+        ([key, value]) => right[key as keyof PullRequestSummary] === value,
+      ) &&
+      Object.entries(right).every(
+        ([key, value]) => left[key as keyof PullRequestSummary] === value,
+      ))
+  );
+}
+
+function hasEqualTimeSummaryConflict(
+  current: PullRequestSummary | null,
+  detail: PullRequestSummary,
+): boolean {
+  if (
+    current === null ||
+    !samePullRequest(current, detail) ||
+    current.state === "merged" ||
+    detail.state === "merged" ||
+    Date.parse(current.updatedAt) !== Date.parse(detail.updatedAt)
+  )
+    return false;
+  return (
+    ["title", "state", "isDraft", "headBranch", "baseBranch", "closedAt", "mergedAt"] as const
+  ).some(
+    (key) =>
+      current[key] !== undefined && detail[key] !== undefined && current[key] !== detail[key],
+  );
+}
+
 function resolvePullRequestSnapshot(
   previous: PullRequestSnapshot,
   observation: PullRequestSummary,
   detail: PullRequestDetail | null,
+  freshDetail = false,
 ): PullRequestSnapshot {
   const sameIdentity = previous.summary === null || samePullRequest(previous.summary, observation);
   if (!sameIdentity && detail === null && previous.detail !== null) return previous;
@@ -160,25 +201,27 @@ function resolvePullRequestSnapshot(
       Date.parse(detail.updatedAt) >= Date.parse(previousDetail.updatedAt))
       ? detail
       : previousDetail;
+  // Equal host timestamps cannot order independent summary and held-detail responses.
+  // Keep the accepted summary until a read after explicit host invalidation confirms it.
   const newest =
-    newestPullRequestSummary(sameIdentity ? previous.summary : null, observation) ?? observation;
-  const summary = {
+    !freshDetail && hasEqualTimeSummaryConflict(previous.summary, observation)
+      ? previous.summary!
+      : (newestPullRequestSummary(sameIdentity ? previous.summary : null, observation) ??
+        observation);
+  const candidateSummary = {
     ...(sameIdentity ? previous.summary : null),
     ...pullRequestSummary(newest),
   };
+  const summary = sameSummary(previous.summary, candidateSummary)
+    ? previous.summary!
+    : candidateSummary;
   const previousSummary = previous.summary;
   const changedRevision =
     previousSummary !== null &&
     (!sameIdentity ||
       summary.updatedAt !== previousSummary.updatedAt ||
       summary.state !== previousSummary.state);
-  if (
-    nextDetail === previous.detail &&
-    previousSummary !== null &&
-    Object.entries(summary).every(
-      ([key, value]) => previousSummary[key as keyof PullRequestSummary] === value,
-    )
-  ) {
+  if (nextDetail === previous.detail && summary === previous.summary) {
     return previous;
   }
   return { detail: nextDetail, summary, revision: previous.revision + Number(changedRevision) };
@@ -190,6 +233,10 @@ export function createPullRequestState(
   options: {
     readonly storage: () => Storage | undefined;
     readonly onRevisionChanged: (target: PullRequestTarget) => void;
+    readonly readFreshDetail?: (
+      target: PullRequestTarget,
+      signal: AbortSignal,
+    ) => Promise<PullRequestDetail | null>;
   },
 ) {
   const storage = () => {
@@ -224,15 +271,33 @@ export function createPullRequestState(
       (context, value: PullRequestSnapshot) => context.setSelf(value),
     ).pipe(Atom.setIdleTTL(5 * 60_000), Atom.withLabel(`web-pull-requests:snapshot:${key}`)),
   );
+  // Read the bounded saved index once so detected-only sidebars can hydrate after a reload.
+  const savedReferences = Atom.make(
+    () =>
+      new Map(
+        readPullRequestDetailSnapshotReferences(storage()).map(({ environmentId, input, url }) => [
+          pullRequestUrlKey(environmentId, input.projectId, url),
+          { environmentId, input },
+        ]),
+      ),
+  ).pipe(Atom.keepAlive);
   // Detected VCS PRs carry a URL, not the host's repository reference. This index points at
   // the same snapshot and never copies its status or shares it across projects.
-  const referencesByUrl = Atom.family((_key: string) =>
-    Atom.make<PullRequestTarget | null>(null).pipe(Atom.setIdleTTL(5 * 60_000)),
+  const referencesByUrl = Atom.family((key: string) =>
+    Atom.writable(
+      (get): PullRequestTarget | null => get(savedReferences).get(key) ?? null,
+      (context, value: PullRequestTarget) => context.setSelf(value),
+    ).pipe(Atom.setIdleTTL(5 * 60_000)),
   );
   const summariesByUrl = Atom.family((key: string) =>
     Atom.make((get) => {
       const target = get(referencesByUrl(key));
-      return target === null ? null : get(snapshots(pullRequestKey(target))).summary;
+      if (target === null) return null;
+      const summary = get(snapshots(pullRequestKey(target))).summary;
+      return summary !== null &&
+        pullRequestUrlKey(target.environmentId, target.input.projectId, summary.url) === key
+        ? summary
+        : null;
     }).pipe(Atom.setIdleTTL(5 * 60_000)),
   );
   const snapshot = (target: PullRequestTarget) => snapshots(pullRequestKey(target));
@@ -243,10 +308,18 @@ export function createPullRequestState(
     );
     if (registry.get(urlReference) === null) registry.set(urlReference, target);
   };
+  const confirmations = Atom.make((get) => {
+    const pending = new Map<string, AbortController>();
+    get.addFinalizer(() => {
+      for (const controller of pending.values()) controller.abort();
+    });
+    return pending;
+  }).pipe(Atom.keepAlive);
   const observe = (
     target: PullRequestTarget,
     value: PullRequestSummary,
     detail: PullRequestDetail | null = null,
+    freshDetail = false,
   ) => {
     if (!matchesPullRequest(target.input, value)) return;
     const atom = snapshot(target);
@@ -254,13 +327,13 @@ export function createPullRequestState(
     const seen = registry.get(observations);
     const sourceKey = JSON.stringify([pullRequestKey(target), detail !== null]);
     const accepted = seen.get(value);
-    if (previous.summary !== null && accepted?.has(sourceKey)) {
+    if (!freshDetail && previous.summary !== null && accepted?.has(sourceKey)) {
       registerReference(target, value);
       return;
     }
     if (accepted === undefined) seen.set(value, new Set([sourceKey]));
     else accepted.add(sourceKey);
-    const next = resolvePullRequestSnapshot(previous, value, detail);
+    const next = resolvePullRequestSnapshot(previous, value, detail, freshDetail);
     if (next !== previous) {
       registry.set(atom, next);
       if (next.detail !== null) {
@@ -273,9 +346,48 @@ export function createPullRequestState(
             ...(next.summary === null ? {} : { observedSummary: next.summary }),
           },
         );
+        const saved = registry.get(savedReferences);
+        const urlKey = pullRequestUrlKey(
+          target.environmentId,
+          target.input.projectId,
+          next.detail.url,
+        );
+        saved.delete(urlKey);
+        saved.set(urlKey, target);
+        if (saved.size > PULL_REQUEST_DETAIL_SNAPSHOT_MAX_ENTRIES) {
+          const oldest = saved.keys().next().value;
+          if (oldest !== undefined) saved.delete(oldest);
+        }
       }
       if (next.revision !== previous.revision)
         options.onRevisionChanged(targetFromKey(pullRequestKey(target)));
+    }
+    const pending = registry.get(confirmations);
+    if (
+      !freshDetail &&
+      hasEqualTimeSummaryConflict(previous.summary, value) &&
+      options.readFreshDetail !== undefined &&
+      !pending.has(pullRequestKey(target))
+    ) {
+      const key = pullRequestKey(target);
+      const expectedSummary = next.summary;
+      // The in-flight map holds only active reads. Multiple mounted readers share this request.
+      const controller = new AbortController();
+      pending.set(key, controller);
+      void options
+        .readFreshDetail(target, controller.signal)
+        .then((fresh) => {
+          if (
+            !controller.signal.aborted &&
+            fresh !== null &&
+            registry.get(atom).summary === expectedSummary
+          )
+            observe(target, fresh, fresh, true);
+        })
+        .catch(() => {
+          // Keep the accepted summary if the host is unavailable. A later new response can retry.
+        })
+        .finally(() => pending.delete(key));
     }
     registerReference(target, value);
   };
@@ -307,6 +419,17 @@ function pullRequestSnapshotStorage(): Storage | undefined {
 export const pullRequestState = createPullRequestState(appAtomRegistry, {
   storage: pullRequestSnapshotStorage,
   onRevisionChanged: (target) => appAtomRegistry.refresh(pullRequestEnvironment.activity(target)),
+  readFreshDetail: async (target, signal) => {
+    const invalidated = await pullRequestEnvironment.invalidate.run(appAtomRegistry, {
+      environmentId: target.environmentId,
+      input: { reference: target.input },
+    });
+    if (signal.aborted || !AsyncResult.isSuccess(invalidated)) return null;
+    const query = pullRequestEnvironment.detail(target);
+    appAtomRegistry.refresh(query);
+    const result = await executeAtomQuery(appAtomRegistry, query, { signal });
+    return AsyncResult.isSuccess(result) ? result.value : null;
+  },
 });
 
 const emptyPullRequestSnapshot = Atom.make<PullRequestSnapshot>({
@@ -354,8 +477,7 @@ export function resolveSharedThreadPullRequest(
   summary: PullRequestSummary | null,
 ): VcsStatusResult["pr"] {
   if (current === null || summary === null) return current;
-  if (normalizedPullRequestUrl(current.url) !== normalizedPullRequestUrl(summary.url))
-    return current;
+  if (!samePullRequestUrl(current.url, summary.url)) return current;
   if (!observedPullRequestIsNewer(current, summary)) return current;
   return {
     ...current,

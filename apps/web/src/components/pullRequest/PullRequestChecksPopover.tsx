@@ -35,7 +35,7 @@ function LazyChecksBody({
   threadRef: ScopedThreadRef | null;
 }) {
   const detailQuery = usePullRequestDetail({ environmentId, input: reference });
-  if (detailQuery.error !== null) {
+  if (detailQuery.error !== null && detailQuery.data === null) {
     return <p className="text-muted-foreground text-xs">{detailQuery.error}</p>;
   }
   if (detailQuery.data === null) {
