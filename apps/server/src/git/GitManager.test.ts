@@ -1564,7 +1564,12 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect((yield* manager.status({ cwd: repoDir })).pr?.state).toBe("merged");
       expect(
         yield* manager.branchPullRequest({ cwd: worktreeDir, branch: "review/renamed-merge" }),
-      ).toEqual({ state: "merged", updatedAt: merge.mergedAt });
+      ).toEqual({
+        state: "merged",
+        updatedAt: merge.mergedAt,
+        closedAt: null,
+        mergedAt: merge.mergedAt,
+      });
       for (const checkout of otherCheckouts) {
         expect(yield* manager.remoteStatus({ cwd: checkout.cwd })).toBe(checkout.status);
       }
@@ -1632,7 +1637,12 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(yield* manager.observePullRequestMerge(merge)).toEqual([]);
       yield* Deferred.succeed(release, undefined);
 
-      expect(yield* Fiber.join(lookup)).toEqual({ state: "merged", updatedAt: merge.mergedAt });
+      expect(yield* Fiber.join(lookup)).toEqual({
+        state: "merged",
+        updatedAt: merge.mergedAt,
+        closedAt: null,
+        mergedAt: merge.mergedAt,
+      });
       expect((yield* manager.status({ cwd: repoDir })).pr?.state).toBe("merged");
       expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(2);
     }),
@@ -2394,7 +2404,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(yield* manager.branchPullRequest(input)).toEqual({
         state: "merged",
         closedAt: null,
-        mergedAt: null,
+        mergedAt: "2026-05-02T10:00:00.000Z",
         updatedAt: "2026-05-02T10:00:00.000Z",
       });
     }),
