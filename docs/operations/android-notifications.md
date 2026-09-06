@@ -8,7 +8,7 @@ The app's minimum is Android 7.0 (API 24), declared in `app.config.ts` and enfor
 
 API 24–25 use a single inexact system alarm to expire cards after process exit, with no exact-alarm permission. Android can delay that alarm in power-saving modes. API 26+ use notification timeouts. Disabling activity, dismissal, account changes and sign-out cancel the legacy alarm. A stale expiry broadcast cannot remove a newer run's card.
 
-The Android Notifications workflow performs a clean Expo prebuild, compiles the notification module, runs Robolectric tests on API 24, 26, 33 and 36 (plus API 25 for legacy expiry), and runs Android lint. It uses no Firebase, signing or relay secrets. Run the same tasks from a generated `apps/mobile/android` project with JDK 21 available:
+The native notification tests cover API 24, 26, 33 and 36 (plus API 25 for legacy expiry) using Robolectric. To compile the module, run these tests and run Android lint, use the following command from a generated `apps/mobile/android` project with JDK 21 available. No Firebase, signing or relay secrets are required:
 
 ```sh
 ./gradlew :t3-agent-notifications:testDebugUnitTest :t3-agent-notifications:lintRelease -Pandroid.lint.useK2Uast=false
