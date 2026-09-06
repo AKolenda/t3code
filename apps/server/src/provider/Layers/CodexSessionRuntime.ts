@@ -2560,7 +2560,6 @@ export const makeCodexSessionRuntime = (
                 return yield* new CodexErrors.CodexAppServerProtocolParseError({
                   operation: "decode-response-payload",
                   method: "turn/steer",
-                  cause: new Error("Codex steering returned a different turn id."),
                 });
               }
               turnId = expectedTurnId;

@@ -1128,11 +1128,9 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
                       context.activeTurnId !== turnId ||
                       context.generation !== turn.generation
                     ) {
-                      return yield* new EffectAcpErrors.AcpTransportError({
-                        method: "session/prompt",
-                        detail: "The Antigravity turn changed before prompt submission.",
-                        cause: undefined,
-                      });
+                      return yield* EffectAcpErrors.AcpRequestError.invalidRequest(
+                        "The Antigravity turn changed before prompt submission.",
+                      );
                     }
                   }),
                   nativeCompleted: startOptions

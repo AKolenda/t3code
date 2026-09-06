@@ -1138,11 +1138,9 @@ export function makeCursorAdapter(
                           sessions.get(input.threadId) !== ctx ||
                           ctx.activeTurnId !== turnId
                         ) {
-                          return yield* new EffectAcpErrors.AcpTransportError({
-                            method: "session/prompt",
-                            detail: "The Cursor session changed before prompt submission.",
-                            cause: undefined,
-                          });
+                          return yield* EffectAcpErrors.AcpRequestError.invalidRequest(
+                            "The Cursor session changed before prompt submission.",
+                          );
                         }
                       }),
                       nativeCompleted: startOptions

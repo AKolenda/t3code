@@ -1774,11 +1774,9 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                         liveCtx.interruptedTurnIds.has(prepared.turnId) ||
                         prepared.promptEpoch < liveCtx.discardBeforeEpoch
                       ) {
-                        return yield* new EffectAcpErrors.AcpTransportError({
-                          method: "session/prompt",
-                          detail: "The Grok turn changed before prompt submission.",
-                          cause: undefined,
-                        });
+                        return yield* EffectAcpErrors.AcpRequestError.invalidRequest(
+                          "The Grok turn changed before prompt submission.",
+                        );
                       }
                     }),
                     nativeCompleted: startOptions
