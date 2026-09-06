@@ -2,6 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeStream from "node:stream";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type {
@@ -1602,51 +1603,68 @@ describe("ClaudeAdapterLive", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.effect("waits for the captured native process exit before completing Stop", () => {
-    const harness = makeHarness();
-    return Effect.gen(function* () {
-      const adapter = yield* ClaudeAdapter;
-      yield* adapter.startSession({
-        threadId: THREAD_ID,
-        provider: ProviderDriverKind.make("claudeAgent"),
-        runtimeMode: "full-access",
-      });
-      const spawnProcess = harness.getLastCreateQueryInput()?.options.spawnClaudeCodeProcess;
-      assert.isDefined(spawnProcess);
-      // This child is a disposable stdin reader, not a provider session.
-      const child = spawnProcess!({
-        command: process.execPath,
-        args: ["-e", "process.stdin.resume()"],
-        env: {},
-        signal: new AbortController().signal,
-      });
-      try {
-        let nativeStopped = false;
-        yield* adapter.sendTurn(
-          { threadId: THREAD_ID, input: "First" },
-          admissionOptions({
-            nativeStopped: Effect.sync(() => {
-              nativeStopped = true;
-            }),
-          }),
-        );
-        const closeStarted = Promise.withResolvers<void>();
-        vi.spyOn(harness.query, "close").mockImplementation(() => {
-          harness.query.finish();
-          closeStarted.resolve();
+  it.effect.each([false, true])(
+    "waits for native exit before completing Stop with stderr failure %s",
+    (failStderr) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
         });
-        const stopFiber = yield* adapter.stopSession(THREAD_ID).pipe(Effect.forkChild);
-        yield* Effect.promise(() => closeStarted.promise);
-        assert.equal(nativeStopped, false);
-        assert.equal(stopFiber.pollUnsafe(), undefined);
-        child.kill("SIGTERM");
-        yield* Fiber.join(stopFiber);
-        assert.equal(nativeStopped, true);
-      } finally {
-        if (child.exitCode === null && child.signalCode == null) child.kill("SIGKILL");
-      }
-    }).pipe(Effect.provide(harness.layer));
-  });
+        const spawnProcess = harness.getLastCreateQueryInput()?.options.spawnClaudeCodeProcess;
+        assert.isDefined(spawnProcess);
+        // This child is a disposable stdin reader, not a provider session.
+        const child = spawnProcess!({
+          command: process.execPath,
+          args: ["-e", "process.stdin.resume()"],
+          env: {},
+          signal: new AbortController().signal,
+        });
+        try {
+          if (!("stderr" in child) || !(child.stderr instanceof NodeStream.Readable)) {
+            return yield* Effect.die("Expected the captured child to expose stderr.");
+          }
+          const stderr = child.stderr;
+          if (failStderr) {
+            yield* Effect.promise(
+              () =>
+                new Promise<void>((resolve) => {
+                  stderr.once("close", resolve);
+                  stderr.destroy(new Error("stderr read failed with private details"));
+                }),
+            );
+          }
+          let nativeStopped = false;
+          yield* adapter.sendTurn(
+            { threadId: THREAD_ID, input: "First" },
+            admissionOptions({
+              nativeStopped: Effect.sync(() => {
+                nativeStopped = true;
+              }),
+            }),
+          );
+          const closeStarted = Promise.withResolvers<void>();
+          vi.spyOn(harness.query, "close").mockImplementation(() => {
+            harness.query.finish();
+            closeStarted.resolve();
+          });
+          const stopFiber = yield* adapter.stopSession(THREAD_ID).pipe(Effect.forkChild);
+          yield* Effect.promise(() => closeStarted.promise);
+          assert.equal(nativeStopped, false);
+          assert.equal(stopFiber.pollUnsafe(), undefined);
+          child.kill("SIGTERM");
+          yield* Fiber.join(stopFiber);
+          assert.equal(nativeStopped, true);
+          assert.equal(stderr.destroyed, true);
+        } finally {
+          if (child.exitCode === null && child.signalCode == null) child.kill("SIGKILL");
+        }
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
 
   it.effect("steers a running turn instead of opening a new one on mid-turn sendTurn", () => {
     const harness = makeHarness();

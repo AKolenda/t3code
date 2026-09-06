@@ -4797,6 +4797,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         onUserDialog,
         supportedDialogKinds: ["resume_return"],
         env: claudeEnvironment,
+        // Custom spawning disables the SDK's private shared debug-file path.
+        // Keep native debug logs enabled in Claude's own file through the public option.
+        ...(["1", "true", "yes", "on"].includes(
+          claudeEnvironment.DEBUG_CLAUDE_AGENT_SDK?.trim().toLowerCase() ?? "",
+        )
+          ? { debug: true }
+          : {}),
         spawnClaudeCodeProcess: ({ command, args, cwd, env, signal }) => {
           const child = NodeChildProcess.spawn(command, args, {
             cwd,
@@ -4806,8 +4813,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             windowsHide: true,
           });
           nativeProcess.captured = child.pid !== undefined;
+          child.stderr.on("error", () => {
+            runFork(Effect.logWarning("Claude stderr read failed."));
+          });
           child.stderr.resume();
-          child.once("exit", () => Deferred.doneUnsafe(nativeProcess.exited, Exit.void));
+          child.once("exit", () => {
+            Deferred.doneUnsafe(nativeProcess.exited, Exit.void);
+            // The SDK does not consume custom-process stderr. Do not retain inherited pipes.
+            child.stderr.destroy();
+          });
           return child;
         },
         additionalDirectories,
