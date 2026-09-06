@@ -124,6 +124,8 @@ export function HostedBrowserWebview(props: {
     if (!clientSettingsHydrated || !webview || !config || !bridge) return;
     let disposed = false;
     let replacing = false;
+    let registeredWebContentsId: number | undefined;
+    let pendingReset: { webContentsId: number; resetId: number } | undefined;
     let recoveryTimeout: ReturnType<typeof setTimeout> | null = null;
     const register = () => {
       const lease = tabLeaseRef.current;
@@ -137,6 +139,7 @@ export function HostedBrowserWebview(props: {
           if (disposed || webviewRef.current !== webview) return;
           const webContentsId = webview.getWebContentsId();
           if (Number.isInteger(webContentsId) && webContentsId > 0) {
+            registeredWebContentsId = webContentsId;
             await bridge.registerWebview(runtimeTabId, webContentsId);
           }
         } catch {
@@ -150,13 +153,10 @@ export function HostedBrowserWebview(props: {
       setRecoverySrc(latestUrlRef.current ?? initialSrc);
       setWebviewGeneration((generation) => generation + 1);
     };
-    const unsubscribeReset = bridge.onWebviewReset?.((tabId, webContentsId) => {
+    const unsubscribeReset = bridge.onWebviewReset?.((tabId, webContentsId, resetId) => {
       if (tabId !== runtimeTabId || disposed || replacing) return;
-      try {
-        if (webview.getWebContentsId() !== webContentsId) return;
-      } catch {
-        return;
-      }
+      if (registeredWebContentsId !== webContentsId) return;
+      pendingReset = { webContentsId, resetId };
       // Remounting removes Electron's outer frame. Closing the main-process
       // WebContents wrapper alone does not retire an attached guest target.
       replaceGuest();
@@ -178,6 +178,15 @@ export function HostedBrowserWebview(props: {
     return () => {
       disposed = true;
       unsubscribeReset?.();
+      // Passive cleanup runs after React removes the old node. The connection
+      // check also excludes effect reruns that keep the same DOM webview.
+      if (pendingReset && !webview.isConnected) {
+        bridge.confirmWebviewRemoved?.(
+          runtimeTabId,
+          pendingReset.webContentsId,
+          pendingReset.resetId,
+        );
+      }
       if (recoveryTimeout !== null) clearTimeout(recoveryTimeout);
       webview.removeEventListener("did-attach", register);
       webview.removeEventListener("dom-ready", register);

@@ -308,19 +308,24 @@ contextBridge.exposeInMainWorld("desktopBridge", {
         _event: Electron.IpcRendererEvent,
         tabId: unknown,
         webContentsId: unknown,
+        resetId: unknown,
       ) => {
         if (
           typeof tabId !== "string" ||
           typeof webContentsId !== "number" ||
-          !Number.isInteger(webContentsId)
+          !Number.isInteger(webContentsId) ||
+          typeof resetId !== "number" ||
+          !Number.isInteger(resetId)
         )
           return;
-        listener(tabId, webContentsId);
+        listener(tabId, webContentsId, resetId);
       };
       ipcRenderer.on(IpcChannels.PREVIEW_WEBVIEW_RESET_CHANNEL, wrappedListener);
       return () =>
         ipcRenderer.removeListener(IpcChannels.PREVIEW_WEBVIEW_RESET_CHANNEL, wrappedListener);
     },
+    confirmWebviewRemoved: (tabId, webContentsId, resetId) =>
+      ipcRenderer.send(IpcChannels.PREVIEW_WEBVIEW_REMOVED_CHANNEL, tabId, webContentsId, resetId),
     onPointerEvent: (listener) => {
       const wrappedListener = (_event: Electron.IpcRendererEvent, pointerEvent: unknown) => {
         if (typeof pointerEvent !== "object" || pointerEvent === null) return;

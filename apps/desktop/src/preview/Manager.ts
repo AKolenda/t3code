@@ -56,6 +56,7 @@ import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import {
   PREVIEW_PICTURE_IN_PICTURE_FRAME_CHANNEL,
   PREVIEW_WEBVIEW_RESET_CHANNEL,
+  PREVIEW_WEBVIEW_REMOVED_CHANNEL,
 } from "../ipc/channels.ts";
 import * as BrowserSession from "./BrowserSession.ts";
 import {
@@ -652,9 +653,18 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     }
     return lock;
   };
+  const webviewHosts = new WeakMap<Electron.WebContents, Electron.WebContents>();
+  const resetHosts = new WeakSet<Electron.WebContents>();
+  const removedWebContents = new WeakSet<Electron.WebContents>();
+  let nextWebviewResetId = 0;
   const pendingWebviewResets = new Map<
     string,
-    { readonly webContents: Electron.WebContents; readonly destroyed: Deferred.Deferred<void> }
+    {
+      readonly webContents: Electron.WebContents;
+      readonly host: Electron.WebContents | undefined;
+      readonly resetId: number;
+      readonly removed: Deferred.Deferred<void>;
+    }
   >();
 
   const attempt = <A>(errorContext: PreviewOperationContext, evaluate: () => A) =>
@@ -1240,41 +1250,80 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     }
   });
 
-  // Removing the DOM webview retires its Chromium target. Calling wc.close()
-  // can destroy only Electron's wrapper while the outer frame still owns it.
-  // Detaching the debugger does not cancel page JavaScript either.
+  // The host confirms removal of the DOM webview. Electron's destroyed event
+  // can mean only wrapper loss, while the outer frame still owns the target.
+  const observeWebviewHost = Effect.fn("PreviewManager.observeWebviewHost")(function* (
+    wc: Electron.WebContents,
+  ) {
+    const host = wc.hostWebContents;
+    if (!host) return;
+    webviewHosts.set(wc, host);
+    if (resetHosts.has(host)) return;
+    const hostIpc = host.ipc;
+    const onRemoved = (
+      _event: Electron.IpcMainEvent,
+      tabId: unknown,
+      webContentsId: unknown,
+      resetId: unknown,
+    ) => {
+      if (typeof tabId !== "string") return;
+      const pending = pendingWebviewResets.get(tabId);
+      if (
+        !pending ||
+        pending.host !== host ||
+        pending.resetId !== resetId ||
+        pending.webContents.id !== webContentsId
+      )
+        return;
+      pendingWebviewResets.delete(tabId);
+      removedWebContents.add(pending.webContents);
+      Deferred.doneUnsafe(pending.removed, Effect.void);
+      runFork(
+        Effect.all(
+          [
+            detachControlSession(pending.webContents.id, pending.webContents),
+            detachListeners(pending.webContents.id, pending.webContents),
+          ],
+          { concurrency: 2, discard: true },
+        ),
+      );
+    };
+    yield* attempt({ operation: "observeWebviewHost", webContentsId: wc.id }, () => {
+      hostIpc.on(PREVIEW_WEBVIEW_REMOVED_CHANNEL, onRemoved);
+      resetHosts.add(host);
+    });
+    yield* Scope.addFinalizer(
+      parentScope,
+      Effect.sync(() => {
+        hostIpc.off(PREVIEW_WEBVIEW_REMOVED_CHANNEL, onRemoved);
+      }),
+    );
+  });
+
   const retireWebview = Effect.fn("PreviewManager.retireWebview")(function* (
     tabId: string,
     wc: Electron.WebContents,
   ): Effect.fn.Return<void, PreviewOperationError> {
     retiredWebContents.add(wc);
-    if (wc.isDestroyed()) return;
+    if (removedWebContents.has(wc)) return;
     let pending = pendingWebviewResets.get(tabId);
     if (!pending) {
-      const destroyed = Deferred.makeUnsafe<void>();
-      pending = { webContents: wc, destroyed };
+      const host = webviewHosts.get(wc);
+      pending = {
+        webContents: wc,
+        host,
+        resetId: ++nextWebviewResetId,
+        removed: Deferred.makeUnsafe<void>(),
+      };
       pendingWebviewResets.set(tabId, pending);
+      const resetId = pending.resetId;
       yield* attempt({ operation: "retireWebview", tabId, webContentsId: wc.id }, () => {
-        wc.once("destroyed", () => {
-          if (pendingWebviewResets.get(tabId)?.webContents === wc) {
-            pendingWebviewResets.delete(tabId);
-          }
-          Deferred.doneUnsafe(destroyed, Effect.void);
-          runFork(
-            Effect.all([detachControlSession(wc.id, wc), detachListeners(wc.id, wc)], {
-              concurrency: 2,
-              discard: true,
-            }),
-          );
-        });
-        const host = wc.hostWebContents;
         if (!host || host.isDestroyed()) throw new Error("Preview host is unavailable.");
-        host.send(PREVIEW_WEBVIEW_RESET_CHANNEL, tabId, wc.id);
+        host.send(PREVIEW_WEBVIEW_RESET_CHANNEL, tabId, wc.id, resetId);
       });
     }
-    // Do not release this target to another action if its host cannot remove it.
-    // The entry remains until native destruction, even after this wait expires.
-    yield* Deferred.await(pending.destroyed).pipe(
+    // A missing acknowledgement keeps this guest unavailable after the deadline.
+    yield* Deferred.await(pending.removed).pipe(
       Effect.interruptible,
       Effect.timeout(WEBVIEW_RESET_TIMEOUT_MS),
       Effect.mapError(
@@ -1329,9 +1378,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       ),
       Effect.interruptible,
       Effect.timeout(timeoutMs),
-      Effect.catchTag("TimeoutError", (cause) =>
-        Effect.fail(new PreviewOperationError({ operation, tabId, webContentsId: wc.id, cause })),
-      ),
+      Effect.catchTags({
+        TimeoutError: (cause) =>
+          Effect.fail(new PreviewOperationError({ operation, tabId, webContentsId: wc.id, cause })),
+      }),
     );
     yield* requireCurrentGuest(tabId, wc);
     return result;
@@ -1639,9 +1689,10 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     });
     return yield* execute.pipe(
       Effect.timeout(timeoutMs),
-      Effect.catchTag("TimeoutError", () =>
-        Effect.fail(new PreviewAutomationTimeoutError({ tabId, operation: action, timeoutMs })),
-      ),
+      Effect.catchTags({
+        TimeoutError: () =>
+          Effect.fail(new PreviewAutomationTimeoutError({ tabId, operation: action, timeoutMs })),
+      }),
       Effect.onExit(finalize),
     );
   });
@@ -2254,6 +2305,24 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     );
   });
 
+  const awaitWebviewReset = Effect.fn("PreviewManager.awaitWebviewReset")(function* (
+    tabId: string,
+  ) {
+    const pendingReset = pendingWebviewResets.get(tabId);
+    if (pendingReset) {
+      yield* Deferred.await(pendingReset.removed).pipe(
+        Effect.timeout(WEBVIEW_RESET_TIMEOUT_MS),
+        Effect.mapError(
+          () =>
+            new PreviewAutomationGuestRetiredError({
+              tabId,
+              webContentsId: pendingReset.webContents.id,
+            }),
+        ),
+      );
+    }
+  });
+
   const registerWebviewUnlocked = Effect.fn("PreviewManager.registerWebviewUnlocked")(function* (
     tabId: string,
     webContentsId: number,
@@ -2280,19 +2349,8 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     if (retiredWebContents.has(wc)) {
       return yield* new PreviewAutomationGuestRetiredError({ tabId, webContentsId });
     }
-    const pendingReset = pendingWebviewResets.get(tabId);
-    if (pendingReset) {
-      yield* Deferred.await(pendingReset.destroyed).pipe(
-        Effect.timeout(WEBVIEW_RESET_TIMEOUT_MS),
-        Effect.mapError(
-          () =>
-            new PreviewAutomationGuestRetiredError({
-              tabId,
-              webContentsId: pendingReset.webContents.id,
-            }),
-        ),
-      );
-    }
+    yield* observeWebviewHost(wc);
+    yield* awaitWebviewReset(tabId);
     const attached = yield* Ref.get(attachedRef);
     const annotationTheme = yield* Ref.get(annotationThemeRef);
     const currentAttachment = attached.get(webContentsId);
@@ -2324,6 +2382,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         { concurrency: 3, discard: true },
       );
     }
+    yield* awaitWebviewReset(tabId);
     const currentTab = (yield* SynchronizedRef.get(tabsRef)).get(tabId);
     if (
       !currentTab ||

@@ -218,6 +218,7 @@ type TestDisplayMediaHandler = (
 ) => void;
 
 interface TestHostWebContents {
+  readonly ipc: NodeEvents.EventEmitter;
   readonly id: number;
   readonly mainFrame: { readonly frameTreeNodeId: number };
   readonly executeJavaScript: ReturnType<typeof vi.fn>;
@@ -236,6 +237,7 @@ type TestPreviewWebContents = Electron.WebContents & {
 const makeTestHostWebContents = (): TestHostWebContents => {
   let handler: TestDisplayMediaHandler | undefined;
   return {
+    ipc: new NodeEvents.EventEmitter(),
     id: 7,
     mainFrame: { frameTreeNodeId: 7 },
     executeJavaScript: vi.fn(async () => true),
@@ -352,6 +354,14 @@ const makeAutomationWebContents = (id = 42, host = makeTestHostWebContents()) =>
     destroy: () => {
       destroyed = true;
       events.emit("destroyed");
+    },
+    remove: () => {
+      destroyed = true;
+      events.emit("destroyed");
+      const request = host.send.mock.calls.findLast(
+        ([channel, , guestId]) => channel === "desktop:preview-webview-reset" && guestId === id,
+      );
+      if (request) host.ipc.emit("desktop:preview-webview-removed", {}, ...request.slice(1));
     },
   };
 };
@@ -552,7 +562,7 @@ describe("PreviewManager", () => {
       Effect.gen(function* () {
         const preview = makeFaviconWebContents();
         const sendInputEvent = vi.fn();
-        const hostWebContents = { sendInputEvent };
+        const hostWebContents = { ...makeTestHostWebContents(), sendInputEvent };
         Object.assign(preview.webContents, { hostWebContents });
         fromId.mockReturnValue(preview.webContents);
         yield* manager.setMainWindow({
@@ -2644,6 +2654,7 @@ describe("PreviewManager", () => {
           "desktop:preview-webview-reset",
           "tab_deadline",
           42,
+          expect.any(Number),
         );
         expect(evaluation.pollUnsafe()).toBeUndefined();
         expect(queued.pollUnsafe()).toBeUndefined();
@@ -2657,6 +2668,18 @@ describe("PreviewManager", () => {
         ).toHaveLength(1);
 
         first.destroy();
+        const [, resetTab, resetGuest, resetId] = first.host.send.mock.calls[0]!;
+        first.host.ipc.emit(
+          "desktop:preview-webview-removed",
+          {},
+          resetTab,
+          resetGuest,
+          Number(resetId) + 1,
+        );
+        first.host.ipc.emit("desktop:preview-webview-removed", {}, resetTab, 99, resetId);
+        yield* TestClock.adjust(0);
+        expect(registration.pollUnsafe()).toBeUndefined();
+        first.remove();
         const evaluationExit = yield* Fiber.await(evaluation);
         expect(Exit.isFailure(evaluationExit)).toBe(true);
         expect(Exit.isFailure(yield* Fiber.await(queued))).toBe(true);
@@ -2721,7 +2744,12 @@ describe("PreviewManager", () => {
           Exit.isFailure(yield* Effect.exit(manager.registerWebview("tab_reset_failure", 42))),
         ).toBe(true);
 
-        first.destroy();
+        const close = yield* manager
+          .closeTab("tab_reset_failure")
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        first.remove();
+        yield* Fiber.join(close);
+        yield* manager.createTab("tab_reset_failure");
         yield* manager.registerWebview("tab_reset_failure", 43);
         expect(yield* manager.automationEvaluate("tab_reset_failure", { expression: "42" })).toBe(
           42,
@@ -2745,7 +2773,7 @@ describe("PreviewManager", () => {
             return new Promise(() => {});
           }
         });
-        guest.host.send.mockImplementation(() => guest.destroy());
+        guest.host.send.mockImplementation(() => guest.remove());
         const wait = yield* manager
           .automationWaitFor("tab_wait_deadline", {
             text: "ready",
@@ -2852,7 +2880,7 @@ describe("PreviewManager", () => {
             return new Promise(() => {});
           }
         });
-        guest.host.send.mockImplementation(() => guest.destroy());
+        guest.host.send.mockImplementation(() => guest.remove());
         const press = yield* manager
           .automationPress("tab_cleanup_deadline", { key: "x" })
           .pipe(Effect.forkChild({ startImmediately: true }));
@@ -2880,7 +2908,7 @@ describe("PreviewManager", () => {
             return new Promise(() => {});
           }
         });
-        guest.host.send.mockImplementation(() => guest.destroy());
+        guest.host.send.mockImplementation(() => guest.remove());
         yield* manager.createTab("tab_init_deadline");
         yield* manager.registerWebview("tab_init_deadline", 42);
         yield* Deferred.await(entered);
@@ -2940,10 +2968,101 @@ describe("PreviewManager", () => {
             yield* Effect.exit(manager.navigate("tab_detach", "https://new.example.com")),
           ),
         ).toBe(true);
-        guest.destroy();
+        guest.remove();
         expect(Exit.isFailure(yield* Fiber.await(detach))).toBe(true);
         expect(Exit.isFailure(yield* Fiber.await(evaluation))).toBe(true);
         expect(guest.wc.debugger.detach).toHaveBeenCalledOnce();
+      }),
+    ),
+  );
+
+  effectIt.effect(
+    "does not register a new guest when detaching its predecessor starts a failed reset",
+    () =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          const guest = makeAutomationWebContents();
+          const replacement = makeAutomationWebContents(43, guest.host);
+          fromId.mockImplementation((id) => (id === 43 ? replacement.wc : guest.wc));
+          yield* manager.createTab("tab_replacement_reset");
+          yield* manager.registerWebview("tab_replacement_reset", 42);
+          yield* manager.automationEvaluate("tab_replacement_reset", { expression: "42" });
+          const entered = yield* Deferred.make<void>();
+          const pending = Promise.withResolvers<unknown>();
+          guest.sendCommand.mockImplementation(async (method) => {
+            if (method === "Runtime.evaluate") {
+              queueMicrotask(() => Deferred.doneUnsafe(entered, Effect.void));
+              return pending.promise;
+            }
+          });
+          guest.wc.debugger.detach.mockImplementation(() => {
+            pending.reject(new Error("target closed while handling command"));
+          });
+          const evaluation = yield* manager
+            .automationEvaluate("tab_replacement_reset", {
+              expression: "new Promise(() => {})",
+            })
+            .pipe(Effect.forkChild({ startImmediately: true }));
+          yield* Deferred.await(entered);
+          const registration = yield* manager
+            .registerWebview("tab_replacement_reset", 43)
+            .pipe(Effect.forkChild({ startImmediately: true }));
+          yield* TestClock.adjust(4_000);
+          expect(Exit.isFailure(yield* Fiber.await(registration))).toBe(true);
+          expect(Exit.isFailure(yield* Fiber.await(evaluation))).toBe(true);
+          expect(replacement.sendCommand).not.toHaveBeenCalled();
+          expect((yield* manager.automationStatus("tab_replacement_reset")).available).toBe(false);
+          guest.remove();
+          yield* manager.registerWebview("tab_replacement_reset", 43);
+          expect(
+            yield* manager.automationEvaluate("tab_replacement_reset", { expression: "42" }),
+          ).toBe(42);
+        }),
+      ),
+  );
+
+  effectIt.effect("requests DOM removal after a pending guest loses its wrapper", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const guest = makeAutomationWebContents();
+        const replacement = makeAutomationWebContents(43, guest.host);
+        fromId.mockImplementation((id) => (id === 43 ? replacement.wc : guest.wc));
+        yield* manager.createTab("tab_wrapper_close");
+        yield* manager.registerWebview("tab_wrapper_close", 42);
+        yield* manager.automationEvaluate("tab_wrapper_close", { expression: "42" });
+        const entered = yield* Deferred.make<void>();
+        guest.sendCommand.mockImplementation(async (method) => {
+          if (method === "Runtime.evaluate") {
+            queueMicrotask(() => Deferred.doneUnsafe(entered, Effect.void));
+            return new Promise(() => {});
+          }
+        });
+        const evaluation = yield* manager
+          .automationEvaluate("tab_wrapper_close", {
+            expression: "new Promise(() => {})",
+          })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(entered);
+        guest.destroy();
+        guest.wc.debugger.detach();
+        yield* TestClock.adjust(12_000);
+        expect(guest.host.send).toHaveBeenCalledExactlyOnceWith(
+          "desktop:preview-webview-reset",
+          "tab_wrapper_close",
+          42,
+          expect.any(Number),
+        );
+        expect(Exit.isFailure(yield* Fiber.await(evaluation))).toBe(true);
+        const registration = yield* manager
+          .registerWebview("tab_wrapper_close", 43)
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* TestClock.adjust(2_000);
+        expect(Exit.isFailure(yield* Fiber.await(registration))).toBe(true);
+        guest.remove();
+        yield* manager.registerWebview("tab_wrapper_close", 43);
+        expect(yield* manager.automationEvaluate("tab_wrapper_close", { expression: "42" })).toBe(
+          42,
+        );
       }),
     ),
   );
@@ -2981,7 +3100,7 @@ describe("PreviewManager", () => {
             ),
           ),
         ).toBe(true);
-        guest.destroy();
+        guest.remove();
       }),
     ),
   );
@@ -4286,6 +4405,7 @@ describe("PreviewManager", () => {
         const restoreFocus = vi.fn();
         const focus = vi.fn();
         getFocusedWebContents.mockReturnValue({
+          ipc: new NodeEvents.EventEmitter(),
           id: 7,
           isDestroyed: () => false,
           focus: restoreFocus,

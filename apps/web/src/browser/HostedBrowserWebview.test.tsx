@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   createTab: vi.fn<DesktopPreviewBridge["createTab"]>(),
   closeTab: vi.fn<DesktopPreviewBridge["closeTab"]>(),
   registerWebview: vi.fn<DesktopPreviewBridge["registerWebview"]>(),
+  confirmWebviewRemoved: vi.fn<NonNullable<DesktopPreviewBridge["confirmWebviewRemoved"]>>(),
   onWebviewReset: vi.fn<NonNullable<DesktopPreviewBridge["onWebviewReset"]>>(),
   getPreviewConfig: vi.fn<DesktopPreviewBridge["getPreviewConfig"]>(),
   activeRecordings: new Set<string>(),
@@ -31,6 +32,7 @@ vi.mock("~/components/preview/previewBridge", () => ({
     closeTab: mocks.closeTab,
     registerWebview: mocks.registerWebview,
     onWebviewReset: mocks.onWebviewReset,
+    confirmWebviewRemoved: mocks.confirmWebviewRemoved,
     getPreviewConfig: mocks.getPreviewConfig,
   },
 }));
@@ -72,6 +74,7 @@ beforeEach(() => {
   mocks.createTab.mockReset().mockResolvedValue(undefined);
   mocks.closeTab.mockReset().mockResolvedValue(undefined);
   mocks.registerWebview.mockReset().mockResolvedValue(undefined);
+  mocks.confirmWebviewRemoved.mockReset();
   mocks.onWebviewReset.mockReset().mockReturnValue(() => undefined);
   mocks.getPreviewConfig.mockReset().mockResolvedValue({
     partition: "persist:t3-preview-work",
@@ -205,7 +208,7 @@ describe("HostedBrowserWebview settings hydration", () => {
 describe("HostedBrowserWebview native reset", () => {
   it("replaces only the requested guest and keeps late reset requests away from its replacement", async () => {
     mocks.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
-    const listeners = new Set<(tabId: string, webContentsId: number) => void>();
+    const listeners = new Set<Parameters<NonNullable<DesktopPreviewBridge["onWebviewReset"]>>[0]>();
     mocks.onWebviewReset.mockImplementation((listener) => {
       listeners.add(listener);
       return () => {
@@ -236,6 +239,7 @@ describe("HostedBrowserWebview native reset", () => {
               return { scrollLeft: 0, scrollTop: 0, scrollTo: () => undefined };
             const id = 41 + guests.length;
             const guest = Object.assign(new EventTarget(), { getWebContentsId: () => id });
+            Object.defineProperty(guest, "isConnected", { get: () => guests.at(-1) === guest });
             guests.push(guest);
             return guest;
           },
@@ -246,20 +250,21 @@ describe("HostedBrowserWebview native reset", () => {
     const staleListener = [...listeners][0]!;
     await act(() => {
       for (const listener of listeners) {
-        listener("another-tab", 41);
-        listener(runtimeTabId, 99);
+        listener("another-tab", 41, 1);
+        listener(runtimeTabId, 99, 1);
       }
     });
     expect(guests).toHaveLength(1);
     await act(() => {
-      staleListener(runtimeTabId, 41);
+      staleListener(runtimeTabId, 41, 1);
     });
     expect(guests).toHaveLength(2);
+    expect(mocks.confirmWebviewRemoved).toHaveBeenCalledExactlyOnceWith(runtimeTabId, 41, 1);
     expect(mocks.registerWebview).toHaveBeenCalledWith(runtimeTabId, 42);
     await act(() => {
-      staleListener(runtimeTabId, 41);
+      staleListener(runtimeTabId, 41, 1);
       guests[0]!.dispatchEvent(new Event("dom-ready"));
-      for (const listener of listeners) listener(runtimeTabId, 41);
+      for (const listener of listeners) listener(runtimeTabId, 41, 1);
     });
     expect(guests).toHaveLength(2);
     expect(mocks.registerWebview.mock.calls.filter(([, id]) => id === 41)).toHaveLength(1);

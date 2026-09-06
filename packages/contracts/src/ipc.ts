@@ -1172,7 +1172,10 @@ export interface DesktopPreviewBridge {
   closeTab: (tabId: string) => Promise<void>;
   registerWebview: (tabId: string, webContentsId: number) => Promise<void>;
   /** Remove and replace this exact guest after its native command stops responding. */
-  onWebviewReset?: (listener: (tabId: string, webContentsId: number) => void) => () => void;
+  onWebviewReset?: (
+    listener: (tabId: string, webContentsId: number, resetId: number) => void,
+  ) => () => void;
+  confirmWebviewRemoved?: (tabId: string, webContentsId: number, resetId: number) => void;
   navigate: (tabId: string, url: string) => Promise<void>;
   goBack: (tabId: string) => Promise<void>;
   goForward: (tabId: string) => Promise<void>;
