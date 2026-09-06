@@ -2367,7 +2367,7 @@ export function PullRequestDetailPanel({
                   pendingFinding={handoff}
                   fixFindingLabel={handoffLabels.fixFinding}
                   fixCheckLabel={handoffLabels.fixCheck}
-                  onFixFinding={startFixFinding}
+                  {...(detail.projectId === null ? {} : { onFixFinding: startFixFinding })}
                   actionPending={actionPending}
                   onCommentAction={performCommentAction}
                   onRefresh={refreshDetail}
@@ -2408,7 +2408,7 @@ export function PullRequestDetailPanel({
                     onSelectedCommitChange={selectCodeCommit}
                     pendingFinding={handoff}
                     fixFindingLabel={handoffLabels.fixFinding}
-                    onFixFinding={startFixFinding}
+                    {...(detail.projectId === null ? {} : { onFixFinding: startFixFinding })}
                     onRefresh={refreshDetail}
                     refreshToken={codeRefreshToken}
                   />
