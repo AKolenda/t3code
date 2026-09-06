@@ -1,9 +1,12 @@
 import * as NodeCrypto from "node:crypto";
 import { describe, expect, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as TestClock from "effect/testing/TestClock";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import type * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
@@ -68,6 +71,54 @@ function testLayer(requests: HttpClientRequest.HttpClientRequest[], responses: R
 }
 
 describe("FCM delivery", () => {
+  it.effect.each([
+    { operation: "authorize", stage: "headers", status: null },
+    { operation: "authorize", stage: "body", status: 200 },
+    { operation: "send", stage: "headers", status: null },
+    { operation: "send", stage: "body", status: 503 },
+  ] as const)("bounds a stalled $operation $stage and allows the next delivery", (scenario) =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      let shouldStall = true;
+      const http = HttpClient.make((request) => {
+        const isAuthorization = request.url === "https://oauth2.googleapis.com/token";
+        const stall = shouldStall && isAuthorization === (scenario.operation === "authorize");
+        const response = HttpClientResponse.fromWeb(
+          request,
+          isAuthorization
+            ? Response.json({ access_token: "access-token" })
+            : Response.json({}, { status: stall ? 503 : 200 }),
+        );
+        if (stall) {
+          shouldStall = false;
+          const stalled = Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never));
+          if (scenario.stage === "headers") return stalled;
+          Object.defineProperty(response, "json", { value: stalled });
+        }
+        return Effect.succeed(response);
+      });
+      yield* Effect.gen(function* () {
+        const client = yield* FcmClient;
+        const delivery = yield* client.send(input).pipe(Effect.flip, Effect.forkChild);
+        yield* Deferred.await(started);
+        yield* TestClock.adjust("10 seconds");
+        expect(yield* Fiber.join(delivery)).toMatchObject({
+          _tag: "FcmClientError",
+          operation: scenario.operation,
+          status: scenario.status,
+        });
+        expect(yield* client.send(input)).toEqual({ unregistered: false });
+      }).pipe(
+        Effect.provide(
+          layer.pipe(
+            Layer.provide(Layer.succeed(RelayConfiguration, config)),
+            Layer.provide(Layer.succeed(HttpClient.HttpClient, http)),
+          ),
+        ),
+      );
+    }),
+  );
+
   it.effect("signs a verifiable Google OAuth assertion scoped to messaging", () =>
     Effect.gen(function* () {
       const assertion = yield* makeFcmAssertion(account, 1000);

@@ -10,6 +10,8 @@ import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
 import { RelayConfiguration } from "../Config.ts";
 
+const FCM_HTTP_STAGE_TIMEOUT = "10 seconds";
+
 const ServiceAccount = Schema.Struct({
   project_id: Schema.NonEmptyString,
   client_email: Schema.NonEmptyString,
@@ -125,10 +127,14 @@ export const make = Effect.gen(function* () {
           }),
         ),
       )
-      .pipe(Effect.mapError(() => new FcmClientError({ operation: "authorize", status: null })));
+      .pipe(
+        Effect.timeout(FCM_HTTP_STAGE_TIMEOUT),
+        Effect.mapError(() => new FcmClientError({ operation: "authorize", status: null })),
+      );
     if (response.status !== 200)
       return yield* new FcmClientError({ operation: "authorize", status: response.status });
     return yield* response.json.pipe(
+      Effect.timeout(FCM_HTTP_STAGE_TIMEOUT),
       Effect.flatMap(decodeAccessToken),
       Effect.map((body) => body.access_token),
       Effect.mapError(
@@ -165,11 +171,15 @@ export const make = Effect.gen(function* () {
           },
         }),
         Effect.flatMap(client.execute),
+        Effect.timeout(FCM_HTTP_STAGE_TIMEOUT),
         Effect.mapError(() => new FcmClientError({ operation: "send", status: null })),
       );
       if (response.status >= 200 && response.status < 300) return { unregistered: false };
       if (response.status === 401) yield* invalidateToken;
-      const body = yield* response.json.pipe(Effect.orElseSucceed(() => null));
+      const body = yield* response.json.pipe(
+        Effect.timeout(FCM_HTTP_STAGE_TIMEOUT),
+        Effect.orElseSucceed(() => null),
+      );
       const decoded = decodeFcmError(body);
       const unregistered =
         Option.isSome(decoded) &&
