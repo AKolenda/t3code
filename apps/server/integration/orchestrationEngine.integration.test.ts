@@ -378,6 +378,7 @@ it.live.each(["completed", "aborted"] as const)(
       const captureStarted = yield* Deferred.make<void>();
       const finishCapture = yield* Deferred.make<void>();
       const interrupted = yield* Deferred.make<void>();
+      const firstEditFinished = yield* Deferred.make<void>();
       const secondTurnStarted = yield* Deferred.make<void>();
       const firstRef = checkpointRefForThreadTurn(THREAD_ID, 1);
       let firstFilesWereCaptured = false;
@@ -414,6 +415,7 @@ it.live.each(["completed", "aborted"] as const)(
                         NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v2\n"),
                       ),
                     ),
+                    Effect.andThen(Deferred.succeed(firstEditFinished, undefined)),
                   ),
             });
             yield* startTurn({
@@ -423,6 +425,7 @@ it.live.each(["completed", "aborted"] as const)(
               text: "Make the first edit",
             });
             yield* Fiber.join(firstTurnRunning);
+            yield* Deferred.await(firstEditFinished);
             if (completion === "aborted") {
               yield* harness.engine.dispatch({
                 type: "thread.turn.interrupt",

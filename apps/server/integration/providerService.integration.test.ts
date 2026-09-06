@@ -54,7 +54,11 @@ const makeWorkspaceDirectory = Effect.gen(function* () {
 interface IntegrationFixture {
   readonly cwd: string;
   readonly harness: TestProviderAdapterHarness;
-  readonly layer: Layer.Layer<ProviderService, unknown, never>;
+  readonly layer: Layer.Layer<
+    ProviderService | TurnCheckpointCapture.TurnCheckpointCapture,
+    unknown,
+    never
+  >;
 }
 
 interface RecordedAnalyticsEvent {
@@ -102,7 +106,7 @@ const makeIntegrationFixture = (options?: { readonly analytics?: Layer.Layer<Ana
     ).pipe(Layer.provide(SqlitePersistenceMemory));
 
     const layer = makeProviderServiceLive().pipe(
-      Layer.provide(TurnCheckpointCapture.layer),
+      Layer.provideMerge(TurnCheckpointCapture.layer),
       Layer.provide(NodeServices.layer),
       Layer.provide(shared),
     );
@@ -120,12 +124,18 @@ const collectEventsDuring = <A, E, R>(
   action: Effect.Effect<A, E, R>,
 ) =>
   Effect.gen(function* () {
+    const captures = yield* TurnCheckpointCapture.TurnCheckpointCapture;
     const queue = yield* Queue.unbounded<ProviderRuntimeEvent>();
-    yield* Stream.runForEach(stream, (event) => Queue.offer(queue, event).pipe(Effect.asVoid)).pipe(
-      Effect.forkScoped,
-    );
+    yield* Stream.runForEach(stream, (event) =>
+      Effect.gen(function* () {
+        // This fixture has no checkpoint reactor. Its terminal events finish without a capture.
+        if (event.type === "turn.completed" || event.type === "turn.aborted") {
+          yield* captures.complete(event, "skipped");
+        }
+        yield* Queue.offer(queue, event);
+      }),
+    ).pipe(Effect.forkScoped({ startImmediately: true }));
 
-    yield* Effect.sleep("50 millis");
     yield* action;
 
     return yield* Effect.forEach(
