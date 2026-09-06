@@ -691,6 +691,76 @@ describe("ThreadSettlementReactor", () => {
     );
   }
 
+  it.effect("keeps a confirmed source-project merge when a later identity probe fails", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const settled = yield* Deferred.make<void>();
+        const sourceProject = {
+          ...makeProject(),
+          repositoryIdentity: {
+            canonicalKey: "example.test/owner/repository",
+            provider: "github",
+            locator: {
+              source: "git-remote" as const,
+              remoteName: "origin",
+              remoteUrl: "https://example.test/owner/repository.git",
+            },
+          },
+        };
+        const linkedPullRequest = {
+          projectId: PROJECT_ID,
+          repository: "owner/repository",
+          number: 42,
+          url: "https://example.test/owner/repository/pull/42",
+        };
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot(
+            [
+              makeThread("source-project", {
+                latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+                linkedPullRequest,
+              }),
+              makeThread("other-project", {
+                projectId: LINKED_PROJECT_ID,
+                latestUserMessageAt: "2026-08-27T00:00:00.000Z",
+                linkedPullRequest: { ...linkedPullRequest, projectId: LINKED_PROJECT_ID },
+              }),
+            ],
+            [
+              sourceProject,
+              { ...sourceProject, id: LINKED_PROJECT_ID, workspaceRoot: "/workspace/other" },
+            ],
+          ),
+          mergeEvent: { repositoryKey: sourceProject.repositoryIdentity.canonicalKey },
+          onDispatch: () => Deferred.succeed(settled, undefined),
+        });
+
+        yield* Effect.gen(function* () {
+          const reactor = yield* ThreadSettlementReactor.ThreadSettlementReactor;
+          yield* startHarness(reactor, fixture.activation, fixture.snapshotReads);
+          const initialReads = yield* Ref.get(fixture.summaryCalls);
+          yield* Ref.update(fixture.snapshots, (snapshot) => ({
+            ...snapshot,
+            projects: snapshot.projects.map((project) => ({
+              ...project,
+              repositoryIdentity: null,
+            })),
+          }));
+
+          yield* fixture.publishMerge;
+          yield* Deferred.await(settled);
+
+          assert.deepStrictEqual(
+            (yield* Ref.get(fixture.commands)).map((command) => command.threadId),
+            [ThreadId.make("source-project")],
+          );
+          assert.deepStrictEqual(yield* Ref.get(fixture.summaryCalls), initialReads);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
   it.effect("uses fresh settlement settings after lookup and ignores unrelated changes", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -58,10 +58,12 @@ export const make = Effect.gen(function* () {
       const project = projects.get(linked.projectId);
       if (project === undefined) return false;
       const identity = project.repositoryIdentity;
+      // A local Git probe can fail after confirmation. Only the source project
+      // can then reuse the confirmed reference without a repository identity.
       const sameRepository =
-        mergedPullRequest.repositoryKey === null
-          ? linked.projectId === mergedPullRequest.projectId && identity == null
-          : identity?.canonicalKey.toLowerCase() === mergedPullRequest.repositoryKey.toLowerCase();
+        identity == null
+          ? linked.projectId === mergedPullRequest.projectId
+          : identity.canonicalKey.toLowerCase() === mergedPullRequest.repositoryKey?.toLowerCase();
       return (
         sameRepository &&
         (identity?.provider == null ||
