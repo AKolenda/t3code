@@ -11,6 +11,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import {
   buildServerProvider,
+  AUTHORITATIVE_PROVIDER_INVENTORY,
   isCommandMissingCause,
   providerModelsFromSettings,
   spawnAndCollect,
@@ -39,6 +40,7 @@ describe("compaction advertisement", () => {
           review,
         ],
         probe: {
+          inventory: AUTHORITATIVE_PROVIDER_INVENTORY,
           installed: true,
           version: null,
           status: "ready",
