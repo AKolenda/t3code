@@ -115,11 +115,32 @@ export const ServerProviderSkill = Schema.Struct({
 });
 export type ServerProviderSkill = typeof ServerProviderSkill.Type;
 
+/**
+ * Authoritative results replace the inventory, including an empty result.
+ * Stale results retain previously discovered entries. Unavailable results do
+ * not reuse them, for example after sign-out or disabling a provider.
+ */
+export const ProviderInventoryState = Schema.Literals(["authoritative", "stale", "unavailable"]);
+export type ProviderInventoryState = typeof ProviderInventoryState.Type;
+
+export const ProviderWorkspaceInventory = Schema.Struct({
+  slashCommands: ProviderInventoryState,
+  skills: ProviderInventoryState,
+});
+export type ProviderWorkspaceInventory = typeof ProviderWorkspaceInventory.Type;
+
+export const ProviderInventory = Schema.Struct({
+  models: ProviderInventoryState,
+  ...ProviderWorkspaceInventory.fields,
+});
+export type ProviderInventory = typeof ProviderInventory.Type;
+
 export const ServerProviderWorkspaceSnapshot = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   checkedAt: IsoDateTime,
   slashCommands: Schema.Array(ServerProviderSlashCommand),
   skills: Schema.Array(ServerProviderSkill),
+  inventory: Schema.optionalKey(ProviderWorkspaceInventory),
 });
 export type ServerProviderWorkspaceSnapshot = typeof ServerProviderWorkspaceSnapshot.Type;
 
@@ -223,6 +244,8 @@ export const ServerProvider = Schema.Struct({
   // Surfaces in the UI alongside the missing-driver affordance.
   unavailableReason: Schema.optional(TrimmedNonEmptyString),
   models: Schema.Array(ServerProviderModel),
+  // Older servers and cache files do not report inventory completeness.
+  inventory: Schema.optionalKey(ProviderInventory),
   slashCommands: Schema.Array(ServerProviderSlashCommand).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
@@ -234,6 +257,19 @@ export const ServerProvider = Schema.Struct({
   updateState: Schema.optionalKey(ServerProviderUpdateState),
 });
 export type ServerProvider = typeof ServerProvider.Type;
+
+/** Native commands can arrive before a workspace's skill scan completes. */
+export function hasProviderWorkspaceSkills(
+  provider: ServerProvider | null | undefined,
+  cwd: string | null | undefined,
+): boolean {
+  return Boolean(
+    cwd &&
+    provider?.workspaceSnapshots?.some(
+      (snapshot) => snapshot.cwd === cwd && snapshot.inventory?.skills !== "stale",
+    ),
+  );
+}
 
 // Provider status kinds grow over time (ServerProviderState,
 // ServerProviderAuthStatus, ServerProviderVersionAdvisoryStatus,

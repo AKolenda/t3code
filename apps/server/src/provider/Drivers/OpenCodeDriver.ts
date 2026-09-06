@@ -34,6 +34,7 @@ import {
 } from "../Layers/OpenCodeProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
+import { STALE_PROVIDER_INVENTORY } from "../providerSnapshot.ts";
 import { OpenCodeRuntime } from "../opencodeRuntime.ts";
 import * as OpenCodeServerOwner from "../OpenCodeServerOwner.ts";
 import {
@@ -252,6 +253,10 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
                 Effect.map(([machineSnapshot, skills]) => ({
                   ...machineSnapshot,
                   skills: openCodeSkillsToServerProviderSkills(skills),
+                  inventory: {
+                    ...(machineSnapshot.inventory ?? STALE_PROVIDER_INVENTORY),
+                    skills: "authoritative" as const,
+                  },
                 })),
                 Effect.mapError(
                   (cause) =>

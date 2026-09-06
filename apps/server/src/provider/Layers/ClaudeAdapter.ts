@@ -4973,6 +4973,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     ).pipe(
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
+      Effect.tapError((cause) => Effect.logDebug("Claude skill discovery failed.", { cause })),
+      Effect.orElseSucceed(() => []),
     );
     const message = yield* buildUserMessageEffect(input, {
       fileSystem,

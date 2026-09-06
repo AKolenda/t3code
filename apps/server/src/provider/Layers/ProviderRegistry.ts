@@ -24,6 +24,7 @@
  */
 import {
   defaultInstanceIdForDriver,
+  hasProviderWorkspaceSkills,
   ProviderDriverKind,
   type ProviderInstanceId,
   type ServerProvider,
@@ -54,6 +55,7 @@ import {
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 import type { ProviderSnapshotSource } from "../builtInProviderCatalog.ts";
+import { mergeProviderModels, mergeProviderWorkspaceInventories } from "../providerSnapshot.ts";
 
 const loadProviders = (
   providerSources: ReadonlyArray<ProviderSnapshotSource>,
@@ -75,9 +77,6 @@ const makeManualProviderMaintenanceCapabilities = (provider: ProviderDriverKind)
     packageName: null,
   });
 
-const hasModelCapabilities = (model: ServerProvider["models"][number]): boolean =>
-  (model.capabilities?.optionDescriptors?.length ?? 0) > 0;
-
 const MAX_WORKSPACE_SNAPSHOTS_PER_PROVIDER = 16;
 
 export function upsertProviderWorkspaceSnapshot(
@@ -85,11 +84,22 @@ export function upsertProviderWorkspaceSnapshot(
   cwd: string,
   scopedSnapshot: ServerProvider,
 ): ServerProvider {
+  const previous = provider.workspaceSnapshots?.find((snapshot) => snapshot.cwd === cwd);
   const workspaceSnapshot = {
     cwd,
     checkedAt: scopedSnapshot.checkedAt,
-    slashCommands: scopedSnapshot.slashCommands,
-    skills: scopedSnapshot.skills,
+    ...mergeProviderWorkspaceInventories(
+      previous ?? { slashCommands: [], skills: [] },
+      scopedSnapshot,
+    ),
+    ...(scopedSnapshot.inventory
+      ? {
+          inventory: {
+            slashCommands: scopedSnapshot.inventory.slashCommands,
+            skills: scopedSnapshot.inventory.skills,
+          },
+        }
+      : {}),
   } satisfies NonNullable<ServerProvider["workspaceSnapshots"]>[number];
   return {
     ...provider,
@@ -99,68 +109,6 @@ export function upsertProviderWorkspaceSnapshot(
     ].slice(-MAX_WORKSPACE_SNAPSHOTS_PER_PROVIDER),
   };
 }
-
-const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {
-  const isAntigravity = provider.driver === ProviderDriverKind.make("antigravity");
-  const isCodex = provider.driver === ProviderDriverKind.make("codex");
-  if (!isAntigravity && !isCodex && provider.driver !== ProviderDriverKind.make("opencode")) {
-    return true;
-  }
-
-  if (
-    (isAntigravity || isCodex) &&
-    (!provider.enabled || provider.auth.status === "unauthenticated")
-  ) {
-    return false;
-  }
-
-  // Successful discovery replaces these inventories so cached retired models disappear.
-  // Antigravity's local health check does not authenticate or discover models.
-  const isPendingAntigravityAuthentication =
-    isAntigravity && provider.status === "warning" && provider.auth.status === "unknown";
-  const isPendingInitialProbe =
-    provider.enabled && !provider.installed && provider.status === "warning";
-  const didInstalledProviderProbeFail = provider.installed && provider.status === "error";
-  return (
-    isPendingAntigravityAuthentication || isPendingInitialProbe || didInstalledProviderProbeFail
-  );
-};
-
-const shouldRetainMissingOpenCodeMetadata = (provider: ServerProvider): boolean =>
-  provider.driver === ProviderDriverKind.make("opencode") &&
-  shouldRetainMissingProviderModels(provider);
-
-const mergeProviderModels = (
-  provider: ServerProvider,
-  previousModels: ReadonlyArray<ServerProvider["models"][number]>,
-  nextModels: ReadonlyArray<ServerProvider["models"][number]>,
-): ReadonlyArray<ServerProvider["models"][number]> => {
-  const shouldRetainMissingModels = shouldRetainMissingProviderModels(provider);
-  // Custom rows are derived from settings and every snapshot carries the full
-  // current list, so a custom model missing from `nextModels` was removed by
-  // the user and must not be resurrected from the previous snapshot.
-  const retainablePreviousModels = previousModels.filter((model) => !model.isCustom);
-
-  if (shouldRetainMissingModels && nextModels.length === 0 && retainablePreviousModels.length > 0) {
-    return retainablePreviousModels;
-  }
-
-  const previousBySlug = new Map(previousModels.map((model) => [model.slug, model] as const));
-  const mergedModels = nextModels.map((model) => {
-    const previousModel = previousBySlug.get(model.slug);
-    if (!previousModel || hasModelCapabilities(model) || !hasModelCapabilities(previousModel)) {
-      return model;
-    }
-    return {
-      ...model,
-      capabilities: previousModel.capabilities,
-    };
-  });
-  const nextSlugs = new Set(nextModels.map((model) => model.slug));
-  return shouldRetainMissingModels
-    ? [...mergedModels, ...retainablePreviousModels.filter((model) => !nextSlugs.has(model.slug))]
-    : mergedModels;
-};
 
 /**
  * Antigravity's health check only initializes the agent, so after a server
@@ -198,31 +146,38 @@ export const mergeProviderSnapshot = (
   previousProvider: ServerProvider | undefined,
   nextProvider: ServerProvider,
 ): ServerProvider => {
-  if (!previousProvider) {
-    return nextProvider;
-  }
+  if (
+    !previousProvider ||
+    previousProvider.instanceId !== nextProvider.instanceId ||
+    previousProvider.driver !== nextProvider.driver
+  ) return nextProvider;
   const savedAccount = carrySavedAntigravityAccount(previousProvider, nextProvider);
-  // "Google account access is not checked yet" describes the probe, not the
-  // account; it must not outlive the state it explained.
+  // A passed health check no longer needs the unchecked-account message.
   const { message: _uncheckedMessage, ...nextWithoutMessage } = nextProvider;
   return {
     ...(savedAccount?.status === "ready" ? nextWithoutMessage : nextProvider),
     ...savedAccount,
-    models: mergeProviderModels(nextProvider, previousProvider.models, nextProvider.models),
+    models: mergeProviderModels(
+      previousProvider.models,
+      nextProvider.models,
+      nextProvider.inventory?.models ?? "stale",
+    ),
+    ...mergeProviderWorkspaceInventories(previousProvider, nextProvider),
     ...(nextProvider.workspaceSnapshots !== undefined
-      ? { workspaceSnapshots: nextProvider.workspaceSnapshots }
+      ? {
+          workspaceSnapshots: nextProvider.workspaceSnapshots.map((snapshot) => ({
+            ...snapshot,
+            ...mergeProviderWorkspaceInventories(
+              previousProvider.workspaceSnapshots?.find(
+                (previous) => previous.cwd === snapshot.cwd,
+              ) ?? { slashCommands: [], skills: [] },
+              snapshot,
+            ),
+          })),
+        }
       : previousProvider.workspaceSnapshots !== undefined
         ? { workspaceSnapshots: previousProvider.workspaceSnapshots }
         : {}),
-    ...(shouldRetainMissingOpenCodeMetadata(nextProvider)
-      ? {
-          slashCommands:
-            nextProvider.slashCommands.length === 0
-              ? previousProvider.slashCommands
-              : nextProvider.slashCommands,
-          skills: nextProvider.skills.length === 0 ? previousProvider.skills : nextProvider.skills,
-        }
-      : {}),
   };
 };
 
@@ -809,11 +764,7 @@ export const ProviderRegistryLive = Layer.effect(
     }) {
       const providers = yield* Ref.get(providersRef);
       const provider = providers.find((candidate) => candidate.instanceId === input.instanceId);
-      if (
-        !provider ||
-        !provider.enabled ||
-        provider.workspaceSnapshots?.some((s) => s.cwd === input.cwd)
-      ) {
+      if (!provider || !provider.enabled || hasProviderWorkspaceSkills(provider, input.cwd)) {
         return providers;
       }
       const instance = yield* instanceRegistry.getInstance(input.instanceId);
@@ -828,7 +779,7 @@ export const ProviderRegistryLive = Layer.effect(
       if (!claimed) return yield* Ref.get(providersRef);
       return yield* instance.snapshotForCwd(input.cwd).pipe(
         Effect.flatMap((scopedSnapshot) =>
-          scopedSnapshot.status === "error"
+          scopedSnapshot.inventory?.skills === "stale"
             ? Ref.get(providersRef)
             : instanceRegistry.getInstance(input.instanceId).pipe(
                 Effect.flatMap((currentInstance) => {
@@ -836,7 +787,7 @@ export const ProviderRegistryLive = Layer.effect(
                   return Ref.modify(providersRef, (currentProviders) => {
                     const nextProviders = currentProviders.map((candidate) =>
                       candidate.instanceId === input.instanceId &&
-                      !candidate.workspaceSnapshots?.some((s) => s.cwd === input.cwd)
+                      !hasProviderWorkspaceSkills(candidate, input.cwd)
                         ? upsertProviderWorkspaceSnapshot(candidate, input.cwd, scopedSnapshot)
                         : candidate,
                     );

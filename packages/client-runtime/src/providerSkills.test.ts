@@ -1,4 +1,9 @@
-import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
+import {
+  hasProviderWorkspaceSkills,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -238,7 +243,54 @@ describe("resolveProviderSkillSourceKind", () => {
 });
 
 describe("workspace provider snapshots", () => {
+  it("does not mistake native commands for a completed skill scan", () => {
+    const cwd = "/workspace/project-a";
+    const pending = {
+      ...provider,
+      workspaceSnapshots: [
+        {
+          ...provider.workspaceSnapshots[0]!,
+          inventory: { slashCommands: "authoritative", skills: "stale" },
+          skills: [],
+        },
+      ],
+    } satisfies ServerProvider;
+    expect(hasProviderWorkspaceSkills(pending, cwd)).toBe(false);
+    expect(resolveProviderSkillsForCwd(pending, cwd)).toEqual(provider.skills);
+    expect(resolveProviderSlashCommandsForCwd(pending, cwd)).toEqual([{ name: "project" }]);
+
+    const completed = {
+      ...pending,
+      workspaceSnapshots: [
+        {
+          ...pending.workspaceSnapshots[0]!,
+          inventory: { slashCommands: "authoritative", skills: "authoritative" },
+        },
+      ],
+    } satisfies ServerProvider;
+    expect(hasProviderWorkspaceSkills(completed, cwd)).toBe(true);
+    expect(resolveProviderSkillsForCwd(completed, cwd)).toEqual([]);
+  });
+
+  it("keeps current machine commands until workspace commands are known", () => {
+    const pending = {
+      ...provider,
+      workspaceSnapshots: [
+        {
+          ...provider.workspaceSnapshots[0]!,
+          inventory: { slashCommands: "stale", skills: "authoritative" },
+          slashCommands: [],
+        },
+      ],
+    } satisfies ServerProvider;
+    expect(resolveProviderSlashCommandsForCwd(pending, "/workspace/project-a")).toEqual(
+      provider.slashCommands,
+    );
+    expect(hasProviderWorkspaceSkills(pending, "/workspace/project-a")).toBe(true);
+  });
+
   it("uses the cwd snapshot after a provider session has populated it", () => {
+    expect(hasProviderWorkspaceSkills(provider, "/workspace/project-a")).toBe(true);
     expect(resolveProviderSkillsForCwd(provider, "/workspace/project-a")).toEqual([
       { name: "project", path: "/workspace/project-a/SKILL.md", enabled: true },
     ]);

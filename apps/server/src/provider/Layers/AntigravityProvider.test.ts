@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import {
   ANTIGRAVITY_DEFAULT_MODEL,
   AntigravitySettings,
+  hasProviderWorkspaceSkills,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSetupError,
@@ -630,15 +631,28 @@ it.layer(testLayer)("Antigravity provider snapshots", (it) => {
             enabled: true,
           },
         ];
+        yield* harness.provider.onSessionStarted(started, "/workspace");
+        expect(
+          hasProviderWorkspaceSkills(yield* harness.provider.snapshot.getSnapshot, "/workspace"),
+        ).toBe(false);
         const discovered = yield* harness.provider.snapshotForCwd("/workspace", skills);
         expect(discovered.skills).toEqual(skills);
+        yield* harness.provider.snapshot.refresh;
+        const afterRefresh = yield* harness.provider.snapshot.getSnapshot;
+        expect(hasProviderWorkspaceSkills(afterRefresh, "/workspace")).toBe(true);
+        expect(afterRefresh.workspaceSnapshots?.[0]?.skills).toEqual(skills);
         yield* harness.provider.onSessionStarted(started, "/workspace");
         yield* harness.provider.onAvailableCommands(commands, "/workspace");
         const after = yield* harness.provider.snapshot.getSnapshot;
         expect(
           after.workspaceSnapshots?.find((entry) => entry.cwd === "/workspace")?.skills,
         ).toEqual(skills);
+        expect(hasProviderWorkspaceSkills(after, "/workspace")).toBe(true);
         expect((yield* harness.provider.snapshotForCwd("/workspace")).skills).toEqual(skills);
+        yield* harness.provider.onAvailableCommands([], "/workspace");
+        const clearedCommands = yield* harness.provider.snapshotForCwd("/workspace");
+        expect(clearedCommands.slashCommands).toEqual([]);
+        expect(clearedCommands.skills).toEqual(skills);
       }),
     ),
   );

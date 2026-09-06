@@ -36,6 +36,9 @@ import {
   buildBooleanOptionDescriptor,
   buildSelectOptionDescriptor,
   buildServerProvider,
+  AUTHORITATIVE_PROVIDER_INVENTORY,
+  STALE_PROVIDER_INVENTORY,
+  UNAVAILABLE_PROVIDER_INVENTORY,
   collectStreamAsString,
   isCommandMissingCause,
   providerModelsFromSettings,
@@ -91,6 +94,7 @@ export function buildInitialCursorProviderSnapshot(
         checkedAt,
         models,
         probe: {
+          inventory: UNAVAILABLE_PROVIDER_INVENTORY,
           installed: false,
           version: null,
           status: "warning",
@@ -106,6 +110,7 @@ export function buildInitialCursorProviderSnapshot(
       checkedAt,
       models,
       probe: {
+        inventory: STALE_PROVIDER_INVENTORY,
         installed: true,
         version: null,
         status: "warning",
@@ -661,6 +666,11 @@ export function buildCursorProviderSnapshot(input: {
     ),
     compaction: CURSOR_COMPACTION,
     probe: {
+      inventory: {
+        ...AUTHORITATIVE_PROVIDER_INVENTORY,
+        models: input.discoveredModels === undefined ? "stale" : "authoritative",
+        skills: "stale",
+      },
       installed: true,
       version: input.parsed.version,
       status:
@@ -1024,6 +1034,7 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
       checkedAt,
       models: fallbackModels,
       probe: {
+        inventory: UNAVAILABLE_PROVIDER_INVENTORY,
         installed: false,
         version: null,
         status: "warning",
@@ -1050,6 +1061,9 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
       checkedAt,
       models: fallbackModels,
       probe: {
+        inventory: isCommandMissingCause(error)
+          ? UNAVAILABLE_PROVIDER_INVENTORY
+          : STALE_PROVIDER_INVENTORY,
         installed: !isCommandMissingCause(error),
         version: null,
         status: "error",
@@ -1068,6 +1082,7 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
       checkedAt,
       models: fallbackModels,
       probe: {
+        inventory: STALE_PROVIDER_INVENTORY,
         installed: true,
         version: null,
         status: "error",
@@ -1091,6 +1106,7 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
       checkedAt,
       models: fallbackModels,
       probe: {
+        inventory: STALE_PROVIDER_INVENTORY,
         installed: true,
         version: parsed.version,
         status: "error",
@@ -1119,6 +1135,7 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
     } else if (Option.isNone(discoveryExit.value)) {
       discoveryWarning = `Cursor ACP model discovery timed out after ${CURSOR_ACP_MODEL_DISCOVERY_TIMEOUT_MS}ms.`;
     } else if (discoveryExit.value.value.length === 0) {
+      discoveredModels = discoveryExit.value;
       discoveryWarning = "Cursor ACP model discovery returned no built-in models.";
     } else {
       discoveredModels = discoveryExit.value;
@@ -1128,10 +1145,7 @@ export const checkCursorProviderStatus = Effect.fn("checkCursorProviderStatus")(
     checkedAt,
     cursorSettings,
     parsed,
-    discoveredModels: Option.getOrElse(
-      Option.filter(discoveredModels, (models) => models.length > 0),
-      () => [] as const,
-    ),
+    ...(Option.isSome(discoveredModels) ? { discoveredModels: discoveredModels.value } : {}),
     ...(discoveryWarning ? { discoveryWarning } : {}),
   });
 });

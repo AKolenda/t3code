@@ -26,6 +26,8 @@ import {
 } from "../providerMaintenance.ts";
 import {
   buildServerProvider,
+  STALE_PROVIDER_INVENTORY,
+  UNAVAILABLE_PROVIDER_INVENTORY,
   isCommandMissingCause,
   withCompactionSlashCommand,
   type ServerProviderDraft,
@@ -143,6 +145,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
       checkedAt,
       models: [],
       probe: {
+        inventory: settings.enabled ? STALE_PROVIDER_INVENTORY : UNAVAILABLE_PROVIDER_INVENTORY,
         installed: false,
         version: null,
         status: "warning",
@@ -163,10 +166,6 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
     draft: initialDraft,
     authRevision: 0,
   });
-  // Skills the driver discovered on disk per workspace. Session callbacks
-  // rewrite the workspace entry with native commands and must keep these, or
-  // the registry drops the suggestions and never re-reads the workspace.
-  const discoveredSkills = new Map<string, ServerProvider["skills"]>();
   const getSnapshot = SubscriptionRef.get(metadata).pipe(
     Effect.flatMap((state) => options.stampIdentity(state.draft)),
   );
@@ -216,6 +215,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
           checkedAt: updatedAt,
           ...(missingInstallation
             ? {
+                inventory: UNAVAILABLE_PROVIDER_INVENTORY,
                 models: [],
                 slashCommands: [],
                 skills: [],
@@ -288,6 +288,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
           },
           checkedAt: updatedAt,
           models: buildAntigravityModelsFromSession(started.sessionSetupResult),
+          inventory: { ...(draft.inventory ?? STALE_PROVIDER_INVENTORY), models: "authoritative" },
           supportsTextGeneration,
           ...(cwd
             ? {
@@ -297,7 +298,14 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
                     cwd,
                     checkedAt: updatedAt,
                     slashCommands: workspace?.slashCommands ?? draft.slashCommands,
-                    skills: workspace?.skills ?? discoveredSkills.get(cwd) ?? [],
+                    skills: workspace?.skills ?? [],
+                    inventory: {
+                      slashCommands:
+                        workspace?.inventory?.slashCommands ??
+                        draft.inventory?.slashCommands ??
+                        "stale",
+                      skills: workspace?.inventory?.skills ?? "stale",
+                    },
                   },
                 ].slice(-MAX_WORKSPACE_SNAPSHOTS),
               }
@@ -313,7 +321,17 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
     const models = buildAntigravityModelsFromSession({ configOptions });
     yield* SubscriptionRef.update(metadata, (state) => {
       if (state.draft.auth.status !== "authenticated") return state;
-      return { ...state, draft: { ...state.draft, models } };
+      return {
+        ...state,
+        draft: {
+          ...state.draft,
+          models,
+          inventory: {
+            ...(state.draft.inventory ?? STALE_PROVIDER_INVENTORY),
+            models: "authoritative",
+          },
+        },
+      } satisfies AntigravityProviderState;
     });
   });
 
@@ -325,29 +343,36 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
     const updatedAt = DateTime.formatIso(yield* DateTime.now);
     yield* SubscriptionRef.update(metadata, (state) => {
       if (state.draft.auth.status === "unauthenticated") return state;
+      const workspaces = state.draft.workspaceSnapshots ?? [];
+      const workspace = cwd ? workspaces.find((entry) => entry.cwd === cwd) : undefined;
       return {
         ...state,
         draft: {
           ...state.draft,
           slashCommands,
+          inventory: {
+            ...(state.draft.inventory ?? STALE_PROVIDER_INVENTORY),
+            slashCommands: "authoritative",
+          },
           ...(cwd
             ? {
                 workspaceSnapshots: [
-                  ...(state.draft.workspaceSnapshots ?? []).filter((entry) => entry.cwd !== cwd),
+                  ...workspaces.filter((entry) => entry.cwd !== cwd),
                   {
                     cwd,
                     checkedAt: updatedAt,
                     slashCommands,
-                    skills:
-                      state.draft.workspaceSnapshots?.find((entry) => entry.cwd === cwd)?.skills ??
-                      discoveredSkills.get(cwd) ??
-                      [],
+                    skills: workspace?.skills ?? [],
+                    inventory: {
+                      slashCommands: "authoritative" as const,
+                      skills: workspace?.inventory?.skills ?? "stale",
+                    },
                   },
                 ].slice(-MAX_WORKSPACE_SNAPSHOTS),
               }
             : {}),
         },
-      };
+      } satisfies AntigravityProviderState;
     });
   });
 
@@ -364,6 +389,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
             status: settings.enabled ? "warning" : "disabled",
             message: SIGN_IN_MESSAGE,
             checkedAt: updatedAt,
+            inventory: UNAVAILABLE_PROVIDER_INVENTORY,
             models: [],
             slashCommands: [],
             skills: [],
@@ -372,20 +398,54 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
           },
         }) satisfies AntigravityProviderState,
     );
-    discoveredSkills.clear();
   });
 
+  // Disk discovery and native callbacks update the same workspace entry.
   const snapshotForCwd = Effect.fn("AntigravityProvider.snapshotForCwd")(function* (
     cwd: string,
     skills?: ServerProvider["skills"],
   ) {
-    if (skills) discoveredSkills.set(cwd, skills);
+    if (skills !== undefined) {
+      const checkedAt = DateTime.formatIso(yield* DateTime.now);
+      yield* SubscriptionRef.update(metadata, (state) => {
+        const workspaces = state.draft.workspaceSnapshots ?? [];
+        const previous = workspaces.find((entry) => entry.cwd === cwd);
+        const workspace = {
+          cwd,
+          checkedAt,
+          slashCommands: previous?.slashCommands ?? state.draft.slashCommands,
+          skills,
+          inventory: {
+            slashCommands:
+              previous?.inventory?.slashCommands ?? state.draft.inventory?.slashCommands ?? "stale",
+            skills: "authoritative",
+          },
+        } satisfies NonNullable<ServerProvider["workspaceSnapshots"]>[number];
+        return {
+          ...state,
+          draft: {
+            ...state.draft,
+            workspaceSnapshots: [
+              ...workspaces.filter((entry) => entry.cwd !== cwd),
+              workspace,
+            ].slice(-MAX_WORKSPACE_SNAPSHOTS),
+          },
+        };
+      });
+    }
     const snapshot = yield* getSnapshot;
     const workspace = snapshot.workspaceSnapshots?.find((entry) => entry.cwd === cwd);
-    const resolvedSkills = skills ?? workspace?.skills ?? discoveredSkills.get(cwd) ?? [];
-    return workspace
-      ? { ...snapshot, slashCommands: workspace.slashCommands, skills: resolvedSkills }
-      : { ...snapshot, skills: resolvedSkills };
+    return {
+      ...snapshot,
+      slashCommands: workspace?.slashCommands ?? snapshot.slashCommands,
+      skills: workspace?.skills ?? [],
+      inventory: {
+        ...(snapshot.inventory ?? STALE_PROVIDER_INVENTORY),
+        slashCommands:
+          workspace?.inventory?.slashCommands ?? snapshot.inventory?.slashCommands ?? "stale",
+        skills: workspace?.inventory?.skills ?? "stale",
+      },
+    };
   });
 
   return {

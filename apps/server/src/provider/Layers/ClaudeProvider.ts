@@ -24,6 +24,9 @@ import {
 
 import {
   buildServerProvider,
+  AUTHORITATIVE_PROVIDER_INVENTORY,
+  STALE_PROVIDER_INVENTORY,
+  UNAVAILABLE_PROVIDER_INVENTORY,
   DEFAULT_TIMEOUT_MS,
   isCommandMissingCause,
   parseGenericCliVersion,
@@ -445,6 +448,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       checkedAt,
       models: allModels,
       probe: {
+        inventory: UNAVAILABLE_PROVIDER_INVENTORY,
         installed: false,
         version: null,
         status: "warning",
@@ -471,6 +475,9 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       checkedAt,
       models: allModels,
       probe: {
+        inventory: isCommandMissingCause(error)
+          ? UNAVAILABLE_PROVIDER_INVENTORY
+          : STALE_PROVIDER_INVENTORY,
         installed: !isCommandMissingCause(error),
         version: null,
         status: "error",
@@ -489,6 +496,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       checkedAt,
       models: allModels,
       probe: {
+        inventory: STALE_PROVIDER_INVENTORY,
         installed: true,
         version: null,
         status: "error",
@@ -513,6 +521,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       checkedAt,
       models: allModels,
       probe: {
+        inventory: STALE_PROVIDER_INVENTORY,
         installed: true,
         version: parsedVersion,
         status: "error",
@@ -532,7 +541,10 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   const capabilities = resolveCapabilities
     ? yield* resolveCapabilities(claudeSettings).pipe(Effect.orElseSucceed(() => undefined))
     : undefined;
-  const skills = yield* discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment);
+  const skills = yield* discoverClaudeSkills(claudeSettings, cwd, resolvedEnvironment).pipe(
+    Effect.tapError((cause) => Effect.logDebug("Claude skill discovery failed.", { cause })),
+    Effect.orElseSucceed(() => undefined),
+  );
   const slashCommands = dedupeSlashCommands(capabilities?.slashCommands ?? []);
 
   if (!capabilities) {
@@ -543,8 +555,13 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
       models,
       compaction: CLAUDE_COMPACTION,
       slashCommands,
-      skills,
+      skills: skills ?? [],
       probe: {
+        inventory: {
+          ...AUTHORITATIVE_PROVIDER_INVENTORY,
+          skills: skills === undefined ? "stale" : "authoritative",
+          slashCommands: "stale",
+        },
         installed: true,
         version: parsedVersion,
         status: "warning",
@@ -574,8 +591,12 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     models,
     compaction: CLAUDE_COMPACTION,
     slashCommands,
-    skills,
+    skills: skills ?? [],
     probe: {
+      inventory: {
+        ...AUTHORITATIVE_PROVIDER_INVENTORY,
+        skills: skills === undefined ? "stale" : "authoritative",
+      },
       installed: true,
       version: parsedVersion,
       status: "ready",
@@ -611,6 +632,7 @@ export const makePendingClaudeProvider = (
         checkedAt,
         models,
         probe: {
+          inventory: UNAVAILABLE_PROVIDER_INVENTORY,
           installed: false,
           version: null,
           status: "warning",
@@ -626,6 +648,7 @@ export const makePendingClaudeProvider = (
       checkedAt,
       models,
       probe: {
+        inventory: STALE_PROVIDER_INVENTORY,
         installed: false,
         version: null,
         status: "warning",

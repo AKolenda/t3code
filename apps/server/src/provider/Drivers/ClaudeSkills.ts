@@ -19,12 +19,18 @@ import type { ClaudeSettings, ServerProviderSkill } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import type * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { fromLenientJson } from "@t3tools/shared/schemaJson";
 import { parse as parseYamlDocument } from "yaml";
 
 import { expandHomePath } from "../../pathExpansion.ts";
+
+const readIfPresent = <A, R>(effect: Effect.Effect<A, PlatformError.PlatformError, R>) =>
+  effect.pipe(
+    Effect.catch((error) => (error.reason._tag === "NotFound" ? Effect.void : Effect.fail(error))),
+  );
 
 type ClaudeSkillScope = "user" | "project";
 
@@ -161,14 +167,16 @@ export function skillOverrideSettingsPaths(
  */
 const findRepositoryRoot = Effect.fn("findRepositoryRoot")(function* (
   cwd: string,
-): Effect.fn.Return<string | undefined, never, FileSystem.FileSystem | Path.Path> {
+): Effect.fn.Return<
+  string | undefined,
+  PlatformError.PlatformError,
+  FileSystem.FileSystem | Path.Path
+> {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   let current = path.resolve(cwd);
   while (true) {
-    const isRoot = yield* fileSystem
-      .exists(path.join(current, ".git"))
-      .pipe(Effect.orElseSucceed(() => false));
+    const isRoot = yield* fileSystem.exists(path.join(current, ".git"));
     if (isRoot) {
       return current;
     }
@@ -223,7 +231,11 @@ const readSkillOverrides = Effect.fn("readSkillOverrides")(function* (
   configDirPath: string,
   cwd: string | undefined,
   environment: NodeJS.ProcessEnv,
-): Effect.fn.Return<ReadonlyMap<string, SkillOverride>, never, FileSystem.FileSystem | Path.Path> {
+): Effect.fn.Return<
+  ReadonlyMap<string, SkillOverride>,
+  PlatformError.PlatformError,
+  FileSystem.FileSystem | Path.Path
+> {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const platform = yield* HostProcessPlatform;
@@ -238,9 +250,7 @@ const readSkillOverrides = Effect.fn("readSkillOverrides")(function* (
     environment,
     repositoryRoot,
   )) {
-    const contents = yield* fileSystem
-      .readFileString(settingsPath)
-      .pipe(Effect.orElseSucceed(() => undefined));
+    const contents = yield* readIfPresent(fileSystem.readFileString(settingsPath));
     if (contents === undefined) {
       continue;
     }
@@ -297,9 +307,9 @@ const resolveClaudeConfigDirPath = Effect.fn("resolveClaudeConfigDirPath")(funct
 
 /**
  * Enumerate Claude Code skills from the user config dir and the workspace
- * `.claude/skills`. Discovery is best-effort: unreadable roots and malformed
- * skill entries are skipped so a broken skill never degrades the provider
- * snapshot. Roots are listed highest precedence first and the first hit for a
+ * `.claude/skills`. Missing roots and malformed skill entries are skipped.
+ * Read failures stay failures so a refresh cannot cache an incomplete list.
+ * Roots are listed highest precedence first and the first hit for a
  * name wins, matching Claude Code: verified against the CLI with the same
  * skill name in both scopes, the user copy is the one that runs. Reporting the
  * project copy instead would attach its invocation metadata to a command
@@ -309,7 +319,11 @@ export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* 
   config: Pick<ClaudeSettings, "homePath">,
   cwd?: string,
   environment?: NodeJS.ProcessEnv,
-): Effect.fn.Return<ReadonlyArray<ServerProviderSkill>, never, FileSystem.FileSystem | Path.Path> {
+): Effect.fn.Return<
+  ReadonlyArray<ServerProviderSkill>,
+  PlatformError.PlatformError,
+  FileSystem.FileSystem | Path.Path
+> {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const configDirPath = yield* resolveClaudeConfigDirPath(config, environment ?? process.env, cwd);
@@ -322,15 +336,15 @@ export const discoverClaudeSkills = Effect.fn("discoverClaudeSkills")(function* 
 
   const skillsByName = new Map<string, ServerProviderSkill>();
   for (const root of roots) {
-    const entries = yield* fileSystem
-      .readDirectory(root.directory)
-      .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
+    const entries = (yield* readIfPresent(fileSystem.readDirectory(root.directory))) ?? [];
 
     for (const entry of [...entries].sort()) {
+      const directory = yield* readIfPresent(fileSystem.stat(path.join(root.directory, entry)));
+      if (directory?.type !== "Directory") continue;
       const skillPath = path.join(root.directory, entry, "SKILL.md");
-      const contents = yield* fileSystem
-        .readFileString(skillPath)
-        .pipe(Effect.orElseSucceed(() => undefined));
+      const file = yield* readIfPresent(fileSystem.stat(skillPath));
+      if (file?.type !== "File") continue;
+      const contents = yield* readIfPresent(fileSystem.readFileString(skillPath));
       if (contents === undefined) {
         continue;
       }

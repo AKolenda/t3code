@@ -1,6 +1,74 @@
 import { assert, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { CodexSettings } from "@t3tools/contracts";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Schema from "effect/Schema";
 
-import { applyPreferredCodexDefaultModel, mapCodexModelCapabilities } from "./CodexProvider.ts";
+import { writeFakeCli } from "../../testUtils/fakeCli.ts";
+import {
+  applyPreferredCodexDefaultModel,
+  checkCodexProviderStatus,
+  mapCodexModelCapabilities,
+} from "./CodexProvider.ts";
+
+const decodeCodexSettings = Schema.decodeUnknownEffect(CodexSettings);
+
+it.layer(NodeServices.layer)("Codex inventory discovery", (it) => {
+  it.effect("keeps the successful inventory when the other request fails", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "t3-codex-inventory-" });
+      const binaryPath = writeFakeCli({
+        directory,
+        name: "codex-inventory",
+        source: [
+          'import { createInterface } from "node:readline";',
+          'createInterface({ input: process.stdin }).on("line", (line) => {',
+          "  const request = JSON.parse(line);",
+          "  if (request.id === undefined) return;",
+          "  const responses = {",
+          '    initialize: { userAgent: "codex/1.0.0", codexHome: process.cwd(), platformFamily: "unix", platformOs: "linux" },',
+          '    "account/read": { account: { type: "apiKey" }, requiresOpenaiAuth: false },',
+          '    "model/list": { data: [], nextCursor: null },',
+          '    "skills/list": { data: [{ cwd: process.cwd(), errors: [], skills: [] }] },',
+          "  };",
+          "  const result = responses[request.method];",
+          "  const response = request.method === process.env.T3_TEST_FAILED_INVENTORY || result === undefined",
+          '    ? { id: request.id, error: { code: -32603, message: "Discovery failed" } }',
+          "    : { id: request.id, result };",
+          '  process.stdout.write(JSON.stringify(response) + "\\n");',
+          "});",
+        ].join("\n"),
+      });
+      const settings = yield* decodeCodexSettings({
+        enabled: true,
+        binaryPath,
+        customModels: ["custom-model"],
+      });
+      for (const failedMethod of ["skills/list", "model/list"] as const) {
+        const snapshot = yield* checkCodexProviderStatus(settings, undefined, {
+          ...process.env,
+          T3_TEST_FAILED_INVENTORY: failedMethod,
+        });
+        assert.strictEqual(snapshot.status, "warning");
+        assert.strictEqual(snapshot.auth.status, "authenticated");
+        assert.deepStrictEqual(
+          snapshot.models.map((model) => model.slug),
+          ["custom-model"],
+        );
+        assert.strictEqual(
+          snapshot.inventory?.models,
+          failedMethod === "model/list" ? "stale" : "authoritative",
+        );
+        assert.strictEqual(
+          snapshot.inventory?.skills,
+          failedMethod === "skills/list" ? "stale" : "authoritative",
+        );
+      }
+    }),
+  );
+});
 
 it("maps current Codex model capability fields", () => {
   const capabilities = mapCodexModelCapabilities({

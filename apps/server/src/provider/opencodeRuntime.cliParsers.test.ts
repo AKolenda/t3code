@@ -280,8 +280,9 @@ describe("parseSkillsCliOutput", () => {
     ]);
   });
 
-  it("degrades malformed output to an empty skill list", () => {
-    NodeAssert.deepEqual(parseSkillsCliOutput("not json"), []);
+  it("distinguishes malformed output from an empty skill list", () => {
+    NodeAssert.equal(parseSkillsCliOutput("not json"), undefined);
+    NodeAssert.deepEqual(parseSkillsCliOutput("[]"), []);
   });
 });
 

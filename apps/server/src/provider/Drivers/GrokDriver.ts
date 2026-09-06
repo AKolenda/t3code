@@ -20,6 +20,7 @@ import {
 } from "../Layers/GrokProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
+import { STALE_PROVIDER_INVENTORY } from "../providerSnapshot.ts";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
@@ -140,7 +141,16 @@ export const GrokDriver: ProviderDriver<GrokSettings, GrokDriverEnv> = {
                     }),
                 ),
               ),
-            ]).pipe(Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills })));
+            ]).pipe(
+              Effect.map(([machineSnapshot, skills]) => ({
+                ...machineSnapshot,
+                skills,
+                inventory: {
+                  ...(machineSnapshot.inventory ?? STALE_PROVIDER_INVENTORY),
+                  skills: "authoritative" as const,
+                },
+              })),
+            );
 
       return {
         instanceId,

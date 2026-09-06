@@ -4,6 +4,7 @@ import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 
 import { discoverClaudeSkills, skillOverrideSettingsPaths } from "./ClaudeSkills.ts";
 
@@ -20,6 +21,33 @@ const writeSkill = Effect.fn(function* (
 });
 
 it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
+  it.effect("does not treat unreadable skill files or roots as an empty inventory", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const configDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "t3-claude-skill-read-failure-",
+      });
+      yield* writeSkill(path.join(configDir, "skills"), "review", "# Review changes");
+
+      for (const method of ["readDirectory", "readFileString"] as const) {
+        const failure = PlatformError.systemError({
+          _tag: "PermissionDenied",
+          module: "FileSystem",
+          method,
+        });
+        const error = yield* discoverClaudeSkills({ homePath: configDir }).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fs,
+            [method]: () => Effect.fail(failure),
+          }),
+          Effect.flip,
+        );
+        assert.strictEqual(error, failure);
+      }
+    }),
+  );
+
   it.effect("discovers user and project skills with frontmatter metadata", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
@@ -331,7 +359,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
     }),
   );
 
-  it.effect("ignores unreadable settings when resolving skillOverrides", () =>
+  it.effect("ignores malformed settings when resolving skillOverrides", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;

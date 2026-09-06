@@ -9,7 +9,7 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { beforeEach } from "vite-plus/test";
 
-import { OpenCodeSettings } from "@t3tools/contracts";
+import { OpenCodeSettings, ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import { ServerConfig } from "../../config.ts";
 import {
   OpenCodeRuntime,
@@ -19,6 +19,7 @@ import {
 } from "../opencodeRuntime.ts";
 import * as OpenCodeServerOwner from "../OpenCodeServerOwner.ts";
 import { checkOpenCodeProviderStatus } from "./OpenCodeProvider.ts";
+import { mergeProviderSnapshot } from "./ProviderRegistry.ts";
 import type { OpenCodeInventory } from "../opencodeRuntime.ts";
 const decodeOpenCodeSettings = Schema.decodeSync(OpenCodeSettings);
 
@@ -416,11 +417,45 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
       NodeAssert.equal(snapshot.status, "error");
       NodeAssert.equal(snapshot.installed, true);
       NodeAssert.equal(snapshot.models.length, 0);
+      NodeAssert.equal(snapshot.inventory?.models, "stale");
       NodeAssert.equal(
         snapshot.message,
         "Failed to load OpenCode provider inventory: opencode models failed",
       );
     }),
+  );
+
+  it.effect(
+    "retains skills after a failed lookup and removes them after a successful empty lookup",
+    () =>
+      Effect.gen(function* () {
+        const inventory = {
+          providerList: { connected: ["openai"], all: [], default: {} },
+          agents: [],
+          skills: [{ name: "review", location: "/skills/review/SKILL.md" }],
+        } satisfies OpenCodeInventory;
+        runtimeMock.state.inventory = inventory;
+        const previous = {
+          ...(yield* checkProvider(makeOpenCodeSettings())),
+          driver: ProviderDriverKind.make("opencode"),
+          instanceId: ProviderInstanceId.make("opencode-work"),
+        };
+
+        runtimeMock.state.inventory = { ...inventory, skills: undefined };
+        const failed = mergeProviderSnapshot(previous, {
+          ...previous,
+          ...(yield* checkProvider(makeOpenCodeSettings())),
+        });
+        NodeAssert.equal(failed.status, "ready");
+        NodeAssert.deepEqual(failed.skills, previous.skills);
+
+        runtimeMock.state.inventory = { ...inventory, skills: [] };
+        const empty = mergeProviderSnapshot(failed, {
+          ...failed,
+          ...(yield* checkProvider(makeOpenCodeSettings())),
+        });
+        NodeAssert.deepEqual(empty.skills, []);
+      }),
   );
 });
 

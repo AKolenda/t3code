@@ -110,7 +110,7 @@ it.layer(testLayer)("OpenCodeRuntime inventory", (it) => {
 
       NodeAssert.deepEqual(inventory.providerList.connected, ["openai"]);
       NodeAssert.deepEqual(inventory.agents, []);
-      NodeAssert.deepEqual(inventory.skills, []);
+      NodeAssert.equal(inventory.skills, undefined);
     }),
   );
 
@@ -207,7 +207,7 @@ it.layer(testLayer)("OpenCodeRuntime inventory", (it) => {
       });
 
       NodeAssert.deepEqual(inventory.providerList.connected, ["openai"]);
-      NodeAssert.equal(inventory.skills.length, 0);
+      NodeAssert.equal(inventory.skills, undefined);
     }),
   );
 

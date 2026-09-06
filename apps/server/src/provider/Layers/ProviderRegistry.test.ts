@@ -54,7 +54,12 @@ import {
   resolveProviderStatusCachePath,
   writeProviderStatusCache,
 } from "../providerStatusCache.ts";
-import { COMPACT_SLASH_COMMAND } from "../providerSnapshot.ts";
+import {
+  AUTHORITATIVE_PROVIDER_INVENTORY,
+  COMPACT_SLASH_COMMAND,
+  STALE_PROVIDER_INVENTORY,
+  UNAVAILABLE_PROVIDER_INVENTORY,
+} from "../providerSnapshot.ts";
 import type { ProviderInstance } from "../ProviderDriver.ts";
 import * as ProviderInstanceRegistry from "../Services/ProviderInstanceRegistry.ts";
 import * as ProviderRegistry from "../Services/ProviderRegistry.ts";
@@ -292,6 +297,10 @@ function makeCodexProbeSnapshot(
   input: Partial<CodexAppServerProviderSnapshot> = {},
 ): CodexAppServerProviderSnapshot {
   return {
+    inventory:
+      input.account?.requiresOpenaiAuth && !input.account.account
+        ? UNAVAILABLE_PROVIDER_INVENTORY
+        : AUTHORITATIVE_PROVIDER_INVENTORY,
     version: "1.0.0",
     account: {
       account: {
@@ -519,7 +528,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             Effect.fail(
               new CodexErrors.CodexAppServerSpawnError({
                 command: "codex app-server",
-                cause: new Error("spawn codex ENOENT"),
+                cause: PlatformError.systemError({
+                  _tag: "NotFound",
+                  module: "ChildProcess",
+                  method: "spawn",
+                }),
               }),
             ),
           );
@@ -589,344 +602,52 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         ]);
       });
 
-      it("preserves previously discovered provider models when a refresh returns none", () => {
-        const previousProvider = {
-          instanceId: ProviderInstanceId.make("cursor"),
-          driver: ProviderDriverKind.make("cursor"),
-          status: "ready",
-          enabled: true,
-          installed: true,
-          auth: { status: "authenticated" },
-          checkedAt: "2026-04-14T00:00:00.000Z",
-          version: "2026.04.09-f2b0fcd",
-          models: [
-            {
-              slug: "claude-opus-4-6",
-              name: "Opus 4.6",
-              isCustom: false,
-              capabilities: createModelCapabilities({
-                optionDescriptors: [
-                  selectDescriptor("reasoning", "Reasoning", [
-                    { id: "high", label: "High", isDefault: true },
-                  ]),
-                  booleanDescriptor("fastMode", "Fast Mode"),
-                  booleanDescriptor("thinking", "Thinking"),
-                ],
-              }),
-            },
-          ],
-          slashCommands: [{ name: "review", description: "Review changes" }],
-          skills: [
-            {
-              name: "typescript",
-              description: "TypeScript help",
-              path: "/skills/typescript/SKILL.md",
-              enabled: true,
-            },
-          ],
-        } as const satisfies ServerProvider;
-        const refreshedProvider = {
-          ...previousProvider,
-          checkedAt: "2026-04-14T00:01:00.000Z",
-          models: [],
-          slashCommands: [],
-          skills: [],
-        } satisfies ServerProvider;
-
-        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, refreshedProvider).models, [
-          ...previousProvider.models,
-        ]);
-        assert.deepStrictEqual(
-          mergeProviderSnapshot(previousProvider, refreshedProvider).slashCommands,
-          [],
-        );
-        assert.deepStrictEqual(
-          mergeProviderSnapshot(previousProvider, refreshedProvider).skills,
-          [],
-        );
-      });
-
-      it("drops custom models the refreshed snapshot no longer carries", () => {
-        const previousProvider = {
-          instanceId: ProviderInstanceId.make("claudeAgent"),
-          driver: ProviderDriverKind.make("claudeAgent"),
-          status: "ready",
-          enabled: true,
-          installed: true,
-          auth: { status: "authenticated" },
-          checkedAt: "2026-04-14T00:00:00.000Z",
-          version: "2.1.0",
-          models: [
-            {
-              slug: "claude-sonnet-4-6",
-              name: "Sonnet 4.6",
-              isCustom: false,
-              capabilities: null,
-            },
-            {
-              slug: "removed-custom",
-              name: "removed-custom",
-              isCustom: true,
-              capabilities: null,
-            },
-          ],
-          slashCommands: [],
-          skills: [],
-        } as const satisfies ServerProvider;
-        const refreshedProvider = {
-          ...previousProvider,
-          checkedAt: "2026-04-14T00:01:00.000Z",
-          models: [previousProvider.models[0]],
-        } satisfies ServerProvider;
-
-        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, refreshedProvider).models, [
-          ...refreshedProvider.models,
-        ]);
-      });
-
-      it("drops stale OpenCode models missing from a successful refresh", () => {
-        const previousProvider = {
-          instanceId: ProviderInstanceId.make("opencode"),
-          driver: ProviderDriverKind.make("opencode"),
-          status: "ready",
-          enabled: true,
-          installed: true,
-          auth: { status: "authenticated" },
-          checkedAt: "2026-07-17T00:00:00.000Z",
-          version: "1.0.0",
-          models: [
-            {
-              slug: "github/gpt-5",
-              name: "GPT-5",
-              subProvider: "GitHub",
-              isCustom: false,
-              capabilities: null,
-            },
-            {
-              slug: "removed-plugin/model",
-              name: "Removed Plugin Model",
-              subProvider: "Removed Plugin",
-              isCustom: false,
-              capabilities: null,
-            },
-          ],
-          slashCommands: [],
-          skills: [],
-        } as const satisfies ServerProvider;
-        const refreshedProvider = {
-          ...previousProvider,
-          checkedAt: "2026-07-17T00:01:00.000Z",
-          models: [
-            {
-              slug: "github/gpt-5",
-              name: "GPT-5",
-              subProvider: "GitHub",
-              isCustom: false,
-              capabilities: null,
-            },
-          ],
-        } satisfies ServerProvider;
-
-        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, refreshedProvider).models, [
-          ...refreshedProvider.models,
-        ]);
-      });
-
-      it("retains stale OpenCode models when a refresh fails", () => {
-        const previousProvider = {
-          instanceId: ProviderInstanceId.make("opencode"),
-          driver: ProviderDriverKind.make("opencode"),
-          status: "ready",
-          enabled: true,
-          installed: true,
-          auth: { status: "authenticated" },
-          checkedAt: "2026-07-17T00:00:00.000Z",
-          version: "1.0.0",
-          models: [
-            {
-              slug: "github/gpt-5",
-              name: "GPT-5",
-              subProvider: "GitHub",
-              isCustom: false,
-              capabilities: null,
-            },
-          ],
-          slashCommands: [{ name: "review", description: "Review changes" }],
-          skills: [
-            {
-              name: "typescript",
-              description: "TypeScript help",
-              path: "/skills/typescript/SKILL.md",
-              enabled: true,
-            },
-          ],
-        } as const satisfies ServerProvider;
-        const refreshedProvider = {
-          ...previousProvider,
-          status: "error",
-          auth: { status: "unknown" },
-          checkedAt: "2026-07-17T00:01:00.000Z",
-          models: [],
-          message: "Failed to refresh OpenCode models.",
-        } satisfies ServerProvider;
-
-        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, refreshedProvider).models, [
-          ...previousProvider.models,
-        ]);
-        assert.deepStrictEqual(
-          mergeProviderSnapshot(previousProvider, refreshedProvider).slashCommands,
-          previousProvider.slashCommands,
-        );
-        assert.deepStrictEqual(
-          mergeProviderSnapshot(previousProvider, refreshedProvider).skills,
-          previousProvider.skills,
-        );
-      });
-
-      it("classifies pending, logout, uninstall, and reconnect OpenCode inventories", () => {
-        const previousProvider = {
-          instanceId: ProviderInstanceId.make("opencode"),
-          driver: ProviderDriverKind.make("opencode"),
-          status: "ready",
-          enabled: true,
-          installed: true,
-          auth: { status: "authenticated" },
-          checkedAt: "2026-07-17T00:00:00.000Z",
-          version: "1.0.0",
-          models: [
-            {
-              slug: "github/gpt-5",
-              name: "GPT-5",
-              subProvider: "GitHub",
-              isCustom: false,
-              capabilities: null,
-            },
-            {
-              slug: "removed-plugin/model",
-              name: "Removed Plugin Model",
-              subProvider: "Removed Plugin",
-              isCustom: false,
-              capabilities: null,
-            },
-          ],
-          slashCommands: [{ name: "review", description: "Review changes" }],
-          skills: [
-            {
-              name: "typescript",
-              description: "TypeScript help",
-              path: "/skills/typescript/SKILL.md",
-              enabled: true,
-            },
-          ],
-        } as const satisfies ServerProvider;
-        const pendingProvider = {
-          ...previousProvider,
-          status: "warning",
-          installed: false,
-          auth: { status: "unknown" },
-          checkedAt: "2026-07-17T00:01:00.000Z",
-          version: null,
-          models: [],
-          message: "OpenCode provider status has not been checked in this session yet.",
-        } satisfies ServerProvider;
-        const loggedOutProvider = {
-          ...previousProvider,
-          status: "warning",
-          auth: { status: "unknown" },
-          checkedAt: "2026-07-17T00:02:00.000Z",
-          models: [],
-          slashCommands: [],
-          skills: [],
-          message: "OpenCode is available, but it did not report any connected upstream providers.",
-        } satisfies ServerProvider;
-        const missingProvider = {
-          ...previousProvider,
-          status: "error",
-          installed: false,
-          auth: { status: "unknown" },
-          checkedAt: "2026-07-17T00:03:00.000Z",
-          version: null,
-          models: [],
-          message: "OpenCode CLI (`opencode`) is not installed or not on PATH.",
-        } satisfies ServerProvider;
-        const authoritativeProvider = {
-          ...previousProvider,
-          checkedAt: "2026-07-17T00:04:00.000Z",
-          models: [previousProvider.models[0]!],
-        } satisfies ServerProvider;
-        const failedProvider = {
-          ...authoritativeProvider,
-          status: "error",
-          auth: { status: "unknown" },
-          checkedAt: "2026-07-17T00:05:00.000Z",
-          models: [],
-          message: "Failed to refresh OpenCode models.",
-        } satisfies ServerProvider;
-
-        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, pendingProvider).models, [
-          ...previousProvider.models,
-        ]);
-        assert.deepStrictEqual(
-          mergeProviderSnapshot(previousProvider, loggedOutProvider).models,
-          [],
-        );
-        assert.deepStrictEqual(
-          mergeProviderSnapshot(previousProvider, loggedOutProvider).slashCommands,
-          [],
-        );
-        assert.deepStrictEqual(
-          mergeProviderSnapshot(previousProvider, loggedOutProvider).skills,
-          [],
-        );
-        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, missingProvider).models, []);
-
-        const afterRemoval = mergeProviderSnapshot(previousProvider, authoritativeProvider);
-        const afterFailure = mergeProviderSnapshot(afterRemoval, failedProvider);
-
-        assert.deepStrictEqual(afterFailure.models, [authoritativeProvider.models[0]!]);
-      });
-
-      describe("Codex model inventories", () => {
-        const cachedProvider = {
-          instanceId: ProviderInstanceId.make("codex-personal"),
-          driver: ProviderDriverKind.make("codex"),
-          status: "ready",
-          enabled: true,
-          installed: true,
-          auth: { status: "authenticated" },
-          checkedAt: "2026-09-04T19:00:00.000Z",
-          version: "0.153.3",
-          models: [
-            "vega-alpha",
-            "joule-alpha",
-            "kindle-alpha",
-            "ultima-alpha",
-            "solstice-alpha",
-          ].map((slug) => ({ slug, name: slug, isCustom: false, capabilities: null })),
-          slashCommands: [],
-          skills: [],
-        } satisfies ServerProvider;
+      describe("inventory outcomes", () => {
         const customModel = {
           slug: "custom-model",
           name: "Custom model",
           isCustom: true,
           capabilities: null,
         } as const;
+        const cachedProvider = {
+          instanceId: ProviderInstanceId.make("personal-inventory"),
+          driver: ProviderDriverKind.make("custom-driver"),
+          status: "ready",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          checkedAt: "2026-09-04T19:00:00.000Z",
+          version: "1.0.0",
+          inventory: AUTHORITATIVE_PROVIDER_INVENTORY,
+          models: [
+            {
+              slug: "current-model",
+              name: "Current model",
+              isCustom: false,
+              capabilities: codexModelCapabilities,
+            },
+            { slug: "retired-model", name: "Retired model", isCustom: false, capabilities: null },
+            { ...customModel, slug: "removed-custom", capabilities: codexModelCapabilities },
+          ],
+          slashCommands: [{ name: "review" }],
+          skills: [{ name: "review", path: "/skills/review/SKILL.md", enabled: true }],
+        } satisfies ServerProvider;
         const refreshedProvider = {
           ...cachedProvider,
           checkedAt: "2026-09-04T19:01:00.000Z",
-          models: [
-            { slug: "gpt-6-astra", name: "GPT 6 Astra", isCustom: false, capabilities: null },
-            cachedProvider.models[0]!,
-            customModel,
-          ],
+          models: [cachedProvider.models[0]!, customModel],
+          slashCommands: [],
+          skills: [],
         } satisfies ServerProvider;
         const pendingProvider = {
           ...cachedProvider,
+          inventory: STALE_PROVIDER_INVENTORY,
           status: "warning",
           installed: false,
           auth: { status: "unknown" },
           models: [customModel],
+          slashCommands: [],
+          skills: [],
         } satisfies ServerProvider;
         const failedProvider = {
           ...pendingProvider,
@@ -935,47 +656,111 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           installed: true,
         } satisfies ServerProvider;
 
-        it("drops retired alpha models after discovery, including without OpenAI authentication", () => {
-          for (const authStatus of ["authenticated", "unknown"] as const) {
-            assert.deepStrictEqual(
-              mergeProviderSnapshot(cachedProvider, {
-                ...refreshedProvider,
-                auth: { status: authStatus },
-              }).models,
-              refreshedProvider.models,
-            );
+        it("replaces complete inventories without guessing from health or authentication", () => {
+          for (const status of ["ready", "warning", "error"] as const) {
+            for (const auth of ["authenticated", "unknown", "unauthenticated"] as const) {
+              const refreshed = { ...refreshedProvider, status, auth: { status: auth } };
+              assert.deepStrictEqual(mergeProviderSnapshot(cachedProvider, refreshed), refreshed);
+            }
           }
         });
 
-        it("keeps discovered models during startup and failed probes without restoring removed custom models", () => {
+        it("retains stale discoveries but does not restore removed custom rows", () => {
           for (const provider of [pendingProvider, failedProvider]) {
-            assert.deepStrictEqual(
-              mergeProviderSnapshot(
-                {
-                  ...cachedProvider,
-                  models: [...cachedProvider.models, { ...customModel, slug: "removed-custom" }],
-                },
-                provider,
-              ).models,
-              [customModel, ...cachedProvider.models],
-            );
+            const merged = mergeProviderSnapshot(cachedProvider, provider);
+            assert.deepStrictEqual(merged.models, [
+              customModel,
+              ...cachedProvider.models.filter((model) => !model.isCustom),
+            ]);
+            assert.deepStrictEqual(merged.skills, cachedProvider.skills);
+            assert.deepStrictEqual(merged.slashCommands, cachedProvider.slashCommands);
           }
         });
 
-        it("clears discovered models after sign-out, disable, uninstall, or empty discovery", () => {
-          const emptyProvider = { ...refreshedProvider, models: [customModel] };
-          const clearedProviders = [
-            { ...emptyProvider, status: "error", auth: { status: "unauthenticated" } },
-            { ...emptyProvider, status: "disabled", enabled: false },
-            { ...emptyProvider, status: "error", installed: false, auth: { status: "unknown" } },
-            emptyProvider,
-            { ...emptyProvider, models: [] },
-          ] satisfies ReadonlyArray<ServerProvider>;
+        it("uses each inventory's outcome independently", () => {
+          const refreshed = {
+            ...refreshedProvider,
+            inventory: { ...AUTHORITATIVE_PROVIDER_INVENTORY, skills: "stale" },
+          } satisfies ServerProvider;
+          const merged = mergeProviderSnapshot(cachedProvider, refreshed);
+          assert.deepStrictEqual(merged.models, refreshed.models);
+          assert.deepStrictEqual(merged.slashCommands, []);
+          assert.deepStrictEqual(merged.skills, cachedProvider.skills);
+        });
 
-          for (const provider of clearedProviders) {
+        it("does not restore an inventory after a successful empty result", () => {
+          const emptyProvider = { ...refreshedProvider, models: [] };
+          const afterEmpty = mergeProviderSnapshot(cachedProvider, emptyProvider);
+          const afterFailure = mergeProviderSnapshot(afterEmpty, { ...failedProvider, models: [] });
+          assert.deepStrictEqual(afterFailure.models, []);
+          assert.deepStrictEqual(afterFailure.skills, []);
+          assert.deepStrictEqual(afterFailure.slashCommands, []);
+        });
+
+        it("clears unavailable discoveries while keeping current custom settings", () => {
+          const unavailable = {
+            ...failedProvider,
+            inventory: UNAVAILABLE_PROVIDER_INVENTORY,
+            auth: { status: "unauthenticated" },
+          } satisfies ServerProvider;
+          const cleared = mergeProviderSnapshot(cachedProvider, unavailable);
+          assert.deepStrictEqual(cleared.models, [customModel]);
+          assert.deepStrictEqual(cleared.skills, []);
+          assert.deepStrictEqual(cleared.slashCommands, []);
+          assert.deepStrictEqual(mergeProviderSnapshot(cleared, failedProvider).models, [
+            customModel,
+          ]);
+        });
+
+        it("retains old capabilities only for stale discovered rows", () => {
+          const current = cachedProvider.models[0]!;
+          const nextModel = { ...current, capabilities: null };
+          assert.strictEqual(
+            mergeProviderSnapshot(cachedProvider, { ...refreshedProvider, models: [nextModel] })
+              .models[0]?.capabilities,
+            null,
+          );
+          assert.deepStrictEqual(
+            mergeProviderSnapshot(cachedProvider, { ...failedProvider, models: [nextModel] })
+              .models[0],
+            current,
+          );
+          const nextCustom = { ...nextModel, isCustom: true };
+          assert.deepStrictEqual(
+            mergeProviderSnapshot(cachedProvider, { ...failedProvider, models: [nextCustom] })
+              .models,
+            [nextCustom, cachedProvider.models[1]!],
+          );
+          assert.deepStrictEqual(
+            mergeProviderSnapshot(
+              {
+                ...cachedProvider,
+                models: [{ ...nextCustom, capabilities: codexModelCapabilities }],
+              },
+              { ...failedProvider, models: [nextCustom] },
+            ).models,
+            [nextCustom],
+          );
+        });
+
+        it("keeps legacy snapshot handling independent of driver names", () => {
+          const { inventory: _inventory, ...legacy } = failedProvider;
+          const merged = mergeProviderSnapshot(cachedProvider, legacy);
+          assert.deepStrictEqual(merged.models, [
+            customModel,
+            ...cachedProvider.models.filter((model) => !model.isCustom),
+          ]);
+          assert.deepStrictEqual(merged.skills, []);
+        });
+
+        it("does not reuse a different driver or instance's inventory", () => {
+          for (const previous of [
+            { ...cachedProvider, driver: ProviderDriverKind.make("other-driver") },
+            { ...cachedProvider, instanceId: ProviderInstanceId.make("other-instance") },
+          ]) {
             assert.deepStrictEqual(
-              mergeProviderSnapshot(cachedProvider, provider).models,
-              provider.models,
+              mergeProviderSnapshot(previous, pendingProvider),
+              pendingProvider,
             );
           }
         });
@@ -994,7 +779,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               driverKind: cachedProvider.driver,
               continuationIdentity: {
                 driverKind: cachedProvider.driver,
-                continuationKey: "codex:instance:codex-personal",
+                continuationKey: "custom-driver:personal",
               },
               displayName: undefined,
               enabled: true,
@@ -1035,7 +820,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 const registry = yield* ProviderRegistry.ProviderRegistry;
                 const expectedModels = restarted
                   ? retainedModels
-                  : [customModel, ...cachedProvider.models];
+                  : [customModel, ...cachedProvider.models.filter((model) => !model.isCustom)];
                 assert.deepStrictEqual((yield* registry.getProviders)[0]?.models, expectedModels);
 
                 yield* registry.refreshInstance(instance.instanceId);
@@ -1059,124 +844,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           }).pipe(
             Effect.provide(
               ServerConfig.layerTest(process.cwd(), {
-                prefix: "t3-codex-retired-model-cache-",
+                prefix: "t3-provider-inventory-cache-",
               }).pipe(Layer.provideMerge(NodeServices.layer)),
             ),
           ),
         );
-      });
-
-      describe("Antigravity model inventories", () => {
-        const previousProvider = {
-          instanceId: ProviderInstanceId.make("antigravity-personal"),
-          driver: ProviderDriverKind.make("antigravity"),
-          status: "ready",
-          enabled: true,
-          installed: true,
-          auth: { status: "authenticated" },
-          checkedAt: "2026-09-02T00:00:00.000Z",
-          version: "0.1.3",
-          models: [
-            {
-              slug: "gemini-3.1-pro-high",
-              name: "Gemini 3.1 Pro High",
-              isCustom: false,
-              capabilities: null,
-            },
-            {
-              slug: "gemini-3-flash",
-              name: "Gemini 3 Flash",
-              isCustom: false,
-              capabilities: null,
-            },
-          ],
-          slashCommands: [],
-          skills: [],
-        } as const satisfies ServerProvider;
-
-        it("removes unavailable models after a successful refresh", () => {
-          for (const status of ["ready", "warning"] as const) {
-            const refreshedProvider = {
-              ...previousProvider,
-              status,
-              checkedAt: "2026-09-02T00:01:00.000Z",
-              models: [previousProvider.models[1]],
-            } satisfies ServerProvider;
-            const afterRefresh = mergeProviderSnapshot(previousProvider, refreshedProvider);
-
-            assert.deepStrictEqual(afterRefresh.models, refreshedProvider.models);
-
-            const afterFailure = mergeProviderSnapshot(afterRefresh, {
-              ...refreshedProvider,
-              status: "error",
-              auth: { status: "unknown" },
-              models: [],
-            });
-            assert.deepStrictEqual(afterFailure.models, refreshedProvider.models);
-          }
-        });
-
-        it("keeps cached models during health checks and temporary failures", () => {
-          for (const installed of [false, true]) {
-            const pendingProvider = {
-              ...previousProvider,
-              status: "warning",
-              installed,
-              auth: { status: "unknown" },
-              checkedAt: "2026-09-02T00:01:00.000Z",
-              version: installed ? previousProvider.version : null,
-              models: [],
-            } satisfies ServerProvider;
-
-            assert.deepStrictEqual(
-              mergeProviderSnapshot(previousProvider, pendingProvider).models,
-              previousProvider.models,
-            );
-          }
-
-          for (const authStatus of ["unknown", "authenticated"] as const) {
-            const failedProvider = {
-              ...previousProvider,
-              status: "error",
-              auth: { status: authStatus },
-              checkedAt: "2026-09-02T00:02:00.000Z",
-              models: [],
-            } satisfies ServerProvider;
-
-            assert.deepStrictEqual(
-              mergeProviderSnapshot(previousProvider, failedProvider).models,
-              previousProvider.models,
-            );
-          }
-        });
-
-        it("clears models after sign-out, disable, uninstall, or an empty successful refresh", () => {
-          const emptyProvider = {
-            ...previousProvider,
-            checkedAt: "2026-09-02T00:01:00.000Z",
-            models: [],
-          } satisfies ServerProvider;
-          const clearedProviders = [
-            { ...emptyProvider, status: "warning", auth: { status: "unauthenticated" } },
-            { ...emptyProvider, status: "error", auth: { status: "unauthenticated" } },
-            { ...emptyProvider, status: "disabled", enabled: false },
-            { ...emptyProvider, status: "error", enabled: false },
-            { ...emptyProvider, status: "error", installed: false, auth: { status: "unknown" } },
-            emptyProvider,
-          ] satisfies ReadonlyArray<ServerProvider>;
-
-          for (const provider of clearedProviders) {
-            const afterRemoval = mergeProviderSnapshot(previousProvider, provider);
-            assert.deepStrictEqual(afterRemoval.models, []);
-
-            const afterFailure = mergeProviderSnapshot(afterRemoval, {
-              ...emptyProvider,
-              status: "error",
-              auth: { status: "unknown" },
-            });
-            assert.deepStrictEqual(afterFailure.models, []);
-          }
-        });
       });
 
       describe("Antigravity saved account", () => {
@@ -1286,54 +958,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         });
       });
 
-      it("fills missing capabilities from the previous provider snapshot", () => {
-        const previousProvider = {
-          instanceId: ProviderInstanceId.make("cursor"),
-          driver: ProviderDriverKind.make("cursor"),
-          status: "ready",
-          enabled: true,
-          installed: true,
-          auth: { status: "authenticated" },
-          checkedAt: "2026-04-14T00:00:00.000Z",
-          version: "2026.04.09-f2b0fcd",
-          models: [
-            {
-              slug: "claude-opus-4-6",
-              name: "Opus 4.6",
-              isCustom: false,
-              capabilities: createModelCapabilities({
-                optionDescriptors: [
-                  selectDescriptor("reasoning", "Reasoning", [
-                    { id: "high", label: "High", isDefault: true },
-                  ]),
-                  booleanDescriptor("fastMode", "Fast Mode"),
-                  booleanDescriptor("thinking", "Thinking"),
-                ],
-              }),
-            },
-          ],
-          slashCommands: [],
-          skills: [],
-        } as const satisfies ServerProvider;
-        const refreshedProvider = {
-          ...previousProvider,
-          checkedAt: "2026-04-14T00:01:00.000Z",
-          models: [
-            {
-              slug: "claude-opus-4-6",
-              name: "Opus 4.6",
-              isCustom: false,
-              capabilities: createModelCapabilities({
-                optionDescriptors: [],
-              }),
-            },
-          ],
-        } satisfies ServerProvider;
-
-        assert.deepStrictEqual(mergeProviderSnapshot(previousProvider, refreshedProvider).models, [
-          ...previousProvider.models,
-        ]);
-      });
 
       it.effect("does not run provider probes during layer construction", () =>
         Effect.gen(function* () {
@@ -1429,15 +1053,27 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             models: [],
             slashCommands: [{ name: "global" }],
             skills: [{ name: "global", path: "/global/SKILL.md", enabled: true }],
+            workspaceSnapshots: [
+              {
+                cwd: "/workspace",
+                checkedAt: "2026-06-10T00:00:00.000Z",
+                slashCommands: [{ name: "project" }],
+                skills: [],
+                inventory: { slashCommands: "authoritative", skills: "stale" },
+              },
+            ],
           } as const satisfies ServerProvider;
           const scopedProvider = {
             ...machineProvider,
+            inventory: AUTHORITATIVE_PROVIDER_INVENTORY,
+            status: "error",
             checkedAt: "2026-06-10T00:01:00.000Z",
             slashCommands: [{ name: "project" }],
             skills: [{ name: "project", path: "/workspace/SKILL.md", enabled: true }],
           } as const satisfies ServerProvider;
           const pendingScopedProvider = {
             ...scopedProvider,
+            inventory: STALE_PROVIDER_INVENTORY,
             status: "error",
             installed: false,
             slashCommands: [],
@@ -1484,8 +1120,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
               return scopedProvider;
             }),
           );
+          const { workspaceSnapshots: _oldWorkspaces, ...machineMetadata } = machineProvider;
           const rebuiltProvider = {
-            ...machineProvider,
+            ...machineMetadata,
             checkedAt: "2026-06-10T00:02:00.000Z",
             status: "warning",
             installed: false,
@@ -1528,7 +1165,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry.ProviderRegistry;
             yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
-            assert.strictEqual((yield* registry.getProviders)[0]?.workspaceSnapshots, undefined);
+            assert.deepStrictEqual(
+              (yield* registry.getProviders)[0]?.workspaceSnapshots,
+              machineProvider.workspaceSnapshots,
+            );
             yield* Ref.set(returnPendingSnapshot, false);
             const workspaceUpdate = yield* registry.streamChanges.pipe(
               Stream.runHead,
@@ -1558,17 +1198,14 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
             assert.strictEqual(yield* Ref.get(snapshotCalls), 2);
 
+            const rebuiltUpdate = yield* awaitPersistedProvider(
+              registry,
+              rebuiltProvider.checkedAt,
+            );
             yield* Ref.set(instancesRef, [rebuiltInstance]);
             yield* PubSub.publish(registryChanges, undefined);
-            let rebuilt = yield* registry.getProviders;
-            for (
-              let attempt = 0;
-              attempt < 50 && rebuilt[0]?.checkedAt !== rebuiltProvider.checkedAt;
-              attempt += 1
-            ) {
-              yield* Effect.yieldNow;
-              rebuilt = yield* registry.getProviders;
-            }
+            yield* Fiber.join(rebuiltUpdate);
+            const rebuilt = yield* registry.getProviders;
             assert.strictEqual(rebuilt[0]?.checkedAt, rebuiltProvider.checkedAt);
             assert.strictEqual(rebuilt[0]?.workspaceSnapshots, undefined);
           }).pipe(Effect.provide(runtimeServices));
@@ -1597,6 +1234,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             skills: [],
           } as const satisfies ServerProvider;
           const failedOpenCodeProvider = {
+            inventory: STALE_PROVIDER_INVENTORY,
             instanceId: openCodeInstanceId,
             driver: openCodeDriver,
             status: "error",
@@ -1612,6 +1250,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           } as const satisfies ServerProvider;
           const recoveredOpenCodeProvider = {
             ...failedOpenCodeProvider,
+            inventory: AUTHORITATIVE_PROVIDER_INVENTORY,
             status: "ready",
             auth: { status: "authenticated" },
             checkedAt: "2026-06-10T00:01:00.000Z",
@@ -1908,11 +1547,13 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             } as const satisfies ServerProvider;
             const authoritativeProvider = {
               ...initialProvider,
+              inventory: AUTHORITATIVE_PROVIDER_INVENTORY,
               checkedAt: "2026-07-17T00:01:00.000Z",
               models: [initialProvider.models[0]!],
             } satisfies ServerProvider;
             const failedProvider = {
               ...authoritativeProvider,
+              inventory: STALE_PROVIDER_INVENTORY,
               status: "error",
               auth: { status: "unknown" },
               checkedAt: "2026-07-17T00:02:00.000Z",

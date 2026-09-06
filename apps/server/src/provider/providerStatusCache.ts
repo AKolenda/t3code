@@ -10,24 +10,11 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { writeFileStringAtomically } from "../atomicWrite.ts";
+import { mergeProviderModels, mergeProviderWorkspaceInventories } from "./providerSnapshot.ts";
 
 const decodeProviderStatusCache = Schema.decodeUnknownEffect(
   Schema.fromJsonString(ServerProviderSchema),
 );
-
-const mergeProviderModels = (
-  fallbackModels: ReadonlyArray<ServerProvider["models"][number]>,
-  cachedModels: ReadonlyArray<ServerProvider["models"][number]>,
-): ReadonlyArray<ServerProvider["models"][number]> => {
-  const fallbackSlugs = new Set(fallbackModels.map((model) => model.slug));
-  // The fallback snapshot is built from current settings and already carries
-  // every custom model, so cached custom rows that are not in it were removed
-  // while the cache was stale and must not come back.
-  return [
-    ...fallbackModels,
-    ...cachedModels.filter((model) => !model.isCustom && !fallbackSlugs.has(model.slug)),
-  ];
-};
 
 /**
  * Built-in drivers in presentation order. Codex and Claude lead, the opt-in
@@ -83,14 +70,23 @@ export const hydrateCachedProvider = (input: {
   const { message: _fallbackMessage, ...fallbackWithoutMessage } = input.fallbackProvider;
   const hydratedProvider: ServerProvider = {
     ...fallbackWithoutMessage,
-    models: mergeProviderModels(input.fallbackProvider.models, input.cachedProvider.models),
+    models: mergeProviderModels(
+      input.cachedProvider.models,
+      input.fallbackProvider.models,
+      input.fallbackProvider.inventory?.models ?? "stale",
+    ),
     installed: input.cachedProvider.installed,
     version: input.cachedProvider.version,
     status: input.cachedProvider.status,
     auth: input.cachedProvider.auth,
     checkedAt: input.cachedProvider.checkedAt,
-    slashCommands: input.cachedProvider.slashCommands,
-    skills: input.cachedProvider.skills,
+    ...mergeProviderWorkspaceInventories(input.cachedProvider, {
+      ...input.fallbackProvider,
+      inventory: input.fallbackProvider.inventory ?? {
+        slashCommands: "stale",
+        skills: "stale",
+      },
+    }),
   };
 
   return input.cachedProvider.message

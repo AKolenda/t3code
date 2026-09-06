@@ -13,6 +13,9 @@ import { createModelCapabilities } from "@t3tools/shared/model";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   buildServerProvider,
+  AUTHORITATIVE_PROVIDER_INVENTORY,
+  STALE_PROVIDER_INVENTORY,
+  UNAVAILABLE_PROVIDER_INVENTORY,
   nonEmptyTrimmed,
   parseGenericCliVersion,
   providerModelsFromSettings,
@@ -333,6 +336,7 @@ export const makePendingOpenCodeProvider = (
         checkedAt,
         models,
         probe: {
+          inventory: UNAVAILABLE_PROVIDER_INVENTORY,
           installed: false,
           version: null,
           status: "warning",
@@ -351,6 +355,7 @@ export const makePendingOpenCodeProvider = (
       checkedAt,
       models,
       probe: {
+        inventory: STALE_PROVIDER_INVENTORY,
         installed: false,
         version: null,
         status: "warning",
@@ -393,6 +398,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
       checkedAt,
       models: providerModelsFromSettings([], customModels, DEFAULT_OPENCODE_MODEL_CAPABILITIES),
       probe: {
+        inventory: failure.installed ? STALE_PROVIDER_INVENTORY : UNAVAILABLE_PROVIDER_INVENTORY,
         installed: failure.installed,
         version,
         status: "error",
@@ -409,6 +415,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
       checkedAt,
       models: providerModelsFromSettings([], customModels, DEFAULT_OPENCODE_MODEL_CAPABILITIES),
       probe: {
+        inventory: UNAVAILABLE_PROVIDER_INVENTORY,
         installed: false,
         version: null,
         status: "warning",
@@ -464,6 +471,7 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
         checkedAt,
         models: providerModelsFromSettings([], customModels, DEFAULT_OPENCODE_MODEL_CAPABILITIES),
         probe: {
+          inventory: STALE_PROVIDER_INVENTORY,
           installed: true,
           version,
           status: "error",
@@ -528,6 +536,10 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     skills,
     compaction: OPENCODE_COMPACTION,
     probe: {
+      inventory: {
+        ...AUTHORITATIVE_PROVIDER_INVENTORY,
+        skills: inventoryExit.value.inventory.skills === undefined ? "stale" : "authoritative",
+      },
       installed: true,
       version,
       status: connectedCount > 0 ? "ready" : "warning",

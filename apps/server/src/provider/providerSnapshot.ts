@@ -9,6 +9,9 @@ import type {
   ServerProviderModel,
   ServerProviderState,
   ServerProviderUsageLimits,
+  ProviderInventory,
+  ProviderInventoryState,
+  ProviderWorkspaceInventory,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as PlatformError from "effect/PlatformError";
@@ -24,6 +27,24 @@ import type { ProviderCompactionStrategy } from "./Services/ProviderAdapter.ts";
 export const DEFAULT_TIMEOUT_MS = 4_000;
 // Auth status checks involve disk/network lookups and can be slow on first run (especially Windows)
 export const AUTH_PROBE_TIMEOUT_MS = 10_000;
+
+export const AUTHORITATIVE_PROVIDER_INVENTORY = {
+  models: "authoritative",
+  slashCommands: "authoritative",
+  skills: "authoritative",
+} as const satisfies ProviderInventory;
+
+export const STALE_PROVIDER_INVENTORY = {
+  models: "stale",
+  slashCommands: "stale",
+  skills: "stale",
+} as const satisfies ProviderInventory;
+
+export const UNAVAILABLE_PROVIDER_INVENTORY = {
+  models: "unavailable",
+  slashCommands: "unavailable",
+  skills: "unavailable",
+} as const satisfies ProviderInventory;
 
 export const COMPACT_SLASH_COMMAND = {
   name: "compact",
@@ -66,6 +87,7 @@ export class ProviderCommandNotFoundError extends Schema.TaggedErrorClass<Provid
 const isProviderCommandNotFoundError = Schema.is(ProviderCommandNotFoundError);
 
 export interface ProviderProbeResult {
+  readonly inventory: ProviderInventory;
   readonly installed: boolean;
   readonly version: string | null;
   readonly status: Exclude<ServerProviderState, "disabled">;
@@ -274,10 +296,64 @@ export function buildServerProvider(input: {
     checkedAt: input.checkedAt,
     ...(input.probe.message ? { message: input.probe.message } : {}),
     models: input.models,
+    inventory: input.probe.inventory,
     slashCommands: withCompactionSlashCommand(input.slashCommands ?? [], input.compaction),
     skills: [...(input.skills ?? [])],
     ...(input.probe.usageLimits ? { usageLimits: input.probe.usageLimits } : {}),
     ...(versionAdvisory ? { versionAdvisory } : {}),
+  };
+}
+
+function retainMissingItems<T>(
+  previous: ReadonlyArray<T>,
+  next: ReadonlyArray<T>,
+  key: (item: T) => string,
+): ReadonlyArray<T> {
+  if (previous.length === 0) return next;
+  if (next.length === 0) return previous;
+  const nextKeys = new Set(next.map(key));
+  return [...next, ...previous.filter((item) => !nextKeys.has(key(item)))];
+}
+
+/** Settings own custom rows, even when discovery must retain an older inventory. */
+export function mergeProviderModels(
+  previous: ReadonlyArray<ServerProviderModel>,
+  next: ReadonlyArray<ServerProviderModel>,
+  state: ProviderInventoryState,
+): ReadonlyArray<ServerProviderModel> {
+  if (state !== "stale") return next;
+
+  const previousBuiltIns = previous.filter((model) => !model.isCustom);
+  const previousBySlug = new Map(previousBuiltIns.map((model) => [model.slug, model]));
+  const models = next.map((model) => {
+    const previousModel = previousBySlug.get(model.slug);
+    if (
+      model.isCustom ||
+      !previousModel ||
+      (model.capabilities?.optionDescriptors?.length ?? 0) > 0 ||
+      (previousModel.capabilities?.optionDescriptors?.length ?? 0) === 0
+    )
+      return model;
+    return { ...model, capabilities: previousModel.capabilities };
+  });
+  return retainMissingItems(previousBuiltIns, models, (model) => model.slug);
+}
+
+export function mergeProviderWorkspaceInventories(
+  previous: Pick<ServerProvider, "slashCommands" | "skills">,
+  next: Pick<ServerProvider, "slashCommands" | "skills"> & {
+    readonly inventory?: ProviderWorkspaceInventory;
+  },
+) {
+  return {
+    slashCommands:
+      next.inventory?.slashCommands === "stale"
+        ? retainMissingItems(previous.slashCommands, next.slashCommands, (command) => command.name)
+        : next.slashCommands,
+    skills:
+      next.inventory?.skills === "stale"
+        ? retainMissingItems(previous.skills, next.skills, (skill) => skill.path)
+        : next.skills,
   };
 }
 

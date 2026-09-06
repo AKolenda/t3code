@@ -22,6 +22,7 @@ import type {
   ProviderOptionDescriptor,
   ServerProviderModel,
   ServerProviderSkill,
+  ProviderInventory,
 } from "@t3tools/contracts";
 import { PREFERRED_DEFAULT_CODEX_MODELS, ServerSettingsError } from "@t3tools/contracts";
 
@@ -31,6 +32,10 @@ import { codexAppServerArgs, resolveCodexLaunchArgs } from "./codexLaunchArgs.ts
 import {
   AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
+  AUTHORITATIVE_PROVIDER_INVENTORY,
+  STALE_PROVIDER_INVENTORY,
+  UNAVAILABLE_PROVIDER_INVENTORY,
+  isCommandMissingCause,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 import { CODEX_COMPACTION } from "../Services/CodexAdapter.ts";
@@ -61,6 +66,7 @@ const CODEX_PRESENTATION = {
 } as const;
 
 export interface CodexAppServerProviderSnapshot {
+  readonly inventory: Pick<ProviderInventory, "models" | "skills">;
   readonly account: CodexSchema.V2GetAccountResponse;
   readonly rateLimits?: CodexRateLimitsProbe;
   readonly version: string | undefined;
@@ -416,6 +422,7 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   const accountResponse = yield* client.request("account/read", {});
   if (!accountResponse.account && accountResponse.requiresOpenaiAuth) {
     return {
+      inventory: { models: "unavailable", skills: "unavailable" },
       account: accountResponse,
       version,
       models: appendCustomCodexModels([], input.customModels ?? []),
@@ -423,12 +430,16 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
     } satisfies CodexAppServerProviderSnapshot;
   }
 
-  const [skillsResponse, models, rateLimits] = yield* Effect.all(
+  const [skillsResult, modelsResult, rateLimits] = yield* Effect.all(
     [
-      client.request("skills/list", {
-        cwds: [input.cwd],
-      }),
-      requestAllCodexModels(client),
+      client.request("skills/list", { cwds: [input.cwd] }).pipe(
+        Effect.tapError((cause) => Effect.logDebug("Codex skill discovery failed.", { cause })),
+        Effect.result,
+      ),
+      requestAllCodexModels(client).pipe(
+        Effect.tapError((cause) => Effect.logDebug("Codex model discovery failed.", { cause })),
+        Effect.result,
+      ),
       // Usage is an enrichment: a failure or a slow answer degrades to "no
       // usage this probe" rather than costing the account and models.
       client.request("account/rateLimits/read", undefined).pipe(
@@ -453,13 +464,22 @@ const probeCodexAppServerProvider = Effect.fn("probeCodexAppServerProvider")(fun
   );
 
   return {
+    inventory: {
+      models: Result.isSuccess(modelsResult) ? "authoritative" : "stale",
+      skills: Result.isSuccess(skillsResult) ? "authoritative" : "stale",
+    },
     account: accountResponse,
     rateLimits,
     version,
     models: applyPreferredCodexDefaultModel(
-      appendCustomCodexModels(models, input.customModels ?? []),
+      appendCustomCodexModels(
+        Result.isSuccess(modelsResult) ? modelsResult.success : [],
+        input.customModels ?? [],
+      ),
     ),
-    skills: parseCodexSkillsListResponse(skillsResponse, input.cwd),
+    skills: Result.isSuccess(skillsResult)
+      ? parseCodexSkillsListResponse(skillsResult.success, input.cwd)
+      : [],
   } satisfies CodexAppServerProviderSnapshot;
 });
 
@@ -493,6 +513,7 @@ const makePendingCodexProvider = (
         models,
         skills: [],
         probe: {
+          inventory: UNAVAILABLE_PROVIDER_INVENTORY,
           installed: false,
           version: null,
           status: "warning",
@@ -509,6 +530,7 @@ const makePendingCodexProvider = (
       models,
       skills: [],
       probe: {
+        inventory: STALE_PROVIDER_INVENTORY,
         installed: false,
         version: null,
         status: "warning",
@@ -579,6 +601,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       models: emptyModels,
       skills: [],
       probe: {
+        inventory: UNAVAILABLE_PROVIDER_INVENTORY,
         installed: false,
         version: null,
         status: "warning",
@@ -603,7 +626,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
 
   if (Result.isFailure(probeResult)) {
     const error = probeResult.failure;
-    const installed = !isCodexAppServerSpawnError(error);
+    const installed = !(isCodexAppServerSpawnError(error) && isCommandMissingCause(error.cause));
     return buildServerProvider({
       presentation: CODEX_PRESENTATION,
       enabled: codexSettings.enabled,
@@ -611,6 +634,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       models: emptyModels,
       skills: [],
       probe: {
+        inventory: installed ? STALE_PROVIDER_INVENTORY : UNAVAILABLE_PROVIDER_INVENTORY,
         installed,
         version: null,
         status: "error",
@@ -630,6 +654,7 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       models: emptyModels,
       skills: [],
       probe: {
+        inventory: STALE_PROVIDER_INVENTORY,
         installed: true,
         version: null,
         status: "error",
@@ -641,6 +666,8 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
 
   const snapshot = probeResult.success.value;
   const accountStatus = accountProbeStatus(snapshot.account);
+  const hasStaleInventory =
+    snapshot.inventory.models === "stale" || snapshot.inventory.skills === "stale";
   const usageLimits =
     snapshot.account.account?.type === "apiKey"
       ? makeUnavailableUsageLimits({ checkedAt, reason: "unsupported" })
@@ -671,11 +698,17 @@ export const checkCodexProviderStatus = Effect.fn("checkCodexProviderStatus")(fu
       },
     ],
     probe: {
+      inventory: { ...AUTHORITATIVE_PROVIDER_INVENTORY, ...snapshot.inventory },
       installed: true,
       version: snapshot.version ?? null,
-      status: accountStatus.status,
+      status:
+        accountStatus.status === "ready" && hasStaleInventory ? "warning" : accountStatus.status,
       auth: accountStatus.auth,
-      ...(accountStatus.message ? { message: accountStatus.message } : {}),
+      ...(accountStatus.message
+        ? { message: accountStatus.message }
+        : hasStaleInventory
+          ? { message: "Codex model or skill discovery did not complete." }
+          : {}),
       usageLimits,
     },
   });

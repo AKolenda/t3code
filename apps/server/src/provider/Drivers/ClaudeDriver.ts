@@ -39,6 +39,7 @@ import {
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { resolveClaudeModelCatalog } from "../ClaudeModelCatalog.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
+import { STALE_PROVIDER_INVENTORY } from "../providerSnapshot.ts";
 import * as ModelManifest from "../ModelManifest.ts";
 import {
   defaultProviderContinuationIdentity,
@@ -236,9 +237,26 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
           ? snapshot.getSnapshot
           : Effect.all([
               snapshot.getSnapshot,
-              discoverClaudeSkills(effectiveConfig, cwd, processEnv),
+              discoverClaudeSkills(effectiveConfig, cwd, processEnv).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderDriverError({
+                      driver: DRIVER_KIND,
+                      instanceId,
+                      detail: `Failed to discover Claude skills for '${cwd}'`,
+                      cause,
+                    }),
+                ),
+              ),
             ]).pipe(
-              Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills })),
+              Effect.map(([machineSnapshot, skills]) => ({
+                ...machineSnapshot,
+                skills,
+                inventory: {
+                  ...(machineSnapshot.inventory ?? STALE_PROVIDER_INVENTORY),
+                  skills: "authoritative" as const,
+                },
+              })),
               Effect.provideService(FileSystem.FileSystem, fileSystem),
               Effect.provideService(Path.Path, path),
             );

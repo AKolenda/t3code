@@ -476,6 +476,19 @@ describe("Cursor skills", () => {
 });
 
 describe("buildCursorProviderSnapshot", () => {
+  it("treats a successful empty model response as a complete inventory", () => {
+    const snapshot = buildCursorProviderSnapshot({
+      checkedAt: "2026-01-01T00:00:00.000Z",
+      cursorSettings: baseCursorSettings,
+      parsed: { version: "2026.04.09-f2b0fcd", status: "ready", auth: { status: "authenticated" } },
+      discoveredModels: [],
+      discoveryWarning: "Cursor ACP model discovery returned no built-in models.",
+    });
+    expect(snapshot.status).toBe("warning");
+    expect(snapshot.inventory?.models).toBe("authoritative");
+    expect(snapshot.models).toEqual([]);
+  });
+
   it("downgrades ready status to warning when ACP model discovery times out", () => {
     expect(
       buildCursorProviderSnapshot({
@@ -491,6 +504,7 @@ describe("buildCursorProviderSnapshot", () => {
     ).toMatchObject({
       status: "warning",
       message: "Cursor ACP model discovery timed out after 15000ms.",
+      inventory: { models: "stale" },
       models: [],
     });
   });

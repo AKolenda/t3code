@@ -18,7 +18,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
-import { buildServerProvider } from "./providerSnapshot.ts";
+import { buildServerProvider, UNAVAILABLE_PROVIDER_INVENTORY } from "./providerSnapshot.ts";
 
 export interface UnavailableProviderSnapshotInput {
   readonly driverKind: ProviderDriverKind | string;
@@ -56,6 +56,7 @@ export function buildUnavailableProviderSnapshot(
       models: [],
       skills: [],
       probe: {
+        inventory: UNAVAILABLE_PROVIDER_INVENTORY,
         installed: false,
         version: null,
         status: "error",

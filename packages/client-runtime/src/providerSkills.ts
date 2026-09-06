@@ -115,12 +115,18 @@ export function resolveProviderSkillsForCwd(
   provider: ServerProvider,
   cwd: string | null | undefined,
 ): ServerProvider["skills"] {
-  return resolveProviderWorkspaceSnapshot(provider, cwd)?.skills ?? provider.skills;
+  const workspace = resolveProviderWorkspaceSnapshot(provider, cwd);
+  return workspace?.inventory?.skills === "stale" && workspace.skills.length === 0
+    ? provider.skills
+    : (workspace?.skills ?? provider.skills);
 }
 
 export function resolveProviderSlashCommandsForCwd(
   provider: ServerProvider,
   cwd: string | null | undefined,
 ): ServerProvider["slashCommands"] {
-  return resolveProviderWorkspaceSnapshot(provider, cwd)?.slashCommands ?? provider.slashCommands;
+  const workspace = resolveProviderWorkspaceSnapshot(provider, cwd);
+  return workspace?.inventory?.slashCommands === "stale"
+    ? provider.slashCommands
+    : (workspace?.slashCommands ?? provider.slashCommands);
 }

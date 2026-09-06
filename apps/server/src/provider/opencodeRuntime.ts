@@ -186,7 +186,7 @@ export interface OpenCodeCommandResult {
 export interface OpenCodeInventory {
   readonly providerList: ProviderListResponse;
   readonly agents: ReadonlyArray<Agent>;
-  readonly skills: ReadonlyArray<OpenCodeSkill>;
+  readonly skills: ReadonlyArray<OpenCodeSkill> | undefined;
 }
 
 export interface ParsedOpenCodeModelSlug {
@@ -395,9 +395,9 @@ export function parseAgentListCliOutput(stdout: string): ReadonlyArray<Agent> {
 }
 
 /** @internal */
-export function parseSkillsCliOutput(stdout: string): ReadonlyArray<OpenCodeSkill> {
+export function parseSkillsCliOutput(stdout: string): ReadonlyArray<OpenCodeSkill> | undefined {
   const result = decodeOpenCodeSkillsCliOutputExit(stdout);
-  return Exit.isSuccess(result) ? result.value : [];
+  return Exit.isSuccess(result) ? result.value : undefined;
 }
 
 export function parseOpenCodeModelSlug(
@@ -904,16 +904,25 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
 
   const loadOpenCodeSkills: OpenCodeRuntimeShape["loadOpenCodeSkills"] = (client) =>
     runOpenCodeSdk("app.skills", (signal) => client.app.skills(undefined, { signal })).pipe(
-      Effect.map((result) =>
-        (result.data ?? []).map((skill) => ({
-          name: skill.name,
-          ...(skill.description === undefined ? {} : { description: skill.description }),
-          location: skill.location,
-        })),
+      Effect.flatMap((result) =>
+        result.data === undefined
+          ? Effect.fail(
+              new OpenCodeRuntimeError({
+                operation: "app.skills",
+                detail: "OpenCode did not return a skill inventory.",
+              }),
+            )
+          : Effect.succeed(
+              result.data.map((skill) => ({
+                name: skill.name,
+                ...(skill.description === undefined ? {} : { description: skill.description }),
+                location: skill.location,
+              })),
+            ),
       ),
     );
   const loadSkills = (client: OpencodeClient) =>
-    loadOpenCodeSkills(client).pipe(Effect.orElseSucceed((): ReadonlyArray<OpenCodeSkill> => []));
+    loadOpenCodeSkills(client).pipe(Effect.orElseSucceed(() => undefined));
 
   const loadOpenCodeInventory: OpenCodeRuntimeShape["loadOpenCodeInventory"] = (client) =>
     Effect.all([loadProviders(client), loadAgents(client), loadSkills(client)], {
@@ -1007,7 +1016,7 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       if (agentsResult._tag === "Success" && agentsResult.value.code === 0) {
         agents = parseAgentListCliOutput(agentsResult.value.stdout);
       }
-      let skills: ReadonlyArray<OpenCodeSkill> = [];
+      let skills: ReadonlyArray<OpenCodeSkill> | undefined;
       if (skillsResult._tag === "Success" && skillsResult.value.code === 0) {
         skills = parseSkillsCliOutput(skillsResult.value.stdout);
       }
@@ -1027,16 +1036,20 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       maxOutputBytes: OPENCODE_SKILL_DISCOVERY_MAX_OUTPUT_BYTES,
       ...(input.environment !== undefined ? { environment: input.environment } : {}),
     }).pipe(
-      Effect.flatMap((result) =>
-        result.code === 0
-          ? Effect.succeed(parseSkillsCliOutput(result.stdout))
+      Effect.flatMap((result) => {
+        const skills = result.code === 0 ? parseSkillsCliOutput(result.stdout) : undefined;
+        return skills !== undefined
+          ? Effect.succeed(skills)
           : Effect.fail(
               new OpenCodeRuntimeError({
                 operation: "loadSkillsFromCli",
-                detail: `OpenCode skills command exited with code ${result.code}.`,
+                detail:
+                  result.code === 0
+                    ? "OpenCode did not return a valid skill inventory."
+                    : `OpenCode skills command exited with code ${result.code}.`,
               }),
-            ),
-      ),
+            );
+      }),
     );
 
   return {

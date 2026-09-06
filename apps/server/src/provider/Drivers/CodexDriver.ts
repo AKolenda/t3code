@@ -50,6 +50,7 @@ import {
 import { resolveCodexLaunchArgs } from "../Layers/codexLaunchArgs.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
+import { STALE_PROVIDER_INVENTORY } from "../providerSnapshot.ts";
 import * as ModelManifest from "../ModelManifest.ts";
 import type { ProviderDriver, ProviderInstance } from "../ProviderDriver.ts";
 import { withInstanceIdentity } from "./instanceIdentity.ts";
@@ -259,7 +260,14 @@ export const CodexDriver: ProviderDriver<CodexSettings, CodexDriverEnv> = {
                 Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
               ),
             ]).pipe(
-              Effect.map(([machineSnapshot, skills]) => ({ ...machineSnapshot, skills })),
+              Effect.map(([machineSnapshot, skills]) => ({
+                ...machineSnapshot,
+                skills,
+                inventory: {
+                  ...(machineSnapshot.inventory ?? STALE_PROVIDER_INVENTORY),
+                  skills: "authoritative" as const,
+                },
+              })),
               Effect.mapError(
                 (cause) =>
                   new ProviderDriverError({

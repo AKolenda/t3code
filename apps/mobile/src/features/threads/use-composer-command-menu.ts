@@ -1,3 +1,4 @@
+import { hasProviderWorkspaceSkills } from "@t3tools/contracts";
 import type { EnvironmentId, ProviderInteractionMode, ServerProvider } from "@t3tools/contracts";
 import { USAGE_LIMITS_COMMAND } from "@t3tools/shared/usageLimits";
 import {
@@ -203,10 +204,7 @@ export function useComposerCommandMenu({
     reportFailure: false,
   });
   const selectedProviderInstanceId = selectedProviderStatus?.instanceId;
-  const hasWorkspaceSnapshot = Boolean(
-    projectCwd &&
-    selectedProviderStatus?.workspaceSnapshots?.some((snapshot) => snapshot.cwd === projectCwd),
-  );
+  const hasWorkspaceSnapshot = hasProviderWorkspaceSkills(selectedProviderStatus, projectCwd);
   const workspaceRefreshKeyRef = useRef<string | null>(null);
   const workspaceRefreshRetryRef = useRef<{ key: string; notBefore: number } | null>(null);
   const hadWorkspaceSnapshotRef = useRef(false);
@@ -243,9 +241,12 @@ export function useComposerCommandMenu({
     }).then((result) => {
       const refreshed =
         result._tag === "Success" &&
-        result.value.providers
-          .find((provider) => provider.instanceId === selectedProviderInstanceId)
-          ?.workspaceSnapshots?.some((snapshot) => snapshot.cwd === projectCwd);
+        hasProviderWorkspaceSkills(
+          result.value.providers.find(
+            (provider) => provider.instanceId === selectedProviderInstanceId,
+          ),
+          projectCwd,
+        );
       if (!refreshed && workspaceRefreshKeyRef.current === key) {
         retryLater();
       }

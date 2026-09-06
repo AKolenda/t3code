@@ -22,6 +22,9 @@ import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import {
   AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
+  AUTHORITATIVE_PROVIDER_INVENTORY,
+  STALE_PROVIDER_INVENTORY,
+  UNAVAILABLE_PROVIDER_INVENTORY,
   isCommandMissingCause,
   parseGenericCliVersion,
   providerModelsFromSettings,
@@ -79,6 +82,7 @@ export function buildInitialGrokProviderSnapshot(
         checkedAt,
         models,
         probe: {
+          inventory: UNAVAILABLE_PROVIDER_INVENTORY,
           installed: false,
           version: null,
           status: "warning",
@@ -94,6 +98,7 @@ export function buildInitialGrokProviderSnapshot(
       checkedAt,
       models,
       probe: {
+        inventory: STALE_PROVIDER_INVENTORY,
         installed: true,
         version: null,
         status: "warning",
@@ -324,7 +329,8 @@ const discoverGrokModelsViaAcpInitialize = (
       clientInfo: { name: "t3-code-provider-probe", version: "0.0.0" },
     });
     const initialized = yield* acp.initialize();
-    return buildGrokModelsFromSessionModelState(sessionModelStateFromInitialize(initialized));
+    const modelState = sessionModelStateFromInitialize(initialized);
+    return modelState === undefined ? undefined : buildGrokModelsFromSessionModelState(modelState);
   }).pipe(Effect.scoped);
 
 export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(function* (
@@ -346,6 +352,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       checkedAt,
       models: fallbackModels,
       probe: {
+        inventory: UNAVAILABLE_PROVIDER_INVENTORY,
         installed: false,
         version: null,
         status: "warning",
@@ -371,6 +378,9 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       checkedAt,
       models: fallbackModels,
       probe: {
+        inventory: isCommandMissingCause(error)
+          ? UNAVAILABLE_PROVIDER_INVENTORY
+          : STALE_PROVIDER_INVENTORY,
         installed: !isCommandMissingCause(error),
         version: null,
         status: "error",
@@ -389,6 +399,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       checkedAt,
       models: fallbackModels,
       probe: {
+        inventory: STALE_PROVIDER_INVENTORY,
         installed: true,
         version: null,
         status: "error",
@@ -412,6 +423,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       checkedAt,
       models: fallbackModels,
       probe: {
+        inventory: STALE_PROVIDER_INVENTORY,
         installed: true,
         version,
         status: "error",
@@ -457,14 +469,14 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
 
   const skills = yield* discoverGrokSkills(grokSettings, environment, cwd).pipe(
     Effect.tapError((cause) => Effect.logDebug("Grok skill discovery failed.", { cause })),
-    Effect.orElseSucceed(() => []),
+    Effect.orElseSucceed(() => undefined),
   );
 
   const acpExit = yield* discoverGrokModelsViaAcpInitialize(grokSettings, environment).pipe(
     Effect.timeoutOption(GROK_ACP_INITIALIZE_TIMEOUT_MS),
     Effect.exit,
   );
-  const acpModels = Exit.isSuccess(acpExit) ? Option.getOrElse(acpExit.value, () => []) : [];
+  const acpModels = Exit.isSuccess(acpExit) ? Option.getOrUndefined(acpExit.value) : undefined;
   const acpFailed = Exit.isFailure(acpExit) || Option.isNone(acpExit.value);
   if (acpFailed) {
     yield* Effect.logWarning("Grok ACP initialize probe failed or timed out.", {
@@ -472,11 +484,17 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
     });
   }
 
-  const discoveredModels = acpModels.length > 0 ? acpModels : cliModels.models;
+  const discoveredModels = acpModels ?? cliModels.models;
   const models =
-    discoveredModels.length > 0
+    acpModels !== undefined || discoveredModels.length > 0
       ? grokModelsFromSettings(grokSettings.customModels, discoveredModels)
       : fallbackModels;
+  const inventory = {
+    ...AUTHORITATIVE_PROVIDER_INVENTORY,
+    // The CLI fallback has model names but no option metadata.
+    models: acpModels === undefined ? "stale" : "authoritative",
+    skills: skills === undefined ? "stale" : "authoritative",
+  } as const;
 
   if (auth.status === "unauthenticated") {
     return buildServerProvider({
@@ -484,8 +502,9 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       enabled: grokSettings.enabled,
       checkedAt,
       models,
-      skills,
+      skills: skills ?? [],
       probe: {
+        inventory: { ...inventory, slashCommands: "unavailable" },
         installed: true,
         version,
         status: "error",
@@ -500,9 +519,10 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
     enabled: grokSettings.enabled,
     checkedAt,
     models,
-    skills,
+    skills: skills ?? [],
     compaction: GROK_COMPACTION,
     probe: {
+      inventory,
       installed: true,
       version,
       // A failed metadata probe degrades the model picker, it does not make chats fail.

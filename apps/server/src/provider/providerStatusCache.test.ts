@@ -11,6 +11,8 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Logger from "effect/Logger";
 
+import { AUTHORITATIVE_PROVIDER_INVENTORY } from "./providerSnapshot.ts";
+
 import {
   hydrateCachedProvider,
   isCachedProviderCorrelated,
@@ -209,6 +211,21 @@ it.layer(NodeServices.layer)("providerStatusCache", (it) => {
       }).models,
       [builtIn],
     );
+  });
+
+  it("does not replace a complete current inventory with a stale cache", () => {
+    const cached = makeProvider(CODEX_DRIVER, {
+      models: [
+        { slug: "retired-model", name: "Retired model", isCustom: false, capabilities: null },
+      ],
+      slashCommands: [{ name: "removed-command" }],
+      skills: [{ name: "removed-skill", path: "/skills/removed/SKILL.md", enabled: true }],
+    });
+    const current = makeProvider(CODEX_DRIVER, { inventory: AUTHORITATIVE_PROVIDER_INVENTORY });
+    const hydrated = hydrateCachedProvider({ cachedProvider: cached, fallbackProvider: current });
+    assert.deepStrictEqual(hydrated.models, []);
+    assert.deepStrictEqual(hydrated.slashCommands, []);
+    assert.deepStrictEqual(hydrated.skills, []);
   });
 
   it("ignores stale cached enabled state when the provider is now disabled", () => {
