@@ -2322,8 +2322,9 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           sessionScopeTransferred ? Effect.void : Scope.close(sessionScope, Exit.void),
         );
         const createRuntime = options?.makeRuntime ?? makeCodexSessionRuntime;
+        const runtimeScope = yield* Scope.fork(sessionScope, "sequential");
         const runtime = yield* createRuntime(runtimeInput).pipe(
-          Effect.provideService(Scope.Scope, sessionScope),
+          Effect.provideService(Scope.Scope, runtimeScope),
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, childProcessSpawner),
           Effect.provideService(Crypto.Crypto, crypto),
           Effect.mapError(
@@ -2500,7 +2501,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         input.modelSelection?.instanceId === boundInstanceId
           ? getCodexServiceTierOptionValue(input.modelSelection)
           : undefined;
-      return yield* session.runtime
+      const result = yield* session.runtime
         .sendTurn(
           {
             ...(input.input !== undefined ? { input: input.input } : {}),
@@ -2537,6 +2538,10 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         .pipe(
           Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)),
         );
+      if (session.stopped || sessions.get(input.threadId) !== session) {
+        return yield* Effect.interrupt;
+      }
+      return result;
     },
   );
 
@@ -2744,8 +2749,8 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     session.stopped = true;
     sessions.delete(session.threadId);
     yield* session.runtime.close.pipe(Effect.ignore);
+    yield* Fiber.join(session.eventFiber).pipe(Effect.ignore);
     yield* Effect.ignore(Scope.close(session.scope, Exit.void));
-    yield* Fiber.interrupt(session.eventFiber).pipe(Effect.ignore);
   });
 
   const stopSession: CodexAdapterShape["stopSession"] = (threadId) =>

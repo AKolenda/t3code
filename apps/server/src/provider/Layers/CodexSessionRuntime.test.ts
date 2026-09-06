@@ -52,6 +52,8 @@ const makeAdmissionRuntime = Effect.fn("makeAdmissionRuntime")(function* (option
   const runtimeScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
     Scope.close(scope, Exit.void),
   );
+  const nativeRuntimeClosed = yield* Deferred.make<void>();
+  yield* Scope.addFinalizer(runtimeScope, Deferred.succeed(nativeRuntimeClosed, undefined));
   const observed: Array<string> = [];
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
@@ -112,6 +114,7 @@ const makeAdmissionRuntime = Effect.fn("makeAdmissionRuntime")(function* (option
   yield* runtime.start();
   return {
     runtime,
+    nativeRuntimeClosed: Deferred.await(nativeRuntimeClosed),
     nativeExit:
       options?.exitSignal || options?.exitStatusError
         ? Deferred.fail(
@@ -140,6 +143,10 @@ const makeAdmissionRuntime = Effect.fn("makeAdmissionRuntime")(function* (option
         method: "turn/completed",
         params: { threadId, turn: { id: turnId, status: "completed", items: [] } },
       }),
+    marker: write({
+      method: "serverRequest/resolved",
+      params: { threadId: wireFixture.rootThreadId, requestId: "terminal-drained" },
+    }),
   };
 });
 
@@ -295,6 +302,108 @@ describe("Codex native turn admission", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  for (const completion of [
+    "missing",
+    "before-response",
+    "after-response",
+    "blocked-callback",
+    "late-callback",
+  ] as const) {
+    it.effect(`finishes a stopped accepted turn with native completion ${completion}`, () =>
+      Effect.gen(function* () {
+        const { runtime, respond, nextRequest, complete, nativeExit, marker } =
+          yield* makeAdmissionRuntime({ exitSignal: "SIGTERM" });
+        const nativeTerminal = yield* Deferred.make<void>();
+        const canonicalTerminal = yield* Deferred.make<void>();
+        const releaseCallback = yield* Deferred.make<void>();
+        const abortQueued = yield* Deferred.make<void>();
+        const markerQueued = yield* Deferred.make<void>();
+        const ordering: Array<string> = [];
+        const events = yield* runtime.events.pipe(
+          Stream.tap((event) =>
+            Effect.gen(function* () {
+              if (event.method === "turn/aborted") {
+                ordering.push("aborted");
+                yield* Deferred.succeed(abortQueued, undefined);
+              }
+              if (event.method === "turn/completed")
+                yield* Deferred.succeed(canonicalTerminal, undefined);
+              if (event.method === "session/closed") ordering.push("closed");
+              if (event.method === "serverRequest/resolved")
+                yield* Deferred.succeed(markerQueued, undefined);
+            }),
+          ),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        const send = yield* runtime
+          .sendTurn(
+            { input: "accepted turn" },
+            {
+              beforeSubmit: () => Effect.void,
+              notSubmitted: Effect.die("native work was submitted"),
+              nativeStopped: Effect.sync(() => {
+                ordering.push("proof");
+              }),
+              nativeCompleted: () =>
+                Deferred.succeed(nativeTerminal, undefined).pipe(
+                  Effect.andThen(
+                    completion === "blocked-callback"
+                      ? Effect.never
+                      : completion === "late-callback"
+                        ? Deferred.await(releaseCallback)
+                        : Effect.void,
+                  ),
+                ),
+            },
+          )
+          .pipe(Effect.forkChild);
+        yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+        const request = yield* nextRequest("turn/start");
+        if (completion === "before-response") {
+          yield* complete("accepted-turn");
+          yield* Deferred.await(nativeTerminal);
+        }
+        yield* respond(request, { turn: { id: "accepted-turn", status: "inProgress", items: [] } });
+        yield* Fiber.join(send);
+        if (
+          completion === "after-response" ||
+          completion === "blocked-callback" ||
+          completion === "late-callback"
+        ) {
+          yield* complete("accepted-turn");
+          yield* Deferred.await(nativeTerminal);
+        }
+        if (completion === "before-response" || completion === "after-response")
+          yield* Deferred.await(canonicalTerminal);
+        yield* nativeExit;
+        if (completion === "late-callback") {
+          yield* Deferred.await(abortQueued);
+          yield* Deferred.succeed(releaseCallback, undefined);
+          yield* marker;
+          yield* Deferred.await(markerQueued);
+        }
+        yield* runtime.close;
+        const collectedEvents = yield* Fiber.join(events);
+        const terminalEvents = collectedEvents.filter((event) => event.method === "turn/aborted");
+        const needsAbort =
+          completion === "missing" ||
+          completion === "blocked-callback" ||
+          completion === "late-callback";
+        NodeAssert.equal(terminalEvents.length, needsAbort ? 1 : 0);
+        NodeAssert.equal(
+          collectedEvents.filter((event) => event.method === "turn/completed").length,
+          needsAbort ? 0 : 1,
+        );
+        if (needsAbort) NodeAssert.equal(terminalEvents[0]?.turnId, "accepted-turn");
+        NodeAssert.deepEqual(
+          ordering,
+          needsAbort ? ["proof", "aborted", "closed"] : ["proof", "closed"],
+        );
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
   for (const scenario of [
     { name: "exit code 0", options: {}, stopped: true },
     { name: "SIGTERM", options: { exitSignal: "SIGTERM" as const }, stopped: true },
@@ -307,9 +416,8 @@ describe("Codex native turn admission", () => {
   ]) {
     it.effect(`checks captured process exit after ${scenario.name}`, () =>
       Effect.gen(function* () {
-        const { runtime, respond, nextRequest, nativeExit } = yield* makeAdmissionRuntime(
-          scenario.options,
-        );
+        const { runtime, respond, nextRequest, nativeExit, nativeRuntimeClosed } =
+          yield* makeAdmissionRuntime(scenario.options);
         let stopped = false;
         const send = yield* runtime
           .sendTurn(
@@ -327,13 +435,8 @@ describe("Codex native turn admission", () => {
         yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
         yield* respond(yield* nextRequest("turn/start"), { turn: {} });
         NodeAssert.equal((yield* Fiber.join(send))._tag, "Failure");
-        const closedEvent = yield* runtime.events.pipe(
-          Stream.filter((event) => event.method === "session/closed"),
-          Stream.runHead,
-          Effect.forkChild,
-        );
         const close = yield* runtime.close.pipe(Effect.forkChild);
-        yield* Fiber.join(closedEvent);
+        yield* nativeRuntimeClosed;
         NodeAssert.equal(stopped, false);
         yield* nativeExit;
         yield* Fiber.join(close);

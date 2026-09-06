@@ -20,6 +20,7 @@ import {
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { normalizeModelSlug } from "@t3tools/shared/model";
 import * as Crypto from "effect/Crypto";
+import type * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -189,6 +190,14 @@ export interface CodexThreadTurnSnapshot {
 export interface CodexThreadSnapshot {
   readonly threadId: string;
   readonly turns: ReadonlyArray<CodexThreadTurnSnapshot>;
+}
+
+interface CodexNativeSubmission {
+  readonly options: ProviderTurnStartOptions;
+  turnId: TurnId | undefined;
+  terminalQueued: boolean;
+  stopped: boolean;
+  readonly earlyTerminals: Set<TurnId>;
 }
 
 export interface CodexSessionRuntimeShape {
@@ -1163,7 +1172,7 @@ export const makeCodexSessionRuntime = (
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const runtimeScope = yield* Scope.Scope;
     const crypto = yield* Crypto.Crypto;
-    const events = yield* Queue.unbounded<ProviderEvent>();
+    const events = yield* Queue.unbounded<ProviderEvent, Cause.Done>();
     const pendingApprovalsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingApproval>());
     const approvalCorrelationsRef = yield* Ref.make(new Map<string, ApprovalCorrelation>());
     const pendingUserInputsRef = yield* Ref.make(new Map<ApprovalRequestId, PendingUserInput>());
@@ -1174,8 +1183,7 @@ export const makeCodexSessionRuntime = (
     const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
     const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
     const closedRef = yield* Ref.make(false);
-    let nativeCompleted: ProviderTurnStartOptions["nativeCompleted"] | undefined;
-    let nativeStopped = Effect.void;
+    let nativeSubmission: CodexNativeSubmission | undefined;
     let nativeExited = false;
 
     // `~` is not shell-expanded when env vars are set via
@@ -1247,7 +1255,33 @@ export const makeCodexSessionRuntime = (
       updatedAt: sessionCreatedAt,
     } satisfies ProviderSession;
     const sessionRef = yield* Ref.make<ProviderSession>(initialSession);
-    const offerEvent = (event: ProviderEvent) => Queue.offer(events, event).pipe(Effect.asVoid);
+    // Queue the terminal and record it together so a native completion racing
+    // process shutdown cannot produce two terminal events.
+    const offerEvent = (event: ProviderEvent) =>
+      Effect.sync(() => {
+        const submission = nativeSubmission;
+        const terminal = event.method === "turn/completed" || event.method === "turn/aborted";
+        if (
+          submission &&
+          terminal &&
+          event.turnId &&
+          ((submission.turnId === event.turnId && submission.terminalQueued) ||
+            (submission.turnId === undefined && submission.earlyTerminals.has(event.turnId)))
+        )
+          return;
+        const offered = Queue.offerUnsafe(events, event);
+        if (offered && submission && terminal && event.turnId) {
+          if (submission.turnId === event.turnId) {
+            submission.terminalQueued = true;
+          } else if (submission.turnId === undefined) {
+            if (submission.earlyTerminals.size === 32) {
+              const oldest = submission.earlyTerminals.values().next().value;
+              if (oldest !== undefined) submission.earlyTerminals.delete(oldest);
+            }
+            submission.earlyTerminals.add(event.turnId);
+          }
+        }
+      });
 
     const emitEvent = (event: Omit<ProviderEvent, "id" | "provider" | "createdAt">) =>
       Effect.gen(function* () {
@@ -1893,7 +1927,8 @@ export const makeCodexSessionRuntime = (
               return;
             }
             if (providerThreadId === payload.threadId && payload.turn.status !== "inProgress") {
-              yield* nativeCompleted?.(TurnId.make(payload.turn.id)) ?? Effect.void;
+              const turnId = TurnId.make(payload.turn.id);
+              yield* nativeSubmission?.options.nativeCompleted(turnId) ?? Effect.void;
             }
             const lastError =
               payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
@@ -2212,6 +2247,19 @@ export const makeCodexSessionRuntime = (
       Effect.forkIn(runtimeScope),
     );
 
+    const emitStoppedTurn = Effect.fnUntraced(function* (submission: CodexNativeSubmission) {
+      if (!submission.stopped || submission.terminalQueued || submission.turnId === undefined) {
+        return;
+      }
+      yield* emitEvent({
+        kind: "notification",
+        threadId: options.threadId,
+        turnId: submission.turnId,
+        method: "turn/aborted",
+        message: "Codex process stopped before the turn completed.",
+      });
+    });
+
     const confirmNativeStopped = Effect.fnUntraced(function* () {
       // Signal exits fail exitCode. The captured handle tracks the exit signal
       // separately, so an exit-status error alone cannot release native work.
@@ -2219,7 +2267,12 @@ export const makeCodexSessionRuntime = (
         return;
       }
       nativeExited = true;
-      yield* nativeStopped;
+      const submission = nativeSubmission;
+      if (submission && !submission.stopped) {
+        submission.stopped = true;
+        yield* submission.options.nativeStopped;
+        yield* emitStoppedTurn(submission);
+      }
     }, Effect.ignore);
 
     yield* child.exitCode.pipe(
@@ -2302,18 +2355,18 @@ export const makeCodexSessionRuntime = (
         status: "closed",
         activeTurnId: undefined,
       });
-      yield* emitSessionEvent("session/closed", "Session stopped").pipe(
-        Effect.catch((cause) =>
-          Effect.logError("Failed to emit Codex session closed event.", { cause }),
-        ),
-      );
       yield* Scope.close(runtimeScope, Exit.void);
       yield* child.exitCode.pipe(
         Effect.onExit(() => confirmNativeStopped()),
         Effect.ignore,
       );
+      yield* emitSessionEvent("session/closed", "Session stopped").pipe(
+        Effect.catch((cause) =>
+          Effect.logError("Failed to emit Codex session closed event.", { cause }),
+        ),
+      );
       yield* Queue.shutdown(serverNotifications);
-      yield* Queue.shutdown(events);
+      yield* Queue.end(events);
     });
 
     return {
@@ -2362,8 +2415,16 @@ export const makeCodexSessionRuntime = (
           }
           // Admission serializes turn/start calls. Keep this request's callbacks
           // until the next admitted turn, even if its response cannot be read.
-          nativeCompleted = turnOptions?.nativeCompleted;
-          nativeStopped = turnOptions?.nativeStopped ?? Effect.void;
+          const submission: CodexNativeSubmission | undefined = turnOptions
+            ? {
+                options: turnOptions,
+                turnId: undefined,
+                terminalQueued: false,
+                stopped: false,
+                earlyTerminals: new Set(),
+              }
+            : undefined;
+          nativeSubmission = submission;
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
             Effect.mapError((error) =>
@@ -2375,6 +2436,12 @@ export const makeCodexSessionRuntime = (
             ),
           );
           const turnId = TurnId.make(response.turn.id);
+          if (submission) {
+            submission.turnId = turnId;
+            submission.terminalQueued = submission.earlyTerminals.has(turnId);
+            submission.earlyTerminals.clear();
+            yield* emitStoppedTurn(submission);
+          }
           yield* updateSession(sessionRef, (session) => ({
             status: "running",
             // Codex accepts follow-ups while the current turn is still

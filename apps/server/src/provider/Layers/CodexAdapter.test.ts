@@ -23,6 +23,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
 
 import * as Context from "effect/Context";
+import type * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -482,7 +483,7 @@ it.effect("rewinds a conversation that has no native goal", () =>
 );
 
 class FakeCodexRuntime implements CodexSessionRuntimeShape {
-  private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent>());
+  private readonly eventQueue = Effect.runSync(Queue.unbounded<ProviderEvent, Cause.Done>());
   private readonly now = "2026-01-01T00:00:00.000Z";
 
   public readonly startImpl = vi.fn(() =>
@@ -592,7 +593,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
     return Stream.fromQueue(this.eventQueue);
   }
 
-  close = Effect.promise(() => this.closeImpl());
+  close = Effect.promise(() => this.closeImpl()).pipe(
+    Effect.andThen(Queue.end(this.eventQueue)),
+    Effect.asVoid,
+  );
 
   emit(event: ProviderEvent) {
     return Queue.offer(this.eventQueue, event).pipe(Effect.asVoid);
@@ -3041,6 +3045,55 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
 });
 
 const scopedLifecycleRuntimeFactory = makeScopedRuntimeFactory();
+
+it.effect("drains terminal events after the native runtime scope closes", () =>
+  Effect.gen(function* () {
+    const threadId = asThreadId("stop-event-drain");
+    const runtimeClosed = yield* Deferred.make<void>();
+    const releaseLogger = yield* Deferred.make<void>();
+    const stopped = yield* Deferred.make<void>();
+    const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
+      makeRuntime: Effect.fnUntraced(function* (options: CodexSessionRuntimeOptions) {
+        const scope = yield* Scope.Scope;
+        const runtime = new FakeCodexRuntime(options);
+        const close = runtime.close;
+        runtime.close = Effect.gen(function* () {
+          yield* Scope.close(scope, Exit.void);
+          yield* runtime.emit({
+            id: asEventId("confirmed-stop-terminal"),
+            provider: ProviderDriverKind.make("codex"),
+            threadId,
+            turnId: asTurnId("accepted-turn"),
+            createdAt: "2026-01-01T00:00:00.000Z",
+            kind: "notification",
+            method: "turn/aborted",
+          });
+          yield* close;
+          yield* Deferred.succeed(runtimeClosed, undefined);
+        });
+        return runtime;
+      }),
+      nativeEventLogger: {
+        filePath: "unused",
+        write: () => Deferred.await(releaseLogger),
+        close: () => Effect.void,
+      },
+    }).pipe(Effect.provide(ServerConfig.layerTest(process.cwd(), process.cwd())));
+    yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+    const stop = yield* adapter.stopSession(threadId).pipe(
+      Effect.tap(() => Deferred.succeed(stopped, undefined)),
+      Effect.forkChild,
+    );
+    yield* Deferred.await(runtimeClosed);
+    NodeAssert.equal(yield* Deferred.isDone(stopped), false);
+    yield* Deferred.succeed(releaseLogger, undefined);
+    yield* Fiber.join(stop);
+    const event = Option.getOrThrow(yield* Stream.runHead(adapter.streamEvents));
+    NodeAssert.equal(event.type, "turn.aborted");
+    NodeAssert.equal(event.turnId, "accepted-turn");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
 const scopedLifecycleLayer = it.layer(
   Layer.effect(
     CodexAdapter,
