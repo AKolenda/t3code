@@ -29,11 +29,13 @@ import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
+import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker, type DrainableWorker } from "@t3tools/shared/DrainableWorker";
 
@@ -89,6 +91,14 @@ type TurnStartRequestedEvent = Extract<
   ProviderIntentEvent,
   { type: "thread.turn-start-requested" }
 >;
+interface PendingSessionCommand {
+  readonly event: Extract<
+    ProviderIntentEvent,
+    { type: "thread.turn-start-requested" | "thread.runtime-mode-set" }
+  >;
+  preparing: boolean;
+  fiber: Fiber.Fiber<void> | undefined;
+}
 type ProviderCommandInput =
   | ProviderIntentEvent
   | {
@@ -325,6 +335,37 @@ const make = Effect.gen(function* () {
   const compactingThreads = new Map<ThreadId, OrchestrationOperationResult | null>();
   const stoppingThreadIds = new Set<ThreadId>();
   const delayedTurnStarts = new Map<ThreadId, Set<TurnStartRequestedEvent>>();
+  const sessionCommands = new Map<
+    ThreadId,
+    { readonly preparation: Semaphore.Semaphore; readonly pending: Set<PendingSessionCommand> }
+  >();
+
+  // Session preparation stays ordered per thread without blocking interrupt or stop commands.
+  const forkSessionCommand = Effect.fn("forkSessionCommand")(function* <R>(
+    event: PendingSessionCommand["event"],
+    run: (
+      preparation: Semaphore.Semaphore,
+      command: PendingSessionCommand,
+    ) => Effect.Effect<void, never, R>,
+  ) {
+    const threadId = event.payload.threadId;
+    const commands = sessionCommands.get(threadId) ?? {
+      preparation: yield* Semaphore.make(1),
+      pending: new Set<PendingSessionCommand>(),
+    };
+    sessionCommands.set(threadId, commands);
+    const command: PendingSessionCommand = { event, preparing: true, fiber: undefined };
+    commands.pending.add(command);
+    command.fiber = yield* run(commands.preparation, command).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          commands.pending.delete(command);
+          if (commands.pending.size === 0) sessionCommands.delete(threadId);
+        }),
+      ),
+      Effect.forkScoped,
+    );
+  });
 
   const appendProviderFailureActivity = (
     input: {
@@ -1507,42 +1548,53 @@ const make = Effect.gen(function* () {
         return;
       }
       compactingThreads.set(event.payload.threadId, null);
-      yield* Effect.gen(function* () {
-        yield* ensureSessionForThread(
-          event.payload.threadId,
-          event.payload.createdAt,
-          event.payload.modelSelection !== undefined
-            ? { modelSelection: event.payload.modelSelection, pendingTurnStart: true }
-            : { pendingTurnStart: true },
-        );
-        compactionSessionEnsured = true;
-        if (event.payload.modelSelection !== undefined) {
-          threadModelSelections.set(event.payload.threadId, event.payload.modelSelection);
-        }
-        yield* providerService.compactThread(
-          event.payload.threadId,
-          event.payload.modelSelection,
-          event.payload.messageId,
-        );
-      }).pipe(
-        Effect.andThen(
-          restoreCompaction(
+      let compactionStarted = false;
+      yield* forkSessionCommand(event, (preparation, command) =>
+        Effect.gen(function* () {
+          yield* ensureSessionForThread(
             event.payload.threadId,
-            {
-              requestId: event.payload.messageId,
-              outcome: "completed",
-            },
-            true,
+            event.payload.createdAt,
+            event.payload.modelSelection !== undefined
+              ? { modelSelection: event.payload.modelSelection, pendingTurnStart: true }
+              : { pendingTurnStart: true },
+          ).pipe(preparation.withPermit);
+          compactionSessionEnsured = true;
+          if (event.payload.modelSelection !== undefined) {
+            threadModelSelections.set(event.payload.threadId, event.payload.modelSelection);
+          }
+          command.preparing = false;
+          yield* providerService
+            .compactThread(
+              event.payload.threadId,
+              event.payload.modelSelection,
+              event.payload.messageId,
+            )
+            .pipe(
+              Effect.andThen(
+                restoreCompaction(
+                  event.payload.threadId,
+                  { requestId: event.payload.messageId, outcome: "completed" },
+                  true,
+                ),
+              ),
+              Effect.catchCause(recoverCompactionFailure),
+              Effect.ensuring(
+                Effect.sync(() => {
+                  if (!stoppingThreadIds.has(event.payload.threadId))
+                    compactingThreads.delete(event.payload.threadId);
+                }),
+              ),
+              Effect.forkScoped,
+            );
+          compactionStarted = true;
+        }).pipe(
+          Effect.catchCause(recoverCompactionFailure),
+          Effect.ensuring(
+            Effect.sync(() => {
+              if (!compactionStarted) compactingThreads.delete(event.payload.threadId);
+            }),
           ),
         ),
-        Effect.catchCause(recoverCompactionFailure),
-        Effect.ensuring(
-          Effect.sync(() => {
-            if (!stoppingThreadIds.has(event.payload.threadId))
-              compactingThreads.delete(event.payload.threadId);
-          }),
-        ),
-        Effect.forkScoped,
       );
       return;
     }
@@ -1552,63 +1604,63 @@ const make = Effect.gen(function* () {
         "Wait for context compaction to finish before sending another message.",
       );
     }
-    const sendTurnRequest = yield* buildSendTurnRequestForThread({
-      threadId: event.payload.threadId,
-      messageText: message.text,
-      ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-      ...(event.payload.modelSelection !== undefined
-        ? { modelSelection: event.payload.modelSelection }
-        : {}),
-      interactionMode: event.payload.interactionMode,
-      createdAt: event.payload.createdAt,
-    }).pipe(
-      Effect.map(Option.some),
-      Effect.catchCause((cause) => handleTurnStartFailure(cause).pipe(Effect.as(Option.none()))),
-    );
-
-    if (Option.isNone(sendTurnRequest)) return;
-
-    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
-      Effect.flatMap((result) =>
-        orchestrationEngine.dispatch({
-          type: "thread.activity.append",
-          commandId: CommandId.make(`server:turn-start-accepted:${event.eventId}`),
+    yield* forkSessionCommand(event, (preparation, command) =>
+      Effect.gen(function* () {
+        const sendTurnRequest = yield* buildSendTurnRequestForThread({
           threadId: event.payload.threadId,
-          operationResult: { requestId: event.payload.messageId, outcome: "completed" },
-          activity: {
-            id: EventId.make(`turn-start-accepted:${event.eventId}`),
-            kind: "provider.turn.start.accepted",
-            tone: "info",
-            summary: "Provider accepted the request",
-            payload: {
-              timelineBypass: true,
-              ...({
-                requestId: event.payload.messageId,
-                turnId: result.turnId,
-                requestedAt: event.payload.createdAt,
-                ...(event.payload.sourceProposedPlan
-                  ? { sourceProposedPlan: event.payload.sourceProposedPlan }
-                  : {}),
-              } satisfies OrchestrationTurnStartAcceptance),
-            },
-            turnId: result.turnId,
-            createdAt: event.payload.createdAt,
-          },
+          messageText: message.text,
+          ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+          ...(event.payload.modelSelection !== undefined
+            ? { modelSelection: event.payload.modelSelection }
+            : {}),
+          interactionMode: event.payload.interactionMode,
           createdAt: event.payload.createdAt,
-        }),
-      ),
-      Effect.andThen(
-        markAcceptedSourcePlan(event).pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("provider command reactor failed to mark source plan", {
-              cause: Cause.pretty(cause),
+        }).pipe(preparation.withPermit);
+
+        // A cancelled send can already have reached the provider. Only preparation
+        // can be reported as a message that was never submitted.
+        command.preparing = false;
+        yield* providerService.sendTurn(sendTurnRequest).pipe(
+          Effect.flatMap((result) =>
+            orchestrationEngine.dispatch({
+              type: "thread.activity.append",
+              commandId: CommandId.make(`server:turn-start-accepted:${event.eventId}`),
+              threadId: event.payload.threadId,
+              operationResult: { requestId: event.payload.messageId, outcome: "completed" },
+              activity: {
+                id: EventId.make(`turn-start-accepted:${event.eventId}`),
+                kind: "provider.turn.start.accepted",
+                tone: "info",
+                summary: "Provider accepted the request",
+                payload: {
+                  timelineBypass: true,
+                  ...({
+                    requestId: event.payload.messageId,
+                    turnId: result.turnId,
+                    requestedAt: event.payload.createdAt,
+                    ...(event.payload.sourceProposedPlan
+                      ? { sourceProposedPlan: event.payload.sourceProposedPlan }
+                      : {}),
+                  } satisfies OrchestrationTurnStartAcceptance),
+                },
+                turnId: result.turnId,
+                createdAt: event.payload.createdAt,
+              },
+              createdAt: event.payload.createdAt,
             }),
           ),
-        ),
-      ),
-      Effect.asVoid,
-      Effect.catchCause(recoverTurnStartFailure),
-      Effect.forkScoped,
+          Effect.andThen(
+            markAcceptedSourcePlan(event).pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning("provider command reactor failed to mark source plan", {
+                  cause: Cause.pretty(cause),
+                }),
+              ),
+            ),
+          ),
+          Effect.asVoid,
+        );
+      }).pipe(Effect.catchCause(recoverTurnStartFailure)),
     );
   });
 
@@ -1908,9 +1960,19 @@ const make = Effect.gen(function* () {
       event.type === "thread.turn-interrupt-requested" ||
       event.type === "thread.session-stop-requested"
     ) {
-      const delayed = delayedTurnStarts.get(event.payload.threadId);
+      const delayed = new Set(delayedTurnStarts.get(event.payload.threadId));
       delayedTurnStarts.delete(event.payload.threadId);
-      if (delayed) {
+      const pending = [...(sessionCommands.get(event.payload.threadId)?.pending ?? [])];
+      for (const command of pending) {
+        if (command.preparing && command.event.type === "thread.turn-start-requested") {
+          delayed.add(command.event);
+        }
+      }
+      // Join parked preparation and sends before native stop tries to acquire adapter locks.
+      yield* Fiber.interruptAll(
+        pending.flatMap((command) => (command.fiber === undefined ? [] : [command.fiber])),
+      );
+      if (delayed.size > 0) {
         yield* Effect.forEach(
           delayed,
           (request) =>
@@ -1918,7 +1980,7 @@ const make = Effect.gen(function* () {
               threadId: event.payload.threadId,
               kind: "provider.turn.start.failed",
               summary: "Queued message cancelled",
-              detail: "This message was cancelled before the previous turn's checkpoint finished.",
+              detail: "This message was cancelled before it was sent to the provider.",
               turnId: null,
               requestId: request.payload.messageId,
               operationResult: { requestId: request.payload.messageId, outcome: "interrupted" },
@@ -1947,11 +2009,25 @@ const make = Effect.gen(function* () {
         if (!thread?.session || thread.session.status === "stopped") {
           return;
         }
-        const cachedModelSelection = threadModelSelections.get(event.payload.threadId);
-        yield* ensureSessionForThread(
-          event.payload.threadId,
-          event.occurredAt,
-          cachedModelSelection !== undefined ? { modelSelection: cachedModelSelection } : {},
+        yield* forkSessionCommand(event, (preparation) =>
+          Effect.gen(function* () {
+            const cachedModelSelection = threadModelSelections.get(event.payload.threadId);
+            yield* ensureSessionForThread(
+              event.payload.threadId,
+              event.occurredAt,
+              cachedModelSelection !== undefined ? { modelSelection: cachedModelSelection } : {},
+            );
+          }).pipe(
+            preparation.withPermit,
+            Effect.catchCause((cause) =>
+              Cause.hasInterruptsOnly(cause)
+                ? Effect.interrupt
+                : Effect.logWarning("provider command reactor failed to change runtime mode", {
+                    threadId: event.payload.threadId,
+                    cause: Cause.pretty(cause),
+                  }),
+            ),
+          ),
         );
         return;
       }
