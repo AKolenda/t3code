@@ -14,6 +14,7 @@ import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import type * as PlatformError from "effect/PlatformError";
@@ -27,6 +28,7 @@ import {
   resolveThreadWorkspaceCwd,
 } from "../../checkpointing/Utils.ts";
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
+import * as TurnCheckpointCapture from "../../checkpointing/TurnCheckpointCapture.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { forkParked } from "../../serverActivation.ts";
@@ -85,6 +87,7 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
+  const checkpointCapture = yield* TurnCheckpointCapture.TurnCheckpointCapture;
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
@@ -361,17 +364,17 @@ const make = Effect.gen(function* () {
     function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" | "turn.aborted" }>) {
       const turnId = toTurnId(event.turnId);
       if (!turnId) {
-        return;
+        return "skipped" as const;
       }
 
       const thread = yield* resolveThreadDetail(event.threadId);
       if (!thread) {
-        return;
+        return "skipped" as const;
       }
 
       // When a primary turn is active, only that turn may produce completion checkpoints.
       if (thread.session?.activeTurnId && !sameId(thread.session.activeTurnId, turnId)) {
-        return;
+        return "skipped" as const;
       }
 
       // Only skip if a real (non-placeholder) checkpoint already exists for this turn.
@@ -382,7 +385,7 @@ const make = Effect.gen(function* () {
           (checkpoint) => checkpoint.turnId === turnId && checkpoint.status !== "missing",
         )
       ) {
-        return;
+        return "skipped" as const;
       }
 
       const projects = yield* resolveThreadProjects(thread.projectId);
@@ -393,7 +396,7 @@ const make = Effect.gen(function* () {
         preferSessionRuntime: true,
       });
       if (!checkpointCwd) {
-        return;
+        return "skipped" as const;
       }
 
       // If a placeholder checkpoint exists for this turn, reuse its turn count
@@ -422,6 +425,7 @@ const make = Effect.gen(function* () {
         assistantMessageId: existingPlaceholder?.assistantMessageId ?? undefined,
         createdAt: event.createdAt,
       });
+      return "captured" as const;
     },
   );
 
@@ -604,6 +608,21 @@ const make = Effect.gen(function* () {
       }),
     );
   });
+
+  // Host lookups must not delay file capture or checkpoints in other threads.
+  const statusRefreshWorker = yield* makeDrainableWorker(
+    (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>) =>
+      refreshLocalGitStatusFromTurnCompletion(event).pipe(
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("failed to refresh git status after turn completion", {
+                threadId: event.threadId,
+                cause: Cause.pretty(cause),
+              }),
+        ),
+      ),
+  );
 
   const ensurePreTurnBaselineFromDomainTurnStart = Effect.fn(
     "ensurePreTurnBaselineFromDomainTurnStart",
@@ -823,6 +842,57 @@ const make = Effect.gen(function* () {
     }
   });
 
+  const processTurnCompletion = Effect.fn("processTurnCompletion")(
+    function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" | "turn.aborted" }>) {
+      const turnId = toTurnId(event.turnId);
+      const thread = yield* resolveThreadDetail(event.threadId);
+      const startedTurnId = startedTurns.get(event.threadId);
+      const isTrackedTurn = sameId(startedTurnId, turnId);
+      if (isTrackedTurn) startedTurns.delete(event.threadId);
+      if (event.type === "turn.completed") {
+        yield* statusRefreshWorker.enqueue(event);
+      }
+      if (
+        turnId !== null &&
+        thread !== undefined &&
+        (isTrackedTurn ||
+          sameId(thread.session?.activeTurnId, turnId) ||
+          (startedTurnId === undefined && !thread.session?.activeTurnId))
+      ) {
+        pending.delete(event.threadId);
+        yield* pullRequests.refreshAfterTurn;
+      }
+      if (
+        event.type === "turn.aborted" &&
+        !isTrackedTurn &&
+        !sameId(thread?.session?.activeTurnId, turnId)
+      ) {
+        return "skipped" as const;
+      }
+      return yield* captureCheckpointFromTurnCompletion(event).pipe(
+        Effect.catch((error) =>
+          Effect.flatMap(nowIso, (createdAt) =>
+            appendCaptureFailureActivity({
+              threadId: event.threadId,
+              turnId,
+              detail: error.message,
+              createdAt,
+            }).pipe(
+              Effect.catch(() => Effect.void),
+              Effect.as("failed" as const),
+            ),
+          ),
+        ),
+      );
+    },
+    (effect, event) =>
+      effect.pipe(
+        Effect.onExit((exit) =>
+          checkpointCapture.complete(event, Exit.isSuccess(exit) ? exit.value : "failed"),
+        ),
+      ),
+  );
+
   const processRuntimeEvent = Effect.fn("processRuntimeEvent")(function* (
     event: ProviderRuntimeEvent,
   ) {
@@ -847,44 +917,7 @@ const make = Effect.gen(function* () {
     }
 
     if (event.type === "turn.completed" || event.type === "turn.aborted") {
-      const turnId = toTurnId(event.turnId);
-      const thread = yield* resolveThreadDetail(event.threadId);
-      const startedTurnId = startedTurns.get(event.threadId);
-      const isTrackedTurn = sameId(startedTurnId, turnId);
-      if (isTrackedTurn) startedTurns.delete(event.threadId);
-      if (event.type === "turn.completed") {
-        yield* refreshLocalGitStatusFromTurnCompletion(event);
-      }
-      if (
-        turnId !== null &&
-        thread !== undefined &&
-        (isTrackedTurn ||
-          sameId(thread.session?.activeTurnId, turnId) ||
-          (startedTurnId === undefined && !thread.session?.activeTurnId))
-      ) {
-        pending.delete(event.threadId);
-        yield* pullRequests.refreshAfterTurn;
-      }
-      if (
-        event.type === "turn.aborted" &&
-        !isTrackedTurn &&
-        !sameId(thread?.session?.activeTurnId, turnId)
-      ) {
-        return;
-      }
-      yield* captureCheckpointFromTurnCompletion(event).pipe(
-        Effect.catch((error) =>
-          Effect.flatMap(nowIso, (createdAt) =>
-            appendCaptureFailureActivity({
-              threadId: event.threadId,
-              turnId,
-              detail: error.message,
-              createdAt,
-            }).pipe(Effect.catch(() => Effect.void)),
-          ),
-        ),
-      );
-      return;
+      yield* processTurnCompletion(event);
     }
   });
 
@@ -944,8 +977,10 @@ const make = Effect.gen(function* () {
 
   return {
     start,
-    drain: worker.drain,
+    drain: worker.drain.pipe(Effect.andThen(statusRefreshWorker.drain)),
   } satisfies CheckpointReactorShape;
 });
 
-export const CheckpointReactorLive = Layer.effect(CheckpointReactor, make);
+export const CheckpointReactorLive = Layer.effect(CheckpointReactor, make).pipe(
+  Layer.provide(TurnCheckpointCapture.layer),
+);

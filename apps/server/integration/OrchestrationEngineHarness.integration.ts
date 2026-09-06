@@ -11,13 +11,13 @@ import {
   type ProviderApprovalDecision,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
-import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
@@ -25,6 +25,7 @@ import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 
 import * as CheckpointStore from "../src/checkpointing/CheckpointStore.ts";
+import type { CheckpointStoreError } from "../src/checkpointing/Errors.ts";
 import { TextGeneration } from "../src/textGeneration/TextGeneration.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../src/persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../src/persistence/Layers/OrchestrationEventStore.ts";
@@ -58,6 +59,9 @@ import * as ThreadPlanProgress from "../src/orchestration/ThreadPlanProgress.ts"
 import { RuntimeReceiptBusTest } from "../src/orchestration/Layers/RuntimeReceiptBus.ts";
 import { OrchestrationReactorLive } from "../src/orchestration/Layers/OrchestrationReactor.ts";
 import { ProviderCommandReactorLive } from "../src/orchestration/Layers/ProviderCommandReactor.ts";
+import { ProviderCommandReactor } from "../src/orchestration/Services/ProviderCommandReactor.ts";
+import type { ProviderAdapterShape } from "../src/provider/Services/ProviderAdapter.ts";
+import type { ProviderAdapterError } from "../src/provider/Errors.ts";
 import { ProviderRuntimeIngestionLive } from "../src/orchestration/Layers/ProviderRuntimeIngestion.ts";
 import { CheckpointReactor } from "../src/orchestration/Services/CheckpointReactor.ts";
 import { ProviderRuntimeIngestionService } from "../src/orchestration/Services/ProviderRuntimeIngestion.ts";
@@ -227,6 +231,7 @@ export interface OrchestrationIntegrationHarness {
     ): Effect.Effect<Receipt, never>;
   };
   readonly drainProviderRuntime: Effect.Effect<void>;
+  readonly drainProviderCommands: Effect.Effect<void>;
   readonly drainCheckpointReactor: Effect.Effect<void>;
   readonly dispose: Effect.Effect<void, never>;
 }
@@ -234,6 +239,11 @@ export interface OrchestrationIntegrationHarness {
 interface MakeOrchestrationIntegrationHarnessOptions {
   readonly provider?: ProviderDriverKind;
   readonly realCodex?: boolean;
+  readonly initializeGit?: boolean;
+  readonly beforeCapture?: (
+    input: CheckpointStore.CaptureCheckpointInput,
+  ) => Effect.Effect<void, CheckpointStoreError>;
+  readonly onInterrupt?: ProviderAdapterShape<ProviderAdapterError>["interruptTurn"];
   /** Tracer for every fiber the harness runtime runs, including reactors. */
   readonly tracer?: Tracer.Tracer;
 }
@@ -251,6 +261,7 @@ export const makeOrchestrationIntegrationHarness = (
       ? null
       : yield* makeTestProviderAdapterHarness({
           provider,
+          ...(options?.onInterrupt ? { onInterrupt: options.onInterrupt } : {}),
         });
     const fakeRegistry = adapterHarness
       ? Layer.succeed(
@@ -267,7 +278,11 @@ export const makeOrchestrationIntegrationHarness = (
     );
     yield* fileSystem.makeDirectory(workspaceDir, { recursive: true });
     yield* fileSystem.makeDirectory(stateDir, { recursive: true });
-    yield* initializeGitWorkspace(workspaceDir);
+    if (options?.initializeGit === false) {
+      yield* fileSystem.writeFileString(path.join(workspaceDir, "README.md"), "v1\n");
+    } else {
+      yield* initializeGitWorkspace(workspaceDir);
+    }
 
     const persistenceLayer = makeSqlitePersistenceLive(dbPath);
     const orchestrationLayer = OrchestrationEngineLive.pipe(
@@ -308,7 +323,19 @@ export const makeOrchestrationIntegrationHarness = (
         );
     const providerRegistryLayer = makeProviderRegistryLayer();
 
-    const checkpointStoreLayer = CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer));
+    const checkpointStoreLayer = Layer.effect(
+      CheckpointStore.CheckpointStore,
+      Effect.gen(function* () {
+        const store = yield* CheckpointStore.CheckpointStore;
+        return CheckpointStore.CheckpointStore.of({
+          ...store,
+          captureCheckpoint: (input) =>
+            (options?.beforeCapture?.(input) ?? Effect.void).pipe(
+              Effect.andThen(store.captureCheckpoint(input)),
+            ),
+        });
+      }),
+    ).pipe(Layer.provide(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistry.layer))));
     const projectionSnapshotQueryLayer = OrchestrationProjectionSnapshotQueryLive;
     const runtimeServicesLayer = Layer.mergeAll(
       projectionSnapshotQueryLayer,
@@ -435,6 +462,10 @@ export const makeOrchestrationIntegrationHarness = (
     const checkpointReactor = yield* tryRuntimePromise("load CheckpointReactor service", () =>
       runtime.runPromise(Effect.service(CheckpointReactor)),
     ).pipe(Effect.orDie);
+    const providerCommandReactor = yield* tryRuntimePromise(
+      "load ProviderCommandReactor service",
+      () => runtime.runPromise(Effect.service(ProviderCommandReactor)),
+    ).pipe(Effect.orDie);
     const snapshotQuery = yield* tryRuntimePromise("load ProjectionSnapshotQuery service", () =>
       runtime.runPromise(Effect.service(ProjectionSnapshotQuery)),
     ).pipe(Effect.orDie);
@@ -460,9 +491,20 @@ export const makeOrchestrationIntegrationHarness = (
     yield* tryRuntimePromise("start OrchestrationReactor", () =>
       runtime.runPromise(reactor.start().pipe(Scope.provide(scope))),
     ).pipe(Effect.orDie);
-    const receiptHistory = yield* Ref.make<ReadonlyArray<OrchestrationRuntimeReceipt>>([]);
+    const receiptHistory: OrchestrationRuntimeReceipt[] = [];
+    const receiptWaiters = new Set<{
+      readonly matches: (receipt: OrchestrationRuntimeReceipt) => boolean;
+      readonly completion: Deferred.Deferred<OrchestrationRuntimeReceipt>;
+    }>();
     yield* Stream.runForEach(runtimeReceiptBus.streamEventsForTest, (receipt) =>
-      Ref.update(receiptHistory, (history) => [...history, receipt]).pipe(Effect.asVoid),
+      Effect.sync(() => {
+        receiptHistory.push(receipt);
+        for (const waiter of receiptWaiters) {
+          if (!waiter.matches(receipt)) continue;
+          receiptWaiters.delete(waiter);
+          Deferred.doneUnsafe(waiter.completion, Effect.succeed(receipt));
+        }
+      }),
     ).pipe(Effect.forkIn(scope));
     yield* Effect.sleep(10);
 
@@ -547,16 +589,20 @@ export const makeOrchestrationIntegrationHarness = (
       predicate: (receipt: OrchestrationRuntimeReceipt) => boolean,
       timeoutMs?: number,
     ) {
-      const readMatchingReceipt = Ref.get(receiptHistory).pipe(
-        Effect.map((history) => history.find(predicate)),
-      );
-
-      return waitFor(
-        readMatchingReceipt,
-        (receipt): receipt is OrchestrationRuntimeReceipt => receipt !== undefined,
-        "runtime receipt",
-        timeoutMs,
-      );
+      return Effect.suspend(() => {
+        const previous = receiptHistory.find(predicate);
+        if (previous) return Effect.succeed(previous);
+        const waiter = {
+          matches: predicate,
+          completion: Deferred.makeUnsafe<OrchestrationRuntimeReceipt>(),
+        };
+        receiptWaiters.add(waiter);
+        return Deferred.await(waiter.completion).pipe(
+          Effect.ensuring(Effect.sync(() => void receiptWaiters.delete(waiter))),
+          Effect.timeout(timeoutMs ?? 40_000),
+          Effect.orDie,
+        );
+      });
     }
 
     let disposed = false;
@@ -600,6 +646,7 @@ export const makeOrchestrationIntegrationHarness = (
       waitForPendingApproval,
       waitForReceipt,
       drainProviderRuntime: providerRuntimeIngestion.drain,
+      drainProviderCommands: providerCommandReactor.drain,
       drainCheckpointReactor: checkpointReactor.drain,
       dispose,
     } satisfies OrchestrationIntegrationHarness;

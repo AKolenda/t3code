@@ -16,12 +16,17 @@ import {
   ThreadId,
   ModelSelection,
   ProviderInstanceId,
+  TurnId,
+  VcsRepositoryDetectionError,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 
 import type { TestTurnResponse } from "./TestProviderAdapter.integration.ts";
 import {
@@ -98,9 +103,13 @@ function runtimeBase(
 function withHarness<A, E>(
   use: (harness: OrchestrationIntegrationHarness) => Effect.Effect<A, E>,
   provider: IntegrationProvider = CODEX_PROVIDER,
+  options?: Omit<
+    NonNullable<Parameters<typeof makeOrchestrationIntegrationHarness>[0]>,
+    "provider"
+  >,
 ) {
   return Effect.acquireUseRelease(
-    makeOrchestrationIntegrationHarness({ provider }),
+    makeOrchestrationIntegrationHarness({ ...options, provider }),
     use,
     (harness) => harness.dispose,
   ).pipe(Effect.provide(NodeServices.layer));
@@ -359,6 +368,338 @@ it.live.skipIf(!process.env.CODEX_BINARY_PATH)(
         assert.equal(secondThread.session?.threadId, "thread-1");
       }),
     ),
+);
+
+it.live.each(["completed", "aborted"] as const)(
+  "captures the %s turn before the next provider turn edits files",
+  (completion) =>
+    Effect.gen(function* () {
+      const captureStarted = yield* Deferred.make<void>();
+      const finishCapture = yield* Deferred.make<void>();
+      const interrupted = yield* Deferred.make<void>();
+      const secondTurnStarted = yield* Deferred.make<void>();
+      const firstRef = checkpointRefForThreadTurn(THREAD_ID, 1);
+      let firstFilesWereCaptured = false;
+
+      yield* withHarness(
+        (harness) =>
+          Effect.gen(function* () {
+            yield* seedProjectAndThread(harness);
+            const domainEvents = yield* harness.engine.subscribeDomainEvents;
+            const firstTurnRunning = yield* domainEvents.pipe(
+              Stream.filter(
+                (event) =>
+                  event.type === "thread.session-set" &&
+                  event.payload.session.activeTurnId === TurnId.make("turn-1"),
+              ),
+              Stream.runHead,
+              Effect.forkChild,
+            );
+            const startedEvent = {
+              type: "turn.started",
+              ...runtimeBase("capture-order-started", nowIso()),
+              threadId: THREAD_ID,
+              turnId: FIXTURE_TURN_ID,
+            };
+            yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+              events: [startedEvent],
+              emitCompletion: completion === "completed",
+              mutateWorkspace: ({ cwd }) =>
+                harness
+                  .waitForReceipt((receipt) => receipt.type === "checkpoint.baseline.captured")
+                  .pipe(
+                    Effect.andThen(
+                      Effect.sync(() =>
+                        NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v2\n"),
+                      ),
+                    ),
+                  ),
+            });
+            yield* startTurn({
+              harness,
+              commandId: "capture-order-first",
+              messageId: "capture-order-first-message",
+              text: "Make the first edit",
+            });
+            yield* Fiber.join(firstTurnRunning);
+            if (completion === "aborted") {
+              yield* harness.engine.dispatch({
+                type: "thread.turn.interrupt",
+                commandId: CommandId.make("capture-order-stop"),
+                threadId: THREAD_ID,
+                createdAt: nowIso(),
+              });
+              // Native cancellation has returned, but its terminal event is not delivered yet.
+              yield* Deferred.await(interrupted);
+            } else {
+              yield* Deferred.await(captureStarted);
+            }
+
+            yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
+              events: [startedEvent],
+              mutateWorkspace: ({ cwd }) =>
+                Effect.gen(function* () {
+                  firstFilesWereCaptured =
+                    gitRefExists(cwd, firstRef) &&
+                    gitShowFileAtRef(cwd, firstRef, "README.md") === "v2\n";
+                  NodeFS.writeFileSync(NodePath.join(cwd, "README.md"), "v3\n");
+                  yield* Deferred.succeed(secondTurnStarted, undefined);
+                }),
+            });
+            yield* startTurn({
+              harness,
+              commandId: "capture-order-second",
+              messageId: "capture-order-second-message",
+              text: "Make the second edit",
+            });
+            yield* harness.drainProviderCommands;
+            assert.isFalse(Deferred.isDoneUnsafe(secondTurnStarted));
+
+            if (completion === "aborted") {
+              yield* harness.adapterHarness!.emitRuntimeEvent({
+                type: "turn.aborted",
+                ...runtimeBase("capture-order-aborted", nowIso()),
+                threadId: THREAD_ID,
+                turnId: TurnId.make("turn-1"),
+                payload: { reason: "Interrupted by user" },
+              });
+              yield* Deferred.await(captureStarted);
+            }
+            assert.isFalse(gitRefExists(harness.workspaceDir, firstRef));
+            yield* Deferred.succeed(finishCapture, undefined);
+            yield* Deferred.await(secondTurnStarted);
+            assert.isTrue(firstFilesWereCaptured);
+            yield* harness.waitForReceipt(
+              (receipt) =>
+                receipt.type === "checkpoint.diff.finalized" && receipt.checkpointTurnCount === 2,
+            );
+            assert.equal(gitShowFileAtRef(harness.workspaceDir, firstRef, "README.md"), "v2\n");
+            assert.equal(
+              gitShowFileAtRef(
+                harness.workspaceDir,
+                checkpointRefForThreadTurn(THREAD_ID, 2),
+                "README.md",
+              ),
+              "v3\n",
+            );
+          }).pipe(Effect.ensuring(Deferred.succeed(finishCapture, undefined)), Effect.scoped),
+        CODEX_PROVIDER,
+        {
+          beforeCapture: ({ checkpointRef }) =>
+            checkpointRef === firstRef
+              ? Deferred.succeed(captureStarted, undefined).pipe(
+                  Effect.andThen(Deferred.await(finishCapture)),
+                )
+              : Effect.void,
+          onInterrupt: () => Deferred.succeed(interrupted, undefined).pipe(Effect.asVoid),
+        },
+      );
+    }),
+);
+
+it.live.each(["no git repository", "failed capture"] as const)(
+  "admits another turn with %s",
+  (mode) =>
+    Effect.gen(function* () {
+      const terminal = yield* Deferred.make<void>();
+      const secondTurnStarted = yield* Deferred.make<void>();
+      let captureFailed = false;
+      yield* withHarness(
+        (harness) =>
+          Effect.gen(function* () {
+            yield* seedProjectAndThread(harness);
+            const domainEvents = yield* harness.engine.subscribeDomainEvents;
+            let firstTurnRan = false;
+            yield* domainEvents.pipe(
+              Stream.runForEach((event) => {
+                if (event.type !== "thread.session-set") return Effect.void;
+                if (event.payload.session.activeTurnId === TurnId.make("turn-1"))
+                  firstTurnRan = true;
+                return firstTurnRan && event.payload.session.status === "ready"
+                  ? Deferred.succeed(terminal, undefined).pipe(Effect.asVoid)
+                  : Effect.void;
+              }),
+              Effect.forkChild,
+            );
+            yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+              events: [
+                {
+                  type: "turn.started",
+                  ...runtimeBase("capture-outcome-started", nowIso()),
+                  threadId: THREAD_ID,
+                  turnId: FIXTURE_TURN_ID,
+                },
+              ],
+            });
+            yield* startTurn({
+              harness,
+              commandId: "capture-outcome-first",
+              messageId: "capture-outcome-first-message",
+              text: "First message",
+            });
+            yield* Deferred.await(terminal);
+            yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
+              events: [],
+              mutateWorkspace: () =>
+                Deferred.succeed(secondTurnStarted, undefined).pipe(Effect.asVoid),
+            });
+            yield* startTurn({
+              harness,
+              commandId: "capture-outcome-second",
+              messageId: "capture-outcome-second-message",
+              text: "Second message",
+            });
+            yield* Deferred.await(secondTurnStarted);
+            assert.equal(captureFailed, mode === "failed capture");
+          }).pipe(Effect.scoped),
+        CODEX_PROVIDER,
+        {
+          initializeGit: mode !== "no git repository",
+          beforeCapture: ({ cwd, checkpointRef }) => {
+            if (
+              mode !== "failed capture" ||
+              captureFailed ||
+              checkpointRef === checkpointRefForThreadTurn(THREAD_ID, 0)
+            ) {
+              return Effect.void;
+            }
+            captureFailed = true;
+            return Effect.fail(
+              new VcsRepositoryDetectionError({
+                operation: "captureCheckpoint",
+                cwd,
+                detail: "Injected checkpoint failure",
+              }),
+            );
+          },
+        },
+      );
+    }),
+);
+
+it.live("forwards steering input without waiting for the active turn to complete", () =>
+  withHarness((harness) =>
+    Effect.gen(function* () {
+      yield* seedProjectAndThread(harness);
+      const domainEvents = yield* harness.engine.subscribeDomainEvents;
+      const running = yield* domainEvents.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "thread.session-set" &&
+            event.payload.session.activeTurnId === TurnId.make("turn-1"),
+        ),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+        events: [
+          {
+            type: "turn.started",
+            ...runtimeBase("active-steering-started", nowIso()),
+            threadId: THREAD_ID,
+            turnId: FIXTURE_TURN_ID,
+          },
+        ],
+        emitCompletion: false,
+      });
+      yield* startTurn({
+        harness,
+        commandId: "active-steering-first",
+        messageId: "active-steering-first-message",
+        text: "Start work",
+      });
+      yield* Fiber.join(running);
+      const steered = yield* Deferred.make<void>();
+      yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
+        events: [],
+        emitCompletion: false,
+        mutateWorkspace: () => Deferred.succeed(steered, undefined).pipe(Effect.asVoid),
+      });
+      yield* startTurn({
+        harness,
+        commandId: "active-steering-second",
+        messageId: "active-steering-second-message",
+        text: "Use the smaller change",
+      });
+      yield* Deferred.await(steered);
+      const thread = yield* harness.snapshotQuery.getThreadShellById(THREAD_ID);
+      assert.equal(Option.getOrThrow(thread).session?.activeTurnId, TurnId.make("turn-1"));
+    }).pipe(Effect.scoped),
+  ),
+);
+
+it.live("cancels a message waiting for capture when the user stops again", () =>
+  Effect.gen(function* () {
+    const captureStarted = yield* Deferred.make<void>();
+    const finishCapture = yield* Deferred.make<void>();
+    const stopped = yield* Deferred.make<void>();
+    const secondTurnStarted = yield* Deferred.make<void>();
+    yield* withHarness(
+      (harness) =>
+        Effect.gen(function* () {
+          yield* seedProjectAndThread(harness);
+          yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+            events: [
+              {
+                type: "turn.started",
+                ...runtimeBase("cancel-queued-started", nowIso()),
+                threadId: THREAD_ID,
+                turnId: FIXTURE_TURN_ID,
+              },
+            ],
+          });
+          yield* startTurn({
+            harness,
+            commandId: "cancel-queued-first",
+            messageId: "cancel-queued-first-message",
+            text: "Start work",
+          });
+          yield* Deferred.await(captureStarted);
+          yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
+            events: [],
+            mutateWorkspace: () =>
+              Deferred.succeed(secondTurnStarted, undefined).pipe(Effect.asVoid),
+          });
+          yield* startTurn({
+            harness,
+            commandId: "cancel-queued-second",
+            messageId: "cancel-queued-second-message",
+            text: "Start more work",
+          });
+          yield* harness.drainProviderCommands;
+          yield* harness.engine.dispatch({
+            type: "thread.turn.interrupt",
+            commandId: CommandId.make("cancel-queued-stop"),
+            threadId: THREAD_ID,
+            createdAt: nowIso(),
+          });
+          yield* Deferred.await(stopped);
+          yield* harness.drainProviderCommands;
+          yield* Deferred.succeed(finishCapture, undefined);
+          yield* harness.drainCheckpointReactor;
+          yield* harness.drainProviderCommands;
+          assert.isFalse(Deferred.isDoneUnsafe(secondTurnStarted));
+          const thread = yield* harness.snapshotQuery.getThreadDetailById(THREAD_ID);
+          assert.isTrue(
+            Option.getOrThrow(thread).activities.some(
+              (activity) =>
+                activity.kind === "provider.turn.start.failed" &&
+                activity.summary === "Queued message cancelled",
+            ),
+          );
+        }).pipe(Effect.ensuring(Deferred.succeed(finishCapture, undefined))),
+      CODEX_PROVIDER,
+      {
+        beforeCapture: ({ checkpointRef }) =>
+          checkpointRef === checkpointRefForThreadTurn(THREAD_ID, 1)
+            ? Deferred.succeed(captureStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(finishCapture)),
+              )
+            : Effect.void,
+        onInterrupt: () => Deferred.succeed(stopped, undefined).pipe(Effect.asVoid),
+      },
+    );
+  }),
 );
 
 it.live("runs multi-turn file edits and persists checkpoint diffs", () =>

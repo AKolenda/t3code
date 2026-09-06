@@ -27,6 +27,7 @@ import type {
 
 export interface TestTurnResponse {
   readonly events: ReadonlyArray<FixtureProviderRuntimeEvent>;
+  readonly emitCompletion?: boolean;
   readonly mutateWorkspace?: (input: {
     readonly cwd: string;
     readonly turnCount: number;
@@ -187,6 +188,7 @@ export interface TestProviderAdapterHarness {
     response: TestTurnResponse,
   ) => Effect.Effect<void, never>;
   readonly getStartCount: () => number;
+  readonly emitRuntimeEvent: (event: ProviderRuntimeEvent) => Effect.Effect<void>;
   readonly getRollbackCalls: (threadId: ThreadId) => ReadonlyArray<number>;
   readonly getInterruptCalls: (threadId: ThreadId) => ReadonlyArray<TurnId | undefined>;
   readonly listActiveSessionIds: () => ReadonlyArray<ThreadId>;
@@ -199,6 +201,7 @@ export interface TestProviderAdapterHarness {
 
 interface MakeTestProviderAdapterHarnessOptions {
   readonly provider?: ProviderDriverKind;
+  readonly onInterrupt?: ProviderAdapterShape<ProviderAdapterError>["interruptTurn"];
 }
 
 function nowIso(): string {
@@ -367,6 +370,9 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
           turns: [...state.snapshot.turns, nextTurn],
         };
 
+        if (response.emitCompletion === false) {
+          return { threadId: state.snapshot.threadId, turnId } satisfies ProviderTurnStartResult;
+        }
         if (deferredTurnCompletedEvents.length === 0) {
           yield* emit({
             type: "turn.completed",
@@ -400,7 +406,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
             const existing = interruptCallsBySession.get(threadId) ?? [];
             existing.push(turnId);
             interruptCallsBySession.set(threadId, existing);
-          })
+          }).pipe(Effect.andThen(options?.onInterrupt?.(threadId, turnId) ?? Effect.void))
         : missingSessionEffect(provider, threadId);
 
     const respondToRequest: ProviderAdapterShape<ProviderAdapterError>["respondToRequest"] = (
@@ -560,6 +566,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       queueTurnResponse,
       queueTurnResponseForNextSession,
       getStartCount,
+      emitRuntimeEvent: (event) => emit(event).pipe(Effect.asVoid),
       getRollbackCalls,
       getInterruptCalls,
       listActiveSessionIds,
