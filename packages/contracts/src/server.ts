@@ -268,7 +268,10 @@ export function hasProviderWorkspaceSkills(
   return Boolean(
     cwd &&
     provider?.workspaceSnapshots?.some(
-      (snapshot) => snapshot.cwd === cwd && snapshot.inventory?.skills !== "stale",
+      (snapshot) =>
+        snapshot.cwd === cwd &&
+        snapshot.inventory?.skills !== "stale" &&
+        snapshot.inventory?.skills !== "unavailable",
     ),
   );
 }

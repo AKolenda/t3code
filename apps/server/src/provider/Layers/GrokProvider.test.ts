@@ -336,7 +336,10 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
 
   // A stand-in for the Grok CLI: `--version` and `models` print canned text,
   // and `agent stdio` execs the mock ACP agent so `initialize` returns model metadata.
-  const writeFakeGrokCli = (input: { readonly modelsOutput: string; readonly acp: boolean }) =>
+  const writeFakeGrokCli = (input: {
+    readonly modelsOutput: string;
+    readonly acp: boolean | "without-models";
+  }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-grok-probe-" });
@@ -355,7 +358,19 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
           "  process.exit(0);",
           "}",
           'if (process.argv[2] !== "agent") process.exit(1);',
-          ...(input.acp ? [execScriptSource({ scriptPath: mockAgentPath })] : ["process.exit(3);"]),
+          ...(input.acp === "without-models"
+            ? [
+                'import { createInterface } from "node:readline";',
+                'createInterface({ input: process.stdin }).on("line", (line) => {',
+                "  const request = JSON.parse(line);",
+                "  if (request.id === undefined) return;",
+                "  const result = { protocolVersion: 1, agentCapabilities: {}, authMethods: [] };",
+                '  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");',
+                "});",
+              ]
+            : input.acp
+              ? [execScriptSource({ scriptPath: mockAgentPath })]
+              : ["process.exit(3);"]),
           "",
         ].join("\n"),
       });
@@ -417,27 +432,30 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
 
   it.effect("falls back to CLI-listed models with a warning when ACP initialize fails", () =>
     Effect.gen(function* () {
-      const snapshot = yield* Effect.scoped(
-        Effect.gen(function* () {
-          const grokPath = yield* writeFakeGrokCli({
-            modelsOutput: LOGGED_IN_MODELS_OUTPUT,
-            acp: false,
-          });
-          return yield* checkGrokProviderStatus(
-            decodeGrokSettings({ enabled: true, binaryPath: grokPath }),
-            { ...process.env, XAI_API_KEY: "" },
-          );
-        }),
-      );
+      for (const acp of [false, "without-models"] as const) {
+        const snapshot = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const grokPath = yield* writeFakeGrokCli({
+              modelsOutput: LOGGED_IN_MODELS_OUTPUT,
+              acp,
+            });
+            return yield* checkGrokProviderStatus(
+              decodeGrokSettings({ enabled: true, binaryPath: grokPath }),
+              { ...process.env, XAI_API_KEY: "" },
+            );
+          }),
+        );
 
-      expect(snapshot.status).toBe("warning");
-      expect(snapshot.installed).toBe(true);
-      expect(snapshot.auth.status).toBe("authenticated");
-      expect(snapshot.models.map((model) => [model.slug, model.isDefault ?? false])).toEqual([
-        ["grok-4.6", true],
-        ["grok-4.5", false],
-      ]);
-      expect(snapshot.message).toContain("ACP initialize failed");
+        expect(snapshot.status).toBe("warning");
+        expect(snapshot.installed).toBe(true);
+        expect(snapshot.auth.status).toBe("authenticated");
+        expect(snapshot.models.map((model) => [model.slug, model.isDefault ?? false])).toEqual([
+          ["grok-4.6", true],
+          ["grok-4.5", false],
+        ]);
+        expect(snapshot.message).toContain("ACP model discovery did not complete");
+        expect(snapshot.inventory?.models).toBe("stale");
+      }
     }),
   );
 

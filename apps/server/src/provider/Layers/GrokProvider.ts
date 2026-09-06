@@ -477,10 +477,14 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
     Effect.exit,
   );
   const acpModels = Exit.isSuccess(acpExit) ? Option.getOrUndefined(acpExit.value) : undefined;
-  const acpFailed = Exit.isFailure(acpExit) || Option.isNone(acpExit.value);
+  const acpFailed = acpModels === undefined;
   if (acpFailed) {
-    yield* Effect.logWarning("Grok ACP initialize probe failed or timed out.", {
-      errorTag: Exit.isFailure(acpExit) ? causeErrorTag(acpExit.cause) : "Timeout",
+    yield* Effect.logWarning("Grok ACP model discovery did not complete.", {
+      errorTag: Exit.isFailure(acpExit)
+        ? causeErrorTag(acpExit.cause)
+        : Option.isNone(acpExit.value)
+          ? "Timeout"
+          : "MissingModelMetadata",
     });
   }
 
@@ -531,7 +535,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       ...(acpFailed
         ? {
             message:
-              "Grok CLI is installed but ACP initialize failed. Model options may be incomplete.",
+              "Grok CLI is installed but ACP model discovery did not complete. Model options may be incomplete.",
           }
         : {}),
     },

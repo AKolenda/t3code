@@ -270,6 +270,20 @@ describe("workspace provider snapshots", () => {
     } satisfies ServerProvider;
     expect(hasProviderWorkspaceSkills(completed, cwd)).toBe(true);
     expect(resolveProviderSkillsForCwd(completed, cwd)).toEqual([]);
+    expect(
+      hasProviderWorkspaceSkills(
+        {
+          ...completed,
+          workspaceSnapshots: [
+            {
+              ...completed.workspaceSnapshots[0]!,
+              inventory: { slashCommands: "unavailable", skills: "unavailable" },
+            },
+          ],
+        },
+        cwd,
+      ),
+    ).toBe(false);
   });
 
   it("keeps current machine commands until workspace commands are known", () => {
