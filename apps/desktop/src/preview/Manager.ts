@@ -1258,6 +1258,26 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     }
   });
 
+  const completeWebviewRemoval = (registrationId: number) => {
+    const registered = registeredWebviews.get(registrationId);
+    if (!registered) return;
+    registeredWebviews.delete(registrationId);
+    const guest = registered.webContents;
+    removedWebContents.add(guest);
+    retiredWebContents.add(guest);
+    const pending = pendingWebviewResets.get(registered.tabId);
+    if (pending?.webContents === guest && pending.resetId === registrationId) {
+      pendingWebviewResets.delete(registered.tabId);
+      Deferred.doneUnsafe(pending.removed, Effect.void);
+    }
+    runFork(
+      Effect.all([detachControlSession(guest.id, guest), detachListeners(guest.id, guest)], {
+        concurrency: 2,
+        discard: true,
+      }),
+    );
+  };
+
   // The host confirms removal of the DOM webview. Electron's destroyed event
   // can mean only wrapper loss, while the outer frame still owns the target.
   const observeWebviewHost = Effect.fn("PreviewManager.observeWebviewHost")(function* (
@@ -1288,21 +1308,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         registered.webContents.id !== webContentsId
       )
         return;
-      registeredWebviews.delete(resetId);
-      const guest = registered.webContents;
-      removedWebContents.add(guest);
-      retiredWebContents.add(guest);
-      const pending = pendingWebviewResets.get(registered.tabId);
-      if (pending?.webContents === guest && pending.resetId === resetId) {
-        pendingWebviewResets.delete(registered.tabId);
-        Deferred.doneUnsafe(pending.removed, Effect.void);
-      }
-      runFork(
-        Effect.all([detachControlSession(guest.id, guest), detachListeners(guest.id, guest)], {
-          concurrency: 2,
-          discard: true,
-        }),
-      );
+      completeWebviewRemoval(resetId);
     };
     yield* attempt({ operation: "observeWebviewHost", webContentsId: wc.id }, () => {
       hostIpc.on(PREVIEW_WEBVIEW_REMOVED_CHANNEL, onRemoved);
@@ -2182,7 +2188,13 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         yield* Ref.set(mainWindowRef, Option.some(window));
         currentMainWindow = window;
         frameCaptureWindowOpen = true;
+        const host = window.webContents;
         window.once("closed", () => {
+          // A native window close ends every guest DOM lifetime, even when
+          // the renderer exits without running its React cleanup.
+          for (const [registrationId, registered] of registeredWebviews) {
+            if (registered.host === host) completeWebviewRemoval(registrationId);
+          }
           if (currentMainWindow !== window) return;
           currentMainWindow = undefined;
           frameCaptureWindowOpen = false;

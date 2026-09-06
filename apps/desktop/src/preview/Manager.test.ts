@@ -2761,6 +2761,60 @@ describe("PreviewManager", () => {
     ),
   );
 
+  effectIt.effect("releases retired guests when their native host window closes", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const first = makeAutomationWebContents();
+        const replacement = makeAutomationWebContents(43);
+        fromId.mockImplementation((id) => (id === 43 ? replacement.wc : first.wc));
+        let closeFirstWindow: (() => void) | undefined;
+        yield* manager.setMainWindow({
+          isDestroyed: () => false,
+          webContents: first.host,
+          once: vi.fn((event: string, listener: () => void) => {
+            if (event === "closed") closeFirstWindow = listener;
+          }),
+        } as never);
+        yield* manager.createTab("tab_host_close");
+        yield* manager.registerWebview("tab_host_close", 42);
+        yield* manager.automationEvaluate("tab_host_close", { expression: "42" });
+        const entered = yield* Deferred.make<void>();
+        const pending = Promise.withResolvers<unknown>();
+        first.sendCommand.mockImplementation(async (method) => {
+          if (method === "Runtime.evaluate") {
+            queueMicrotask(() => Deferred.doneUnsafe(entered, Effect.void));
+            return pending.promise;
+          }
+        });
+        const evaluation = yield* manager
+          .automationEvaluate("tab_host_close", { expression: "new Promise(() => {})" })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* Deferred.await(entered);
+        yield* TestClock.adjust(12_000);
+        expect(Exit.isFailure(yield* Fiber.await(evaluation))).toBe(true);
+        expect((yield* manager.automationStatus("tab_host_close")).available).toBe(false);
+
+        // A native window close need not run the renderer's React cleanup.
+        first.destroy();
+        closeFirstWindow?.();
+        yield* manager.setMainWindow({
+          isDestroyed: () => false,
+          webContents: replacement.host,
+          once: vi.fn(),
+        } as never);
+        const registration = yield* manager
+          .registerWebview("tab_host_close", 43)
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        yield* TestClock.adjust(2_000);
+        const registrationExit = yield* Fiber.await(registration);
+        first.remove();
+        pending.resolve({ result: { value: "late" } });
+        expect(Exit.isSuccess(registrationExit)).toBe(true);
+        expect(yield* manager.automationEvaluate("tab_host_close", { expression: "42" })).toBe(42);
+      }),
+    ),
+  );
+
   effectIt.effect("counts a pending debugger reply against the waitFor deadline", () =>
     withManager((manager) =>
       Effect.gen(function* () {
