@@ -16,7 +16,7 @@ import {
 } from "./baseSchemas.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 
-export const RelayAgentAwarenessPlatform = Schema.Literal("ios");
+export const RelayAgentAwarenessPlatform = Schema.Literals(["ios", "android"]);
 export type RelayAgentAwarenessPlatform = typeof RelayAgentAwarenessPlatform.Type;
 
 export const RelayAgentAwarenessPhase = Schema.Literals([
@@ -47,7 +47,8 @@ export const RelayDeviceRegistrationRequest = Schema.Struct({
   deviceId: TrimmedNonEmptyString,
   label: TrimmedNonEmptyString,
   platform: RelayAgentAwarenessPlatform,
-  iosMajorVersion: Schema.Int.check(Schema.isGreaterThanOrEqualTo(18)),
+  iosMajorVersion: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(18))),
+  androidApiLevel: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(24))),
   appVersion: Schema.optional(TrimmedNonEmptyString),
   // APNs routing for this install: the topic must match the app's bundle id
   // (dev/preview/prod variants differ) and development-signed builds receive
@@ -58,14 +59,24 @@ export const RelayDeviceRegistrationRequest = Schema.Struct({
   pushToken: Schema.optional(TrimmedNonEmptyString),
   pushToStartToken: Schema.optional(TrimmedNonEmptyString),
   preferences: RelayAgentAwarenessPreferences,
-});
+}).check(
+  Schema.makeFilter((device) =>
+    device.platform === "ios"
+      ? device.iosMajorVersion !== undefined
+      : device.androidApiLevel !== undefined &&
+        device.iosMajorVersion === undefined &&
+        device.apsEnvironment === undefined &&
+        device.pushToStartToken === undefined,
+  ),
+);
 export type RelayDeviceRegistrationRequest = typeof RelayDeviceRegistrationRequest.Type;
 
 export const RelayClientDeviceRecord = Schema.Struct({
   deviceId: TrimmedNonEmptyString,
   label: TrimmedNonEmptyString,
   platform: RelayAgentAwarenessPlatform,
-  iosMajorVersion: Schema.Int.check(Schema.isGreaterThanOrEqualTo(18)),
+  iosMajorVersion: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(18))),
+  androidApiLevel: Schema.optional(Schema.NullOr(Schema.Int)),
   appVersion: Schema.NullOr(TrimmedNonEmptyString),
   notifications: Schema.Struct({
     enabled: Schema.Boolean,

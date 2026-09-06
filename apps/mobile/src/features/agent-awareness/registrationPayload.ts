@@ -13,7 +13,9 @@ export function resolveApsEnvironment(appVariant: unknown): "sandbox" | "product
 export function makeRelayDeviceRegistrationRequest(input: {
   readonly deviceId: string;
   readonly label: string;
-  readonly iosMajorVersion: number;
+  readonly platform?: "ios" | "android";
+  readonly iosMajorVersion?: number;
+  readonly androidApiLevel?: number;
   readonly appVersion?: string;
   readonly bundleId?: string;
   readonly apsEnvironment?: "sandbox" | "production";
@@ -27,8 +29,10 @@ export function makeRelayDeviceRegistrationRequest(input: {
   return {
     deviceId: input.deviceId,
     label: input.label,
-    platform: "ios",
-    iosMajorVersion: input.iosMajorVersion,
+    platform: input.platform ?? "ios",
+    ...(input.platform === "android"
+      ? { androidApiLevel: input.androidApiLevel }
+      : { iosMajorVersion: input.iosMajorVersion }),
     appVersion: input.appVersion,
     ...(input.bundleId ? { bundleId: input.bundleId } : {}),
     ...(input.apsEnvironment ? { apsEnvironment: input.apsEnvironment } : {}),

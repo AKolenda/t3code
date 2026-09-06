@@ -37,6 +37,14 @@ describe("mobile client presentation", () => {
     );
   });
 
+  it("labels Android devices without displaying an iOS version", () => {
+    expect(
+      mobileClientPlatformLabel(
+        device({ platform: "android", iosMajorVersion: null, androidApiLevel: 36 }),
+      ),
+    ).toBe("Android · T3 Code 1.2.3");
+  });
+
   it("distinguishes disabled notifications from an empty event selection", () => {
     expect(
       mobileClientNotificationDetail(
