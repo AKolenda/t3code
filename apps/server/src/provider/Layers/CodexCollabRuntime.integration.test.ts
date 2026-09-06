@@ -605,15 +605,13 @@ describe("CodexSessionRuntime collab integration", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
-  it.live("Stop targets the active turn when Codex has accepted a queued follow-up", () =>
+  it.live("Stop targets the active turn after Codex accepts same-turn steering", () =>
     Effect.gen(function* () {
       const activeTurnId = "019fe3e8-f908-7f31-8d51-283f4a47897a";
-      const queuedTurnId = "019fe3eb-8faf-7de3-a85b-ac64c7f9c8c3";
       const script = {
         rootThreadId: ROOT,
         holdTurnOpen: true,
-        onlyFirstTurnStarts: true,
-        turnIds: [activeTurnId, queuedTurnId],
+        turnIds: [activeTurnId],
         expectedActiveTurnId: activeTurnId,
         notifications: [],
       };
@@ -629,7 +627,7 @@ describe("CodexSessionRuntime collab integration", () => {
       );
 
       const runtime = yield* makeCodexSessionRuntime({
-        threadId: ThreadId.make("thread-codex-queued-stop"),
+        threadId: ThreadId.make("thread-codex-steered-stop"),
         binaryPath: peerPath,
         cwd: NodeOS.tmpdir(),
         runtimeMode: "full-access",
@@ -638,7 +636,8 @@ describe("CodexSessionRuntime collab integration", () => {
 
       yield* runtime.start();
       yield* runtime.sendTurn({ input: "keep working" });
-      yield* runtime.sendTurn({ input: "queued follow-up" });
+      const steered = yield* runtime.sendTurn({ input: "follow-up" });
+      assert.equal(steered.turnId, activeTurnId);
       yield* runtime.interruptTurn();
 
       const interrupts = NodeFS.readFileSync(interruptsPath, "utf8")

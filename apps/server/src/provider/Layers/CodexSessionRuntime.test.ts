@@ -33,6 +33,7 @@ import {
 } from "./CodexSessionRuntime.ts";
 import wireFixture from "../testFixtures/codexMultiAgentWire.json" with { type: "json" };
 const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
+const decodeTurnStartParams = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartParams);
 
 const NativeRequest = Schema.Struct({
   id: Schema.optionalKey(Schema.Union([Schema.Number, Schema.String])),
@@ -133,6 +134,8 @@ const makeAdmissionRuntime = Effect.fn("makeAdmissionRuntime")(function* (option
         : Deferred.succeed(exited, ChildProcessSpawner.ExitCode(0)),
     observed,
     respond,
+    reject: (request: typeof NativeRequest.Type, code: number, message: string) =>
+      write({ id: request.id, error: { code, message } }),
     nextRequest: Effect.fnUntraced(function* (method: string) {
       const request = yield* Queue.take(requests);
       NodeAssert.equal(request.method, method);
@@ -151,6 +154,309 @@ const makeAdmissionRuntime = Effect.fn("makeAdmissionRuntime")(function* (option
 });
 
 describe("Codex native turn admission", () => {
+  it.effect("steers the exact active turn and keeps settings for the next admitted turn", () =>
+    Effect.gen(function* () {
+      const { runtime, observed, respond, nextRequest, complete } = yield* makeAdmissionRuntime();
+      const completed: Array<string> = [];
+      const terminal = yield* Deferred.make<void>();
+      const first = yield* runtime
+        .sendTurn(
+          { input: "first", model: "gpt-5.4" },
+          {
+            beforeSubmit: () => Effect.void,
+            notSubmitted: Effect.die("first input was submitted"),
+            nativeStopped: Effect.void,
+            nativeCompleted: (turnId) =>
+              Effect.sync(() => {
+                completed.push(`first:${turnId}`);
+              }),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+      const firstRequest = yield* nextRequest("turn/start");
+      yield* respond(firstRequest, {
+        turn: { id: "active-turn", status: "inProgress", items: [] },
+      });
+      yield* Fiber.join(first);
+
+      const steer = yield* runtime
+        .sendTurn(
+          {
+            input: "follow-up",
+            model: "gpt-5.3-codex",
+            effort: "high",
+            serviceTier: "fast",
+            interactionMode: "plan",
+          },
+          {
+            beforeSubmit: (turnId) =>
+              Effect.sync(() => {
+                NodeAssert.equal(turnId, "active-turn");
+              }),
+            notSubmitted: Effect.die("steering was submitted"),
+            nativeStopped: Effect.void,
+            nativeCompleted: (turnId) =>
+              Effect.gen(function* () {
+                completed.push(`steer:${turnId}`);
+                yield* Deferred.succeed(terminal, undefined);
+              }),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+      const steerRequest = yield* nextRequest("turn/steer");
+      NodeAssert.deepStrictEqual(steerRequest.params, {
+        threadId: wireFixture.rootThreadId,
+        expectedTurnId: "active-turn",
+        input: [{ type: "text", text: "follow-up" }],
+      });
+      yield* respond(steerRequest, { turnId: "active-turn" });
+      NodeAssert.equal((yield* Fiber.join(steer)).turnId, "active-turn");
+      yield* complete("active-turn");
+      yield* Deferred.await(terminal);
+      NodeAssert.deepStrictEqual(completed, ["first:active-turn", "steer:active-turn"]);
+
+      const captureReady = yield* Deferred.make<void>();
+      const parked = yield* Deferred.make<void>();
+      const next = yield* runtime
+        .sendTurn(
+          { input: "next turn" },
+          {
+            beforeSubmit: (turnId) =>
+              Effect.gen(function* () {
+                NodeAssert.equal(turnId, undefined);
+                yield* Deferred.succeed(parked, undefined);
+                yield* Deferred.await(captureReady);
+              }),
+            notSubmitted: Effect.void,
+            nativeStopped: Effect.void,
+            nativeCompleted: () => Effect.void,
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+      yield* Deferred.await(parked);
+      NodeAssert.equal(observed.filter((method) => method === "turn/start").length, 1);
+      yield* Deferred.succeed(captureReady, undefined);
+      const nextStart = yield* nextRequest("turn/start");
+      NodeAssert.deepStrictEqual(
+        nextStart.params,
+        yield* buildTurnStartParams({
+          threadId: wireFixture.rootThreadId,
+          runtimeMode: "full-access",
+          prompt: "next turn",
+          model: "gpt-5.3-codex",
+          effort: "high",
+          serviceTier: "fast",
+          interactionMode: "plan",
+        }),
+      );
+      yield* respond(nextStart, { turn: { id: "next-turn", status: "inProgress", items: [] } });
+      NodeAssert.equal((yield* Fiber.join(next)).turnId, "next-turn");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "applies steering defaults before a delayed response and ignores its stale session update",
+    () =>
+      Effect.gen(function* () {
+        const { runtime, respond, nextRequest, complete } = yield* makeAdmissionRuntime();
+        const first = yield* runtime
+          .sendTurn({ input: "first", model: "gpt-5.4" })
+          .pipe(Effect.forkChild);
+        yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+        yield* respond(yield* nextRequest("turn/start"), {
+          turn: { id: "old-turn", status: "inProgress", items: [] },
+        });
+        yield* Fiber.join(first);
+        const terminal = yield* Deferred.make<void>();
+        const steer = yield* runtime
+          .sendTurn(
+            { input: "follow-up", model: "gpt-5.3-codex", effort: "high" },
+            {
+              beforeSubmit: () => Effect.void,
+              notSubmitted: Effect.void,
+              nativeStopped: Effect.void,
+              nativeCompleted: () => Deferred.succeed(terminal, undefined).pipe(Effect.asVoid),
+            },
+          )
+          .pipe(Effect.forkChild);
+        yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+        const delayedResponse = yield* nextRequest("turn/steer");
+        yield* complete("old-turn");
+        yield* Deferred.await(terminal);
+        const next = yield* runtime.sendTurn({ input: "next turn" }).pipe(Effect.forkChild);
+        yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+        const nextStart = yield* nextRequest("turn/start");
+        const nextParams = yield* decodeTurnStartParams(nextStart.params);
+        NodeAssert.equal(nextParams.model, "gpt-5.3-codex");
+        NodeAssert.equal(nextParams.effort, "high");
+        yield* respond(nextStart, { turn: { id: "new-turn", status: "inProgress", items: [] } });
+        yield* Fiber.join(next);
+        const newer = yield* runtime
+          .sendTurn({ input: "newer selection", model: "gpt-5.4", effort: "low" })
+          .pipe(Effect.forkChild);
+        yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+        yield* respond(yield* nextRequest("turn/steer"), { turnId: "new-turn" });
+        yield* Fiber.join(newer);
+        yield* respond(delayedResponse, { turnId: "old-turn" });
+        yield* Fiber.join(steer);
+        const session = yield* runtime.getSession;
+        NodeAssert.equal(session.activeTurnId, "new-turn");
+        NodeAssert.equal(session.model, "gpt-5.4");
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  for (const rejection of [
+    "no active turn to steer",
+    "expected active turn id `old-turn` but found `other-turn`",
+  ]) {
+    it.effect(`requires fresh new-turn admission after steering rejects: ${rejection}`, () =>
+      Effect.gen(function* () {
+        const { runtime, observed, respond, reject, nextRequest, complete } =
+          yield* makeAdmissionRuntime();
+        const first = yield* runtime.sendTurn({ input: "first" }).pipe(Effect.forkChild);
+        yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+        yield* respond(yield* nextRequest("turn/start"), {
+          turn: { id: "old-turn", status: "inProgress", items: [] },
+        });
+        yield* Fiber.join(first);
+        const captureReady = yield* Deferred.make<void>();
+        const parked = yield* Deferred.make<void>();
+        const terminal = yield* Deferred.make<void>();
+        const calls: Array<string | undefined> = [];
+        const send = yield* runtime
+          .sendTurn(
+            { input: "follow-up" },
+            {
+              beforeSubmit: (turnId) =>
+                Effect.gen(function* () {
+                  calls.push(turnId);
+                  if (turnId === undefined) {
+                    yield* Deferred.succeed(parked, undefined);
+                    yield* Deferred.await(captureReady);
+                  }
+                }),
+              notSubmitted: Effect.sync(() => {
+                calls.push("not-submitted");
+              }),
+              nativeStopped: Effect.void,
+              nativeCompleted: () => Deferred.succeed(terminal, undefined).pipe(Effect.asVoid),
+            },
+          )
+          .pipe(Effect.forkChild);
+        yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+        const steer = yield* nextRequest("turn/steer");
+        yield* complete("old-turn");
+        yield* Deferred.await(terminal);
+        yield* reject(steer, -32600, rejection);
+        yield* Deferred.await(parked);
+        NodeAssert.deepStrictEqual(calls, ["old-turn", "not-submitted", undefined]);
+        NodeAssert.equal(observed.filter((method) => method === "turn/start").length, 1);
+        yield* Deferred.succeed(captureReady, undefined);
+        yield* respond(yield* nextRequest("turn/start"), {
+          turn: { id: "new-turn", status: "inProgress", items: [] },
+        });
+        NodeAssert.equal((yield* Fiber.join(send)).turnId, "new-turn");
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
+  it.effect("confirms native stop for the original turn and an uncertain steering claim", () =>
+    Effect.gen(function* () {
+      const { runtime, respond, nextRequest, nativeExit } = yield* makeAdmissionRuntime();
+      const stopped: Array<string> = [];
+      const first = yield* runtime
+        .sendTurn(
+          { input: "first" },
+          {
+            beforeSubmit: () => Effect.void,
+            notSubmitted: Effect.void,
+            nativeStopped: Effect.sync(() => {
+              stopped.push("first");
+            }),
+            nativeCompleted: () => Effect.void,
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+      yield* respond(yield* nextRequest("turn/start"), {
+        turn: { id: "active-turn", status: "inProgress", items: [] },
+      });
+      yield* Fiber.join(first);
+      const steer = yield* runtime
+        .sendTurn(
+          { input: "follow-up" },
+          {
+            beforeSubmit: () => Effect.void,
+            notSubmitted: Effect.die("steering outcome is unknown"),
+            nativeStopped: Effect.sync(() => {
+              stopped.push("steer");
+            }),
+            nativeCompleted: () => Effect.void,
+          },
+        )
+        .pipe(Effect.result, Effect.forkChild);
+      yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+      yield* respond(yield* nextRequest("turn/steer"), {});
+      NodeAssert.equal((yield* Fiber.join(steer))._tag, "Failure");
+      yield* nativeExit;
+      yield* runtime.close;
+      NodeAssert.deepStrictEqual(stopped, ["first", "steer"]);
+      const events = yield* Stream.runCollect(runtime.events);
+      NodeAssert.deepStrictEqual(
+        events.filter((event) => event.method === "turn/aborted").map((event) => event.turnId),
+        ["active-turn"],
+      );
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  for (const outcome of ["bad-response", "request-error"] as const) {
+    it.effect(`does not start a duplicate turn after an uncertain steer ${outcome}`, () =>
+      Effect.gen(function* () {
+        const { runtime, observed, respond, reject, nextRequest, complete } =
+          yield* makeAdmissionRuntime();
+        const first = yield* runtime.sendTurn({ input: "first" }).pipe(Effect.forkChild);
+        yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+        yield* respond(yield* nextRequest("turn/start"), {
+          turn: { id: "active-turn", status: "inProgress", items: [] },
+        });
+        yield* Fiber.join(first);
+        const terminal = yield* Deferred.make<void>();
+        const send = yield* runtime
+          .sendTurn(
+            { input: "follow-up" },
+            {
+              beforeSubmit: (turnId) =>
+                Effect.sync(() => {
+                  NodeAssert.equal(turnId, "active-turn");
+                }),
+              notSubmitted: Effect.die("uncertain steering cannot release admission"),
+              nativeStopped: Effect.void,
+              nativeCompleted: (turnId) =>
+                Effect.gen(function* () {
+                  NodeAssert.equal(turnId, "active-turn");
+                  yield* Deferred.succeed(terminal, undefined);
+                }),
+            },
+          )
+          .pipe(Effect.result, Effect.forkChild);
+        yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+        const steer = yield* nextRequest("turn/steer");
+        if (outcome === "bad-response") {
+          yield* respond(steer, { turnId: "wrong-turn" });
+        } else {
+          yield* reject(steer, -32603, "could not read native result");
+        }
+        NodeAssert.equal((yield* Fiber.join(send))._tag, "Failure");
+        NodeAssert.equal(observed.filter((method) => method === "turn/start").length, 1);
+        yield* complete("active-turn");
+        yield* Deferred.await(terminal);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
   it.effect("waits after MCP reload when the old turn completes during preparation", () =>
     Effect.gen(function* () {
       const { runtime, observed, respond, nextRequest, complete } = yield* makeAdmissionRuntime();

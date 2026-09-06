@@ -43,6 +43,7 @@ import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
 import type { ProviderTurnStartOptions } from "../Services/ProviderAdapter.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
+const decodeV2TurnSteerResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnSteerResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -193,10 +194,11 @@ export interface CodexThreadSnapshot {
 }
 
 interface CodexNativeSubmission {
-  readonly options: ProviderTurnStartOptions;
+  readonly claims: Set<ProviderTurnStartOptions>;
   turnId: TurnId | undefined;
   terminalQueued: boolean;
   stopped: boolean;
+  readonly nativeTerminals: Set<TurnId>;
   readonly earlyTerminals: Set<TurnId>;
 }
 
@@ -1184,6 +1186,11 @@ export const makeCodexSessionRuntime = (
     const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
     const closedRef = yield* Ref.make(false);
     let nativeSubmission: CodexNativeSubmission | undefined;
+    let pendingTurnSettings: Pick<
+      CodexTurnStartParamsWithCollaborationMode,
+      "model" | "effort" | "serviceTier" | "collaborationMode"
+    > = {};
+    let settingsRevision = 0;
     let nativeExited = false;
 
     // `~` is not shell-expanded when env vars are set via
@@ -1928,7 +1935,17 @@ export const makeCodexSessionRuntime = (
             }
             if (providerThreadId === payload.threadId && payload.turn.status !== "inProgress") {
               const turnId = TurnId.make(payload.turn.id);
-              yield* nativeSubmission?.options.nativeCompleted(turnId) ?? Effect.void;
+              const submission = nativeSubmission;
+              if (submission) {
+                if (submission.nativeTerminals.size === 32) {
+                  const oldest = submission.nativeTerminals.values().next().value;
+                  if (oldest !== undefined) submission.nativeTerminals.delete(oldest);
+                }
+                submission.nativeTerminals.add(turnId);
+                for (const claim of submission.claims) {
+                  yield* claim.nativeCompleted(turnId);
+                }
+              }
             }
             const lastError =
               payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
@@ -2270,7 +2287,9 @@ export const makeCodexSessionRuntime = (
       const submission = nativeSubmission;
       if (submission && !submission.stopped) {
         submission.stopped = true;
-        yield* submission.options.nativeStopped;
+        for (const claim of submission.claims) {
+          yield* claim.nativeStopped;
+        }
         yield* emitStoppedTurn(submission);
       }
     }, Effect.ignore);
@@ -2388,67 +2407,197 @@ export const makeCodexSessionRuntime = (
               ),
             );
           }
-          const normalizedModel = normalizeCodexModelSlug(
-            input.model ?? (yield* Ref.get(sessionRef)).model,
-          );
-          const params = yield* buildTurnStartParams({
-            threadId: providerThreadId,
-            runtimeMode: options.runtimeMode,
-            ...(input.input ? { prompt: input.input } : {}),
-            ...(input.attachments ? { attachments: input.attachments } : {}),
-            ...(normalizedModel ? { model: normalizedModel } : {}),
-            ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
-            ...(input.effort ? { effort: input.effort } : {}),
-            ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
-            // Derived from the session's own MCP configuration rather than the
-            // setting, so the prompt describes the tools this turn actually
-            // has even if the setting changed after the session started.
-            browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
+          const prepareParams = Effect.gen(function* () {
+            const normalizedModel = normalizeCodexModelSlug(
+              input.model ?? pendingTurnSettings.model ?? (yield* Ref.get(sessionRef)).model,
+            );
+            const requestedParams = yield* buildTurnStartParams({
+              threadId: providerThreadId,
+              runtimeMode: options.runtimeMode,
+              ...(input.input ? { prompt: input.input } : {}),
+              ...(input.attachments ? { attachments: input.attachments } : {}),
+              ...(normalizedModel ? { model: normalizedModel } : {}),
+              ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+              ...(input.effort ? { effort: input.effort } : {}),
+              ...(input.interactionMode ? { interactionMode: input.interactionMode } : {}),
+              // Derived from the session's own MCP configuration rather than the
+              // setting, so the prompt describes the tools this turn actually
+              // has even if the setting changed after the session started.
+              browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
+            });
+            const collaborationMode =
+              requestedParams.collaborationMode ??
+              (pendingTurnSettings.collaborationMode
+                ? {
+                    ...pendingTurnSettings.collaborationMode,
+                    settings: {
+                      ...pendingTurnSettings.collaborationMode.settings,
+                      ...(requestedParams.model ? { model: requestedParams.model } : {}),
+                      ...(requestedParams.effort
+                        ? { reasoning_effort: requestedParams.effort }
+                        : {}),
+                    },
+                  }
+                : undefined);
+            return {
+              ...pendingTurnSettings,
+              ...requestedParams,
+              ...(collaborationMode ? { collaborationMode } : {}),
+            };
+          }).pipe(Effect.onError(() => turnOptions?.notSubmitted ?? Effect.void));
+          if ((yield* Ref.get(closedRef)) || nativeExited) {
+            return yield* Effect.interrupt;
+          }
+          const admit = Effect.fnUntraced(function* (turnId?: TurnId) {
+            yield* Effect.interruptible(turnOptions?.beforeSubmit(turnId) ?? Effect.void);
+            if ((yield* Ref.get(closedRef)) || nativeExited) {
+              yield* turnOptions?.notSubmitted ?? Effect.void;
+              return yield* Effect.interrupt;
+            }
           });
-          if ((yield* Ref.get(closedRef)) || nativeExited) {
-            return yield* Effect.interrupt;
-          }
-          yield* Effect.interruptible(turnOptions?.beforeSubmit() ?? Effect.void);
-          if ((yield* Ref.get(closedRef)) || nativeExited) {
-            yield* turnOptions?.notSubmitted ?? Effect.void;
-            return yield* Effect.interrupt;
-          }
-          // Admission serializes turn/start calls. Keep this request's callbacks
-          // until the next admitted turn, even if its response cannot be read.
-          const submission: CodexNativeSubmission | undefined = turnOptions
-            ? {
-                options: turnOptions,
-                turnId: undefined,
-                terminalQueued: false,
-                stopped: false,
-                earlyTerminals: new Set(),
+          const newSubmission = (turnId?: TurnId): CodexNativeSubmission => ({
+            claims: new Set(turnOptions ? [turnOptions] : []),
+            turnId,
+            terminalQueued: false,
+            stopped: false,
+            nativeTerminals: new Set(),
+            earlyTerminals: new Set(),
+          });
+          const activeTurnId = (yield* Ref.get(sessionRef)).activeTurnId;
+          // turn/start can start new work if the observed turn ends. Only
+          // turn/steer guarantees that this input belongs to the expected turn.
+          const expectedTurnId =
+            activeTurnId !== undefined &&
+            (nativeSubmission === undefined || nativeSubmission.turnId === activeTurnId)
+              ? activeTurnId
+              : undefined;
+          let turnId: TurnId | undefined;
+          let submittedSettingsRevision = 0;
+          let submittedModel: string | undefined;
+          let submitted: CodexNativeSubmission | undefined;
+          if (expectedTurnId !== undefined) {
+            yield* admit(expectedTurnId);
+            const submission =
+              nativeSubmission?.turnId === expectedTurnId
+                ? nativeSubmission
+                : newSubmission(expectedTurnId);
+            nativeSubmission = submission;
+            submitted = submission;
+            if (turnOptions) {
+              submission.claims.add(turnOptions);
+              if (submission.nativeTerminals.has(expectedTurnId)) {
+                yield* turnOptions.nativeCompleted(expectedTurnId);
               }
-            : undefined;
-          nativeSubmission = submission;
-          const rawResponse = yield* client.raw.request("turn/start", params);
-          const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
-            Effect.mapError((error) =>
-              CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
-                "decode-response-payload",
-                error,
-                { method: "turn/start" },
+            }
+            if ((yield* Ref.get(closedRef)) || nativeExited) {
+              yield* turnOptions?.notSubmitted ?? Effect.void;
+              if (turnOptions) submission.claims.delete(turnOptions);
+              return yield* Effect.interrupt;
+            }
+            const params = yield* prepareParams;
+            // Active inference keeps its original settings. Retain defaults in
+            // dispatch order, since the response can arrive after turn capture.
+            // Direct native clients see them only after the next turn/start.
+            pendingTurnSettings = {
+              ...(params.model ? { model: params.model } : {}),
+              ...(params.effort ? { effort: params.effort } : {}),
+              ...(params.serviceTier ? { serviceTier: params.serviceTier } : {}),
+              ...(params.collaborationMode ? { collaborationMode: params.collaborationMode } : {}),
+            };
+            submittedSettingsRevision = ++settingsRevision;
+            submittedModel = params.model ?? undefined;
+            if ((yield* Ref.get(closedRef)) || nativeExited) {
+              yield* turnOptions?.notSubmitted ?? Effect.void;
+              if (turnOptions) submission.claims.delete(turnOptions);
+              return yield* Effect.interrupt;
+            }
+            const rawResponse = yield* client.raw
+              .request("turn/steer", {
+                threadId: providerThreadId,
+                expectedTurnId,
+                input: params.input,
+              })
+              .pipe(
+                Effect.map((response) => ({ response })),
+                Effect.catchTag("CodexAppServerRequestError", (error) => {
+                  const rejected =
+                    error.code === -32600 &&
+                    (error.errorMessage === "no active turn to steer" ||
+                      error.errorMessage.startsWith(
+                        `expected active turn id \`${expectedTurnId}\` but found \``,
+                      ) ||
+                      error.errorMessage === "cannot steer a review turn" ||
+                      error.errorMessage === "cannot steer a compact turn");
+                  if (!rejected) return Effect.fail(error);
+                  return Effect.gen(function* () {
+                    yield* turnOptions?.notSubmitted ?? Effect.void;
+                    if (turnOptions) submission.claims.delete(turnOptions);
+                    return undefined;
+                  });
+                }),
+              );
+            if (rawResponse !== undefined) {
+              const response = yield* decodeV2TurnSteerResponse(rawResponse.response).pipe(
+                Effect.mapError((error) =>
+                  CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+                    "decode-response-payload",
+                    error,
+                    { method: "turn/steer" },
+                  ),
+                ),
+              );
+              if (response.turnId !== expectedTurnId) {
+                return yield* new CodexErrors.CodexAppServerProtocolParseError({
+                  operation: "decode-response-payload",
+                  method: "turn/steer",
+                  cause: new Error("Codex steering returned a different turn id."),
+                });
+              }
+              turnId = expectedTurnId;
+            }
+          }
+          if (turnId === undefined) {
+            yield* admit();
+            const params = yield* prepareParams;
+            // Keep callbacks even when the response cannot be read.
+            const submission = newSubmission();
+            nativeSubmission = submission;
+            submitted = submission;
+            submittedSettingsRevision = ++settingsRevision;
+            submittedModel = params.model ?? undefined;
+            pendingTurnSettings = {};
+            if ((yield* Ref.get(closedRef)) || nativeExited) {
+              yield* turnOptions?.notSubmitted ?? Effect.void;
+              return yield* Effect.interrupt;
+            }
+            const rawResponse = yield* client.raw.request("turn/start", params);
+            const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
+              Effect.mapError((error) =>
+                CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
+                  "decode-response-payload",
+                  error,
+                  { method: "turn/start" },
+                ),
               ),
-            ),
-          );
-          const turnId = TurnId.make(response.turn.id);
-          if (submission) {
+            );
+            turnId = TurnId.make(response.turn.id);
             submission.turnId = turnId;
             submission.terminalQueued = submission.earlyTerminals.has(turnId);
             submission.earlyTerminals.clear();
             yield* emitStoppedTurn(submission);
           }
           yield* updateSession(sessionRef, (session) => ({
-            status: "running",
-            // Codex accepts follow-ups while the current turn is still
-            // running. The response contains the queued turn id, but
-            // turn/interrupt only accepts the id that is active now.
-            activeTurnId: session.activeTurnId ?? turnId,
-            ...(normalizedModel ? { model: normalizedModel } : {}),
+            ...(nativeSubmission === submitted
+              ? {
+                  status: submitted?.nativeTerminals.has(turnId) ? session.status : "running",
+                  activeTurnId: submitted?.nativeTerminals.has(turnId)
+                    ? session.activeTurnId
+                    : (session.activeTurnId ?? turnId),
+                }
+              : {}),
+            ...(submittedSettingsRevision === settingsRevision && submittedModel
+              ? { model: submittedModel }
+              : {}),
           }));
           const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
           return {

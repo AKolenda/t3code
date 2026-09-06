@@ -2523,11 +2523,11 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
           turnOptions
             ? {
                 ...turnOptions,
-                beforeSubmit: Effect.fnUntraced(function* () {
+                beforeSubmit: Effect.fnUntraced(function* (turnId) {
                   if (session.stopped || sessions.get(input.threadId) !== session) {
                     return yield* Effect.interrupt;
                   }
-                  yield* turnOptions.beforeSubmit();
+                  yield* turnOptions.beforeSubmit(turnId);
                   if (session.stopped || sessions.get(input.threadId) !== session) {
                     yield* turnOptions.notSubmitted;
                     return yield* Effect.interrupt;
