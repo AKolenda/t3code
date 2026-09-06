@@ -60,7 +60,7 @@ import {
   ProviderWorkspaceMissingError,
   type ProviderAdapterError,
 } from "../Errors.ts";
-import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
+import type { ProviderAdapterShape, ProviderTurnStartOptions } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
@@ -172,6 +172,7 @@ function makeFakeCodexAdapter(
   const sendTurn = vi.fn(
     (
       input: ProviderSendTurnInput,
+      _hooks?: ProviderTurnStartOptions,
     ): Effect.Effect<ProviderTurnStartResult, ProviderAdapterError> => {
       if (!sessions.has(input.threadId)) {
         return Effect.fail(
@@ -998,6 +999,57 @@ it.effect("ProviderServiceLive rejects new sessions for disabled custom instance
 );
 
 const routing = makeProviderServiceLayer();
+
+const admissionOrdering = makeProviderServiceLayer();
+admissionOrdering.layer("ProviderServiceLive native turn admission", (it) => {
+  it.effect("waits when the previous terminal arrives during send preparation", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const captures = yield* TurnCheckpointCapture.TurnCheckpointCapture;
+      const threadId = asThreadId("terminal-during-preparation");
+      const prepared = yield* Deferred.make<void>();
+      const finishPreparation = yield* Deferred.make<void>();
+      const atSubmission = yield* Deferred.make<void>();
+      let nativeSubmitted = false;
+      admissionOrdering.codex.sendTurn.mockImplementationOnce((input, hooks) =>
+        Effect.gen(function* () {
+          yield* Deferred.succeed(prepared, undefined);
+          yield* Deferred.await(finishPreparation);
+          yield* Deferred.succeed(atSubmission, undefined);
+          yield* hooks?.beforeSubmit() ?? Effect.void;
+          nativeSubmitted = true;
+          return { threadId: input.threadId, turnId: asTurnId("next-native-turn") };
+        }),
+      );
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+      });
+      const send = yield* provider.sendTurn({ threadId, input: "next message" }).pipe(Effect.forkChild);
+      yield* Deferred.await(prepared);
+      const terminal = {
+        type: "turn.completed",
+        eventId: asEventId("old-terminal-during-preparation"),
+        threadId,
+        turnId: asTurnId("old-native-turn"),
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        payload: { state: "completed" },
+      } satisfies Extract<ProviderRuntimeEvent, { type: "turn.completed" }>;
+      yield* captures.observe(terminal);
+      yield* Deferred.succeed(finishPreparation, undefined);
+      yield* Deferred.await(atSubmission);
+      yield* Effect.yieldNow;
+      assert.equal(nativeSubmitted, false);
+      yield* captures.complete(terminal, "captured");
+      yield* Fiber.join(send);
+      assert.equal(nativeSubmitted, true);
+    }).pipe(Effect.scoped),
+  );
+});
 
 const antigravityDriver = ProviderDriverKind.make("antigravity");
 const replacementAntigravity = makeFakeCodexAdapter(antigravityDriver);

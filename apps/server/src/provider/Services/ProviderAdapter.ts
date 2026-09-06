@@ -49,6 +49,13 @@ export interface ProviderThreadSnapshot {
   readonly turns: ReadonlyArray<ProviderThreadTurnSnapshot>;
 }
 
+export interface ProviderTurnStartOptions {
+  /** Call after preparation, directly before native prompt submission. */
+  readonly beforeSubmit: (turnId?: TurnId) => Effect.Effect<void>;
+  /** Only a native terminal response can confirm that submitted work has finished. */
+  readonly nativeCompleted: (turnId: TurnId) => Effect.Effect<void>;
+}
+
 export interface ProviderAdapterShape<TError> {
   /**
    * Provider kind implemented by this adapter.
@@ -78,6 +85,7 @@ export interface ProviderAdapterShape<TError> {
    */
   readonly sendTurn: (
     input: ProviderSendTurnInput,
+    options?: ProviderTurnStartOptions,
   ) => Effect.Effect<ProviderTurnStartResult, TError>;
 
   readonly compactThread?: (
