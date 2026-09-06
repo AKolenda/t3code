@@ -202,6 +202,8 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           command.type === "thread.checkpoint.revert" ||
           command.type === "thread.revert.complete" ||
           command.type === "thread.turn.start" ||
+          command.type === "thread.runtime-mode.set" ||
+          command.type === "thread.history.import" ||
           command.type === "thread.approval.respond" ||
           command.type === "thread.user-input.respond" ||
           command.type === "thread.delete" ||

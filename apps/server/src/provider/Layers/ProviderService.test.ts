@@ -260,6 +260,13 @@ function makeFakeCodexAdapter(
       Effect.succeed({ threadId, turns: [] }),
   );
 
+  const prepareConversationRollback = vi.fn<
+    NonNullable<ProviderAdapterShape<ProviderAdapterError>["conversationRollback"]>["prepare"]
+  >((input) => Effect.succeed({ sourceCursor: input.resumeCursor, numTurns: input.numTurns }));
+  const forkConversation = vi.fn<
+    NonNullable<ProviderAdapterShape<ProviderAdapterError>["conversationRollback"]>["fork"]
+  >(() => Effect.succeed({ opaque: "forked-conversation" }));
+
   const uploadFeedback = vi.fn(
     (
       input: ProviderUploadFeedbackInput,
@@ -291,6 +298,9 @@ function makeFakeCodexAdapter(
     hasSession,
     readThread,
     rollbackThread,
+    ...(supportsConversationRollback === false
+      ? {}
+      : { conversationRollback: { prepare: prepareConversationRollback, fork: forkConversation } }),
     ...(provider === CODEX_DRIVER ? { uploadFeedback } : {}),
     stopAll,
     get streamEvents() {
@@ -328,6 +338,8 @@ function makeFakeCodexAdapter(
     hasSession,
     readThread,
     rollbackThread,
+    prepareConversationRollback,
+    forkConversation,
     uploadFeedback,
     stopAll,
   };
@@ -1084,7 +1096,11 @@ unsupportedRollback.layer("ProviderServiceLive unsupported rewind", (it) => {
           provider.assertConversationRollbackSupported(threadId),
         );
         const rollbackError = yield* Effect.flip(
-          provider.rollbackConversation({ threadId, numTurns: 1 }),
+          provider.prepareConversationRollback({
+            threadId,
+            cwd: fixtureCwd("project"),
+            numTurns: 1,
+          }),
         );
 
         assert.instanceOf(preflightError, ProviderValidationError);
@@ -1094,6 +1110,45 @@ unsupportedRollback.layer("ProviderServiceLive unsupported rewind", (it) => {
         assert.equal(unsupportedRollback.codex.rollbackThread.mock.calls.length, 0);
         assert.deepEqual(yield* directory.getBinding(threadId), originalBinding);
       }
+    }),
+  );
+});
+
+const unsupportedOpenCode = makeFakeCodexAdapter(ProviderDriverKind.make("opencode"), false);
+const openCodeRewind = makeProviderServiceLayer({
+  registry: makeStaticInstanceRegistry([
+    [ProviderInstanceId.make("opencode"), unsupportedOpenCode.adapter],
+  ]),
+});
+openCodeRewind.layer("ProviderServiceLive OpenCode rewind", (it) => {
+  it.effect("explains the missing native boundary without changing the saved conversation", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("opencode-unsupported-rewind");
+      yield* directory.upsert({
+        threadId,
+        provider: ProviderDriverKind.make("opencode"),
+        providerInstanceId: ProviderInstanceId.make("opencode"),
+        runtimeMode: "full-access",
+        status: "stopped",
+        resumeCursor: { schemaVersion: 1, sessionId: "ses_saved" },
+      });
+      const before = yield* directory.getBinding(threadId);
+      const error = yield* provider
+        .prepareConversationRollback({
+          threadId,
+          cwd: fixtureCwd("project"),
+          numTurns: 1,
+        })
+        .pipe(Effect.flip);
+      assert.instanceOf(error, ProviderValidationError);
+      assert.include(error.message, "OpenCode rewind is temporarily unavailable");
+      assert.include(error.message, "exact native conversation boundaries");
+      assert.deepEqual(yield* directory.getBinding(threadId), before);
+      assert.equal(unsupportedOpenCode.startSession.mock.calls.length, 0);
+      assert.equal(unsupportedOpenCode.stopSession.mock.calls.length, 0);
+      assert.equal(unsupportedOpenCode.rollbackThread.mock.calls.length, 0);
     }),
   );
 });
@@ -1420,31 +1475,23 @@ it.effect(
 
       yield* Effect.gen(function* () {
         const provider = yield* ProviderService.ProviderService;
-        yield* provider.rollbackConversation({
+        const plan = yield* provider.prepareConversationRollback({
           threadId: startedSession.threadId,
+          cwd: fixtureCwd("project"),
           numTurns: 1,
         });
-      }).pipe(Effect.provide(secondProviderLayer));
+        const resumeCursor = yield* provider.forkConversation(plan);
+        yield* provider.rollbackConversation({ plan, resumeCursor });
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const binding = Option.getOrThrow(yield* directory.getBinding(startedSession.threadId));
+        assert.deepEqual(binding.resumeCursor, { opaque: "forked-conversation" });
+        assert.equal(binding.status, "stopped");
+        assert.deepEqual(plan.source.resumeCursor, updatedResumeCursor);
+      }).pipe(Effect.provide([secondProviderLayer, secondDirectoryLayer]));
 
-      assert.equal(secondCodex.startSession.mock.calls.length, 1);
-      const resumedStartInput = secondCodex.startSession.mock.calls[0]?.[0];
-      assert.equal(typeof resumedStartInput === "object" && resumedStartInput !== null, true);
-      if (resumedStartInput && typeof resumedStartInput === "object") {
-        const startPayload = resumedStartInput as {
-          provider?: string;
-          cwd?: string;
-          resumeCursor?: unknown;
-          threadId?: string;
-        };
-        assert.equal(startPayload.provider, "codex");
-        assert.equal(startPayload.cwd, fixtureCwd("project"));
-        assert.deepEqual(startPayload.resumeCursor, updatedResumeCursor);
-        assert.equal(startPayload.threadId, startedSession.threadId);
-      }
-      assert.equal(secondCodex.rollbackThread.mock.calls.length, 1);
-      const rollbackCall = secondCodex.rollbackThread.mock.calls[0];
-      assert.equal(typeof rollbackCall?.[0], "string");
-      assert.equal(rollbackCall?.[1], 1);
+      assert.equal(secondCodex.startSession.mock.calls.length, 0);
+      assert.equal(secondCodex.rollbackThread.mock.calls.length, 0);
+      assert.equal(secondCodex.forkConversation.mock.calls.length, 1);
 
       NodeFS.rmSync(tempDir, { recursive: true, force: true });
     }).pipe(Effect.provide(NodeServices.layer)),
@@ -1608,10 +1655,13 @@ routing.layer("ProviderServiceLive routing", (it) => {
         ],
       ]);
 
-      yield* provider.rollbackConversation({
+      const rollbackPlan = yield* provider.prepareConversationRollback({
         threadId: session.threadId,
+        cwd: fixtureCwd("project"),
         numTurns: 0,
       });
+      const resumeCursor = yield* provider.forkConversation(rollbackPlan);
+      yield* provider.rollbackConversation({ plan: rollbackPlan, resumeCursor });
 
       yield* provider.stopSession({ threadId: session.threadId });
       routing.codex.startSession.mockClear();
@@ -2041,7 +2091,46 @@ routing.layer("ProviderServiceLive routing", (it) => {
     }),
   );
 
-  it.effect("recovers stale persisted sessions for rollback by resuming thread identity", () =>
+  it.effect("rejects a saved rewind after another conversation replaces its binding", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const threadId = asThreadId("thread-replaced-rewind");
+      yield* provider.startSession(threadId, {
+        threadId,
+        providerInstanceId: codexInstanceId,
+        cwd: fixtureCwd("project"),
+        runtimeMode: "full-access",
+      });
+      const plan = yield* provider.prepareConversationRollback({
+        threadId,
+        cwd: fixtureCwd("project"),
+        numTurns: 1,
+      });
+      const resumeCursor = yield* provider.forkConversation(plan);
+      yield* provider.stopSession({ threadId });
+      const replacement = { opaque: "another-conversation" };
+      yield* directory.upsert({
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+        status: "stopped",
+        resumeCursor: replacement,
+      });
+      routing.codex.startSession.mockClear();
+      const error = yield* provider.rollbackConversation({ plan, resumeCursor }).pipe(Effect.flip);
+      assert.instanceOf(error, ProviderValidationError);
+      assert.include(error.message, "conversation changed");
+      assert.deepEqual(
+        Option.getOrThrow(yield* directory.getBinding(threadId)).resumeCursor,
+        replacement,
+      );
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("adopts a saved rewind without resuming the source conversation", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
 
@@ -2059,29 +2148,23 @@ routing.layer("ProviderServiceLive routing", (it) => {
       yield* provider.assertConversationRollbackSupported(initial.threadId);
       assert.equal(routing.codex.startSession.mock.calls.length, 0);
 
-      yield* provider.rollbackConversation({
+      const rollbackPlan = yield* provider.prepareConversationRollback({
         threadId: initial.threadId,
+        cwd: fixtureCwd("project"),
         numTurns: 1,
       });
+      const resumeCursor = yield* provider.forkConversation(rollbackPlan);
+      yield* provider.rollbackConversation({ plan: rollbackPlan, resumeCursor });
 
-      assert.equal(routing.codex.startSession.mock.calls.length, 1);
-      const resumedStartInput = routing.codex.startSession.mock.calls[0]?.[0];
-      assert.equal(typeof resumedStartInput === "object" && resumedStartInput !== null, true);
-      if (resumedStartInput && typeof resumedStartInput === "object") {
-        const startPayload = resumedStartInput as {
-          provider?: string;
-          cwd?: string;
-          resumeCursor?: unknown;
-          threadId?: string;
-        };
-        assert.equal(startPayload.provider, "codex");
-        assert.equal(startPayload.cwd, fixtureCwd("project"));
-        assert.deepEqual(startPayload.resumeCursor, initial.resumeCursor);
-        assert.equal(startPayload.threadId, initial.threadId);
-      }
-      assert.equal(routing.codex.rollbackThread.mock.calls.length, 1);
-      const rollbackCall = routing.codex.rollbackThread.mock.calls[0];
-      assert.equal(rollbackCall?.[1], 1);
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
+      assert.equal(routing.codex.rollbackThread.mock.calls.length, 0);
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      assert.deepEqual(
+        Option.getOrThrow(yield* directory.getBinding(initial.threadId)).resumeCursor,
+        { opaque: "forked-conversation" },
+      );
+      yield* provider.rollbackConversation({ plan: rollbackPlan, resumeCursor });
+      assert.equal(routing.codex.startSession.mock.calls.length, 0);
     }),
   );
 
@@ -2547,7 +2630,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
           cwd: fixtureCwd("project-claude-start"),
           runtimeMode: "full-access",
         });
-      }).pipe(Effect.provide(secondProviderLayer));
+      }).pipe(Effect.provide([secondProviderLayer, secondDirectoryLayer]));
 
       assert.equal(secondClaude.startSession.mock.calls.length, 1);
       const resumedStartInput = secondClaude.startSession.mock.calls[0]?.[0];
@@ -2651,7 +2734,7 @@ routing.layer("ProviderServiceLive routing", (it) => {
             threadId: initial.threadId,
             runtimeMode: "full-access",
           });
-        }).pipe(Effect.provide(secondProviderLayer));
+        }).pipe(Effect.provide([secondProviderLayer, secondDirectoryLayer]));
 
         assert.equal(secondClaude.startSession.mock.calls.length, 1);
         const resumedStartInput = secondClaude.startSession.mock.calls[0]?.[0];
@@ -2875,10 +2958,13 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
           sandbox_mode: "workspace-write",
         },
       });
-      yield* provider.rollbackConversation({
+      const rollbackPlan = yield* provider.prepareConversationRollback({
         threadId: session.threadId,
+        cwd: fixtureCwd("project"),
         numTurns: 1,
       });
+      const resumeCursor = yield* provider.forkConversation(rollbackPlan);
+      yield* provider.rollbackConversation({ plan: rollbackPlan, resumeCursor });
       yield* provider.stopSession({ threadId: session.threadId });
 
       const snapshots = yield* Metric.snapshot;

@@ -1290,6 +1290,7 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
       });
 
       yield* harness.waitForDomainEvent((event) => event.type === "thread.reverted");
+      yield* harness.drainCheckpointReactor;
       const revertedThread = yield* harness.waitForThread(
         THREAD_ID,
         (entry) =>
@@ -1327,7 +1328,7 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
         gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 2)),
         false,
       );
-      assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), [1]);
+      assert.deepEqual(harness.adapterHarness!.getConversationForkCalls(THREAD_ID), [1]);
 
       const checkpointRows = yield* harness.checkpointRepository.listByThreadId({
         threadId: THREAD_ID,
@@ -1337,41 +1338,43 @@ it.live("reverts to an earlier checkpoint and trims checkpoint projections + git
   ),
 );
 
-it.live(
-  "appends checkpoint.revert.failed activity when revert is requested without an active session",
-  () =>
-    withHarness((harness) =>
-      Effect.gen(function* () {
-        yield* seedProjectAndThread(harness);
+it.live("appends checkpoint.revert.failed activity when revert has no provider binding", () =>
+  withHarness((harness) =>
+    Effect.gen(function* () {
+      yield* seedProjectAndThread(harness);
+      yield* harness.checkpointStore.captureCheckpoint({
+        cwd: harness.workspaceDir,
+        checkpointRef: checkpointRefForThreadTurn(THREAD_ID, 0),
+      });
 
-        yield* harness.engine.dispatch({
-          type: "thread.checkpoint.revert",
-          commandId: CommandId.make("cmd-checkpoint-revert-no-session"),
-          threadId: THREAD_ID,
-          turnCount: 0,
-          createdAt: nowIso(),
-        });
+      yield* harness.engine.dispatch({
+        type: "thread.checkpoint.revert",
+        commandId: CommandId.make("cmd-checkpoint-revert-no-session"),
+        threadId: THREAD_ID,
+        turnCount: 0,
+        createdAt: nowIso(),
+      });
 
-        const thread = yield* harness.waitForThread(THREAD_ID, (entry) =>
-          entry.activities.some(
-            (activity) =>
-              activity.kind === "checkpoint.revert.failed" &&
-              typeof activity.payload === "object" &&
-              activity.payload !== null,
-          ),
-        );
-        const failureActivity = thread.activities.find(
-          (activity) => activity.kind === "checkpoint.revert.failed",
-        );
-        assert.equal(failureActivity !== undefined, true);
-        assert.equal(
-          String(
-            (failureActivity?.payload as { readonly detail?: string } | undefined)?.detail,
-          ).includes("No active provider session"),
-          true,
-        );
-      }),
-    ),
+      const thread = yield* harness.waitForThread(THREAD_ID, (entry) =>
+        entry.activities.some(
+          (activity) =>
+            activity.kind === "checkpoint.revert.failed" &&
+            typeof activity.payload === "object" &&
+            activity.payload !== null,
+        ),
+      );
+      const failureActivity = thread.activities.find(
+        (activity) => activity.kind === "checkpoint.revert.failed",
+      );
+      assert.equal(failureActivity !== undefined, true);
+      assert.equal(
+        String(
+          (failureActivity?.payload as { readonly detail?: string } | undefined)?.detail,
+        ).includes("no persisted provider binding"),
+        true,
+      );
+    }),
+  ),
 );
 
 it.live("starts a claudeAgent session on first turn when provider is requested", () =>
@@ -1884,7 +1887,7 @@ it.live("reverts claudeAgent turns and rolls back provider conversation state", 
           gitRefExists(harness.workspaceDir, checkpointRefForThreadTurn(THREAD_ID, 2)),
           false,
         );
-        assert.deepEqual(harness.adapterHarness!.getRollbackCalls(THREAD_ID), [1]);
+        assert.deepEqual(harness.adapterHarness!.getConversationForkCalls(THREAD_ID), [1]);
       }),
     CLAUDE_AGENT_PROVIDER,
   ),

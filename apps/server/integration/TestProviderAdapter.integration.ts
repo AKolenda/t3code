@@ -12,6 +12,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import {
@@ -189,7 +190,7 @@ export interface TestProviderAdapterHarness {
   ) => Effect.Effect<void, never>;
   readonly getStartCount: () => number;
   readonly emitRuntimeEvent: (event: ProviderRuntimeEvent) => Effect.Effect<void>;
-  readonly getRollbackCalls: (threadId: ThreadId) => ReadonlyArray<number>;
+  readonly getConversationForkCalls: (threadId: ThreadId) => ReadonlyArray<number>;
   readonly getInterruptCalls: (threadId: ThreadId) => ReadonlyArray<TurnId | undefined>;
   readonly listActiveSessionIds: () => ReadonlyArray<ThreadId>;
   readonly getApprovalResponses: (threadId: ThreadId) => ReadonlyArray<{
@@ -232,6 +233,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
     let sessionCount = 0;
     let eventCount = 0;
     const sessions = new Map<ThreadId, SessionState>();
+    const forkCalls = new Map<ThreadId, number[]>();
     const queuedResponsesForNextSession: TestTurnResponse[] = [];
     const interruptCallsBySession = new Map<ThreadId, Array<TurnId | undefined>>();
     const approvalResponsesBySession = new Map<
@@ -480,6 +482,36 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       });
     };
 
+    const rollbackTarget = Schema.Struct({
+      threadId: ThreadId,
+      numTurns: Schema.Int,
+      retainedTurnIds: Schema.Array(TurnId),
+    });
+    const conversationRollback = {
+      prepare: Effect.fn("TestProviderAdapter.prepareRollback")(function* (input) {
+        const state = sessions.get(input.threadId);
+        if (!state) return yield* missingSessionEffect(provider, input.threadId);
+        return {
+          threadId: input.threadId,
+          numTurns: input.numTurns,
+          retainedTurnIds: state.snapshot.turns
+            .slice(0, state.snapshot.turns.length - input.numTurns)
+            .map((turn) => turn.id),
+        };
+      }),
+      fork: Effect.fn("TestProviderAdapter.forkConversation")(function* (rawTarget) {
+        const target = yield* Schema.decodeUnknownEffect(rollbackTarget)(rawTarget).pipe(
+          Effect.orDie,
+        );
+        const calls = forkCalls.get(target.threadId) ?? [];
+        forkCalls.set(target.threadId, [...calls, target.numTurns]);
+        return {
+          forkId: `${target.threadId}:fork:${calls.length}`,
+          retainedTurnIds: target.retainedTurnIds,
+        };
+      }),
+    } satisfies NonNullable<ProviderAdapterShape<ProviderAdapterError>["conversationRollback"]>;
+
     const stopAll: ProviderAdapterShape<ProviderAdapterError>["stopAll"] = () =>
       Effect.sync(() => {
         sessions.clear();
@@ -500,6 +532,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       hasSession,
       readThread,
       rollbackThread,
+      conversationRollback,
       stopAll,
       streamEvents: Stream.fromQueue(runtimeEvents),
     };
@@ -525,13 +558,8 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
         queuedResponsesForNextSession.push(response);
       });
 
-    const getRollbackCalls = (threadId: ThreadId): ReadonlyArray<number> => {
-      const state = sessions.get(threadId);
-      if (!state) {
-        return [];
-      }
-      return [...state.rollbackCalls];
-    };
+    const getConversationForkCalls = (threadId: ThreadId): ReadonlyArray<number> =>
+      forkCalls.get(threadId) ?? [];
 
     const getStartCount = (): number => sessionCount;
 
@@ -567,7 +595,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       queueTurnResponseForNextSession,
       getStartCount,
       emitRuntimeEvent: (event) => emit(event).pipe(Effect.asVoid),
-      getRollbackCalls,
+      getConversationForkCalls,
       getInterruptCalls,
       listActiveSessionIds,
       getApprovalResponses,

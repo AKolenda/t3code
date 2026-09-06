@@ -320,12 +320,15 @@ it.live("rolls back provider conversation state only", () =>
         },
       });
 
-      yield* provider.rollbackConversation({
+      const plan = yield* provider.prepareConversationRollback({
         threadId: session.threadId,
+        cwd: fixture.cwd,
         numTurns: 1,
       });
+      const resumeCursor = yield* provider.forkConversation(plan);
+      yield* provider.rollbackConversation({ plan, resumeCursor });
 
-      const rollbackCalls = fixture.harness.getRollbackCalls(session.threadId);
+      const rollbackCalls = fixture.harness.getConversationForkCalls(session.threadId);
       assert.deepEqual(rollbackCalls, [1]);
 
       const readme = yield* readFileString(join(fixture.cwd, "README.md"));

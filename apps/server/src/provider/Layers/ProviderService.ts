@@ -1913,7 +1913,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       if (routed.adapter.conversationRollback === undefined) {
         return yield* toValidationError(
           "ProviderService.assertConversationRollbackSupported",
-          `Provider '${routed.adapter.provider}' does not support conversation rewind.`,
+          routed.adapter.provider === "opencode"
+            ? "OpenCode rewind is temporarily unavailable because saved checkpoints do not identify exact native conversation boundaries."
+            : `Provider '${routed.adapter.provider}' does not support conversation rewind.`,
         );
       }
     });
@@ -1933,7 +1935,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       if (routed.adapter.conversationRollback === undefined) {
         return yield* toValidationError(
           "ProviderService.prepareConversationRollback",
-          `Provider '${routed.adapter.provider}' does not support conversation rewind.`,
+          routed.adapter.provider === "opencode"
+            ? "OpenCode rewind is temporarily unavailable because saved checkpoints do not identify exact native conversation boundaries."
+            : `Provider '${routed.adapter.provider}' does not support conversation rewind.`,
         );
       }
       const binding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));

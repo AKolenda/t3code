@@ -7,6 +7,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
+import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import type * as CodexClient from "effect-codex-app-server/client";
@@ -67,6 +68,19 @@ const invalid = (issue: string) =>
 const requestError = (method: string) => (cause: { readonly message: string }) =>
   new ProviderAdapterRequestError({ provider: PROVIDER, method, detail: cause.message, cause });
 
+// 0.153.0 includes native before-turn forks and durable goal deferral.
+// Older app servers can ignore unknown fields before we validate the result.
+const requireSafeForkVersion = Effect.fn("CodexConversationRollback.requireSafeForkVersion")(
+  function* (userAgent: string) {
+    const version = userAgent.match(/\/([^\s]+)/)?.[1];
+    if (!version || !parseSemver(version) || compareSemverVersions(version, "0.153.0") < 0) {
+      return yield* invalid(
+        "Safe conversation rewind requires Codex 0.153.0 or later. Update Codex and retry.",
+      );
+    }
+  },
+);
+
 const readThread = Effect.fn("CodexConversationRollback.readThread")(function* (
   client: RollbackClient,
   threadId: string,
@@ -109,8 +123,9 @@ export const prepareCodexConversationRollback = Effect.fn("prepareCodexConversat
   function* (
     client: RollbackClient,
     input: ProviderSessionStartInput & { readonly numTurns: number },
-    codexHome: string,
+    initialize: { readonly codexHome: string; readonly userAgent: string },
   ) {
+    yield* requireSafeForkVersion(initialize.userAgent);
     if (!Number.isInteger(input.numTurns) || input.numTurns < 1) {
       return yield* invalid("numTurns must be an integer >= 1.");
     }
@@ -137,7 +152,7 @@ export const prepareCodexConversationRollback = Effect.fn("prepareCodexConversat
       threadId: input.threadId,
       providerInstanceId: input.providerInstanceId,
       sourceThreadId: cursor.threadId,
-      codexHome,
+      codexHome: initialize.codexHome,
       cwd: input.cwd,
       runtimeMode: input.runtimeMode,
       ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
@@ -152,7 +167,9 @@ export const prepareCodexConversationRollback = Effect.fn("prepareCodexConversat
 export const forkCodexConversationRollback = Effect.fn("forkCodexConversationRollback")(function* (
   client: RollbackClient,
   target: RollbackTarget,
+  userAgent: string,
 ) {
+  yield* requireSafeForkVersion(userAgent);
   const turnIds = yield* readThread(client, target.sourceThreadId);
   if (
     target.retainedTurnIds.some((turnId, index) => turnIds[index] !== turnId) ||

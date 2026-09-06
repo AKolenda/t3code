@@ -35,7 +35,6 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
-import { makeOpenCodeConversationRollback } from "./OpenCodeConversationRollback.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -3757,14 +3756,6 @@ export function makeOpenCodeAdapter(
     const hasSession: OpenCodeAdapterShape["hasSession"] = (threadId) =>
       Effect.sync(() => sessions.has(threadId));
 
-    const conversationRollback = yield* makeOpenCodeConversationRollback({
-      settings: openCodeSettings,
-      instanceId: boundInstanceId,
-      defaultDirectory: serverConfig.cwd,
-      sameDirectory,
-      ...(options?.environment ? { environment: options.environment } : {}),
-    });
-
     const readThread: OpenCodeAdapterShape["readThread"] = Effect.fn("readThread")(
       function* (threadId) {
         const context = yield* ensureSessionContext(sessions, threadId);
@@ -3835,9 +3826,8 @@ export function makeOpenCodeAdapter(
       provider: PROVIDER,
       capabilities: {
         sessionModelSwitch: "in-session",
-        supportsConversationRollback: true,
+        supportsConversationRollback: false,
       },
-      conversationRollback,
       startSession,
       sendTurn,
       compactThread,

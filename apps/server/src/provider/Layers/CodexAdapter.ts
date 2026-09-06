@@ -2620,7 +2620,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         }).pipe(
           Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "thread/read", cause)),
         );
-        return yield* prepareCodexConversationRollback(client.raw, input, initialize.codexHome);
+        return yield* prepareCodexConversationRollback(client.raw, input, initialize);
       },
       Effect.scoped,
       withConversationRollbackDeadline,
@@ -2662,7 +2662,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
             issue: "The Codex home changed after this rewind was prepared.",
           });
         }
-        return yield* forkCodexConversationRollback(client.raw, target);
+        return yield* forkCodexConversationRollback(client.raw, target, initialize.userAgent);
       },
       Effect.scoped,
       withConversationRollbackDeadline,
