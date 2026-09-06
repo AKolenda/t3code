@@ -131,8 +131,14 @@ interface PendingUserInput {
   readonly answers: Deferred.Deferred<ProviderUserInputAnswers>;
 }
 
+interface NativeTurnCompletion {
+  readonly turnId: TurnId;
+  completion?: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>;
+}
+
 interface CursorSessionContext {
   lastTurnCompletion?: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>;
+  readonly nativeTurnCompletions: Set<NativeTurnCompletion>;
   readonly threadId: ThreadId;
   session: ProviderSession;
   readonly scope: Scope.Closeable;
@@ -376,25 +382,31 @@ export function makeCursorAdapter(
       Effect.gen(function* () {
         if (event.type === "turn.completed") {
           const context = sessions.get(event.threadId);
-          if (context) context.lastTurnCompletion = event;
+          if (context) {
+            context.lastTurnCompletion = event;
+            for (const nativeTurn of context.nativeTurnCompletions) {
+              if (nativeTurn.turnId === event.turnId) nativeTurn.completion = event;
+            }
+          }
         }
         yield* PubSub.publish(runtimeEventPubSub, event);
       });
-    // A local terminal can precede native completion. Capture again after proof,
-    // using the last result so a late cancelled steer cannot replace the final result.
-    const repeatNativeTerminal = (context: CursorSessionContext, turnId: TurnId, stopped = false) =>
+    // Each native request retains its turn result until proof arrives. A newer
+    // locally cancelled turn must not replace an older request's terminal result.
+    const repeatNativeTerminal = (
+      context: CursorSessionContext,
+      nativeTurn: NativeTurnCompletion,
+      stopped = false,
+    ) =>
       Effect.gen(function* () {
-        const previous = context.lastTurnCompletion;
-        if (!stopped && previous?.turnId !== turnId) return;
+        const previous = nativeTurn.completion;
+        if (!stopped && !previous) return;
         yield* offerRuntimeEvent({
           type: "turn.completed",
           provider: PROVIDER,
           threadId: context.threadId,
-          turnId,
-          payload:
-            previous?.turnId === turnId
-              ? previous.payload
-              : { state: "cancelled", stopReason: "cancelled" },
+          turnId: nativeTurn.turnId,
+          payload: previous?.payload ?? { state: "cancelled", stopReason: "cancelled" },
           ...(yield* makeEventStamp()),
         });
       }).pipe(
@@ -820,6 +832,7 @@ export function makeCursorAdapter(
             activeTurnId: undefined,
             cursorSkillNames: undefined,
             promptsInFlight: 0,
+            nativeTurnCompletions: new Set(),
             stopped: false,
           };
 
@@ -968,6 +981,10 @@ export function makeCursorAdapter(
               ctx.activeTurnId = turnId;
               ctx.promptsInFlight += 1;
               return yield* Effect.gen(function* () {
+                const nativeTurn: NativeTurnCompletion = { turnId };
+                const releaseNativeTurn = Effect.sync(() => {
+                  ctx.nativeTurnCompletions.delete(nativeTurn);
+                });
                 const prepare = yield* Effect.cached(
                   Effect.gen(function* () {
                     const turnModelSelection =
@@ -1101,6 +1118,12 @@ export function makeCursorAdapter(
                     ),
                     {
                       beforeSubmit: Effect.gen(function* () {
+                        if (startOptions) {
+                          if (ctx.lastTurnCompletion?.turnId === turnId) {
+                            nativeTurn.completion = ctx.lastTurnCompletion;
+                          }
+                          ctx.nativeTurnCompletions.add(nativeTurn);
+                        }
                         yield* startOptions?.beforeSubmit(turnId) ?? Effect.void;
                         if (
                           ctx.stopped ||
@@ -1117,14 +1140,20 @@ export function makeCursorAdapter(
                       nativeCompleted: startOptions
                         ? startOptions
                             .nativeCompleted(turnId)
-                            .pipe(Effect.andThen(repeatNativeTerminal(ctx, turnId)))
+                            .pipe(
+                              Effect.andThen(repeatNativeTerminal(ctx, nativeTurn)),
+                              Effect.ensuring(releaseNativeTurn),
+                            )
                         : Effect.void,
                       nativeStopped: startOptions
                         ? startOptions.nativeStopped.pipe(
-                            Effect.andThen(repeatNativeTerminal(ctx, turnId, true)),
+                            Effect.andThen(repeatNativeTerminal(ctx, nativeTurn, true)),
+                            Effect.ensuring(releaseNativeTurn),
                           )
                         : Effect.void,
-                      notSubmitted: startOptions?.notSubmitted ?? Effect.void,
+                      notSubmitted: (startOptions?.notSubmitted ?? Effect.void).pipe(
+                        Effect.ensuring(releaseNativeTurn),
+                      ),
                     },
                   )
                   .pipe(

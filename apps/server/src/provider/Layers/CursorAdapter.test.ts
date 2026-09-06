@@ -336,25 +336,50 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
     );
   }
 
-  it.effect("records a fresh terminal after native completion follows local cancellation", () =>
+  it.effect("retains late native completion after a newer parked turn is cancelled", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("cursor-late-native-proof");
-      const adapter = yield* CursorAdapter;
-      const settings = yield* ServerSettingsService;
       const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
-      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
       const nativeReply = yield* Deferred.make<void>();
       const releaseProof = yield* Deferred.make<void>();
+      const proofObserved = yield* Deferred.make<void>();
+      const isPromptSuccess = Schema.is(
+        Schema.Struct({
+          event: Schema.Struct({
+            kind: Schema.Literal("request"),
+            payload: Schema.Struct({
+              method: Schema.Literal("session/prompt"),
+              status: Schema.Literal("succeeded"),
+            }),
+          }),
+        }),
+      );
+      const adapter = yield* makeCursorAdapter(decodeCursorSettings({ binaryPath: wrapperPath }), {
+        nativeEventLogger: {
+          filePath: "memory://cursor-late-native-proof",
+          write: (record) =>
+            isPromptSuccess(record)
+              ? Deferred.succeed(proofObserved, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          close: () => Effect.void,
+        },
+      });
       yield* Effect.addFinalizer(() => Deferred.succeed(releaseProof, undefined));
       const terminalBeforeProof = yield* Deferred.make<void>();
-      const terminalAfterProof = yield* Deferred.make<void>();
+      const newerTerminal = yield* Deferred.make<void>();
+      const exited = yield* Deferred.make<void>();
       let proved = false;
       const terminalEvents: Array<Extract<ProviderRuntimeEvent, { type: "turn.completed" }>> = [];
       yield* adapter.streamEvents.pipe(
         Stream.runForEach((event) => {
-          if (event.threadId !== threadId || event.type !== "turn.completed") return Effect.void;
+          if (event.threadId !== threadId) return Effect.void;
+          if (event.type === "session.exited") return Deferred.succeed(exited, undefined);
+          if (event.type !== "turn.completed") return Effect.void;
           terminalEvents.push(event);
-          return Deferred.succeed(proved ? terminalAfterProof : terminalBeforeProof, undefined);
+          return Deferred.succeed(
+            terminalEvents.length === 1 ? terminalBeforeProof : newerTerminal,
+            undefined,
+          );
         }),
         Effect.forkChild,
       );
@@ -380,16 +405,40 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         .pipe(Effect.forkChild);
       yield* Deferred.await(nativeReply);
       yield* adapter.interruptTurn(threadId);
-      yield* Fiber.join(sending);
+      const original = yield* Fiber.join(sending);
       yield* Deferred.await(terminalBeforeProof);
       assert.isFalse(proved);
+
+      const parked = yield* Deferred.make<void>();
+      const notSubmitted = yield* Deferred.make<void>();
+      const newer = yield* adapter
+        .sendTurn(
+          { threadId, input: "must wait for the original native completion" },
+          {
+            beforeSubmit: () =>
+              Deferred.succeed(parked, undefined).pipe(Effect.andThen(Effect.never)),
+            nativeCompleted: () => Effect.die("The newer turn must not be submitted."),
+            nativeStopped: Effect.die("The newer turn has no native work."),
+            notSubmitted: Deferred.succeed(notSubmitted, undefined).pipe(Effect.asVoid),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(parked);
+      yield* Fiber.interrupt(newer);
+      yield* Deferred.await(newerTerminal);
+      assert.isTrue(yield* Deferred.isDone(notSubmitted));
+      assert.notEqual(terminalEvents[1]?.turnId, original.turnId);
+
       yield* Deferred.succeed(releaseProof, undefined);
-      yield* Deferred.await(terminalAfterProof);
-      assert.lengthOf(terminalEvents, 2);
-      assert.equal(terminalEvents[0]?.turnId, terminalEvents[1]?.turnId);
-      assert.deepEqual(terminalEvents[0]?.payload, terminalEvents[1]?.payload);
-      assert.notEqual(terminalEvents[0]?.eventId, terminalEvents[1]?.eventId);
+      // Request success follows the native proof callback. Session exit drains
+      // the event stream before we assert which terminal events were emitted.
+      yield* Deferred.await(proofObserved);
       yield* adapter.stopSession(threadId);
+      yield* Deferred.await(exited);
+      const originalTerminals = terminalEvents.filter((event) => event.turnId === original.turnId);
+      assert.lengthOf(originalTerminals, 2);
+      assert.deepEqual(originalTerminals[0]?.payload, originalTerminals[1]?.payload);
+      assert.notEqual(originalTerminals[0]?.eventId, originalTerminals[1]?.eventId);
     }),
   );
 
