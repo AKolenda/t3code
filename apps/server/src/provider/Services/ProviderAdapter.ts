@@ -51,7 +51,8 @@ export interface ProviderThreadSnapshot {
 
 export interface ProviderTurnStartOptions {
   /** Call after preparation, directly before native prompt submission.
-      Reuse an active turn ID only if native submission cannot start a different turn. */
+      Reuse an active T3 turn ID for steering only while that turn remains open.
+      Every accepted input still needs native proof before the turn can finish. */
   readonly beforeSubmit: (turnId?: TurnId) => Effect.Effect<void>;
   /** Release only this send when the adapter proves native submission never occurred. */
   readonly notSubmitted: Effect.Effect<void>;
