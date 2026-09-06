@@ -216,8 +216,8 @@ object AgentNotifications {
       .setStyle(style)
       .setOngoing(active).setOnlyAlertOnce(true).setSilent(true)
       .setTimeoutAfter(remainingMs)
-      // Android 16 requires colorization to consider a non-call card promotable.
-      .setColorized(active)
+      // Live Updates must remain uncolorized to qualify for promotion.
+      .setColorized(false)
       .setRequestPromotedOngoing(active)
       .setContentIntent(contentIntent(context, scheme, data["activity_path"], ACTIVITY_ID))
       .setDeleteIntent(dismissIntent)

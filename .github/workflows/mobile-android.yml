@@ -75,7 +75,9 @@ jobs:
 
       - name: Compile, test supported Android versions, and lint
         working-directory: apps/mobile/android
-        run: ./gradlew :t3-agent-notifications:testDebugUnitTest :t3-agent-notifications:lintRelease --no-daemon --console=plain
+        # AGP's K2 lint frontend crashes on Worklets 0.10's Gradle Kotlin scripts.
+        # Use the K1 frontend; all lint checks remain enabled.
+        run: ./gradlew :t3-agent-notifications:testDebugUnitTest :t3-agent-notifications:lintRelease -Pandroid.lint.useK2Uast=false --no-daemon --console=plain
 
       - name: Upload native test and lint reports
         if: always()

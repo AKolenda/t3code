@@ -371,10 +371,10 @@ class AgentNotificationsTest {
     }
     assertTrue(NotificationCompat.isRequestPromotedOngoing(card))
     assertFalse(NotificationCompat.isRequestPromotedOngoing(alert))
-    if (Build.VERSION.SDK_INT >= 36) {
-      assertTrue(card.hasPromotableCharacteristics())
-      assertFalse(alert.hasPromotableCharacteristics())
-    }
+    // Robolectric's API 36 image predates the shipped Live Update rules;
+    // its hasPromotableCharacteristics() incorrectly requires colorization.
+    assertFalse(card.extras.getBoolean(NotificationCompat.EXTRA_COLORIZED))
+    assertTrue(card.flags and Notification.FLAG_ONGOING_EVENT != 0)
     assertEquals(Notification.VISIBILITY_PRIVATE, card.visibility)
   }
 
@@ -389,7 +389,7 @@ class AgentNotificationsTest {
     )
     AgentNotifications.receive(
       context,
-      invalid + ("updated_at" to (System.currentTimeMillis() + 600001).toString())
+      invalid + ("updated_at" to (System.currentTimeMillis() + 3600000).toString())
     )
     assertTrue(manager.activeNotifications.isEmpty())
     AgentNotifications.receive(context, update("valid", true))

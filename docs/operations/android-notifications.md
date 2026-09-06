@@ -11,10 +11,12 @@ API 24–25 use a single inexact system alarm to expire cards after process exit
 The Android Notifications workflow performs a clean Expo prebuild, compiles the notification module, runs Robolectric tests on API 24, 26, 33 and 36 (plus API 25 for legacy expiry), and runs Android lint. It uses no Firebase, signing or relay secrets. Run the same tasks from a generated `apps/mobile/android` project with JDK 21 available:
 
 ```sh
-./gradlew :t3-agent-notifications:testDebugUnitTest :t3-agent-notifications:lintRelease
+./gradlew :t3-agent-notifications:testDebugUnitTest :t3-agent-notifications:lintRelease -Pandroid.lint.useK2Uast=false
 ```
 
 Robolectric's API 36 runtime requires JDK 21; module compilation still uses Expo's Java 17 toolchain. The existing Mobile Native Static Analysis job separately runs ktlint and detekt. The native fingerprint check marks this change as requiring a new binary; the production workflow cannot deliver it to an older binary by OTA. Settings disable Android notifications if the installed native module is missing required methods.
+
+The lint command uses the K1 frontend because AGP's K2 frontend crashes while analyzing Worklets 0.10's Gradle Kotlin scripts. This does not disable lint checks. Live Update eligibility must be verified on a device: Robolectric's API 36 image implements older promotion rules that require colorization, while shipped Live Updates require uncolorized notifications.
 
 ## Firebase and app build
 
@@ -57,9 +59,9 @@ Building with `APP_VARIANT=production` selects `com.t3tools.t3code` and its corr
 Provide a private device JSON file containing the app's native FCM `token`, registered `deviceId`, signed-in `userId`, and Android `packageName`. An optional `deepLink` can target an existing thread for tap verification. The app must have registered its local native notification handler and have notification permission. From `infra/relay`:
 
 ```sh
-node scripts/android-push-smoke.ts /path/service-account.json /path/device.json running
-node scripts/android-push-smoke.ts /path/service-account.json /path/device.json approval
-node scripts/android-push-smoke.ts /path/service-account.json /path/device.json completed
+vp run push:android:smoke /path/service-account.json /path/device.json running
+vp run push:android:smoke /path/service-account.json /path/device.json approval
+vp run push:android:smoke /path/service-account.json /path/device.json completed
 ```
 
 Supported states are `running`, `approval`, `input`, `completed`, `failed`, and `end`. Firebase acceptance is not proof that a device displayed the message. Check the actual notification, background the app, and test a notification tap. Also test dismissal, disabling ongoing activity, sign-out, token rotation, and delivery after the app process has exited. Android Settings **Force stop** intentionally prevents delivery until the app is opened again.
@@ -85,7 +87,7 @@ You do not need to duplicate T3 Connect's hosted infrastructure to develop Andro
 Create a private `connection.json` containing `wsUrl` (the environment's `/ws` URL) and `bearerToken` (a normal paired environment access token). Use a separate pairing credential for this watcher. Supply the same device file described above, then run from `infra/relay`:
 
 ```sh
-node scripts/android-push-watch.ts /path/service-account.json /path/device.json /path/connection.json
+vp run push:android:watch /path/service-account.json /path/device.json /path/connection.json
 ```
 
 The Android native handler must already be configured with that device and account, and notifications must be allowed. A native instrumentation harness can configure a disposable emulator before testing; a signed-in development app configures the handler during device registration. This watcher is a development transport: it observes all unarchived threads in its paired environment, enables all alert types, keeps no durable queue, and must stay running. It does not register Android devices with the existing hosted relay. The hosted relay needs the changes below before its notification settings and delivery work end to end.
