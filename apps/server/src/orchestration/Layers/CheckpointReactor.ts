@@ -24,11 +24,13 @@ import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
 
 import { parseTurnDiffFilesFromNumstat } from "../../checkpointing/Diffs.ts";
 import {
+  checkpointRefForRevertSafety,
   checkpointRefForThreadTurn,
   resolveThreadWorkspaceCwd,
 } from "../../checkpointing/Utils.ts";
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import * as TurnCheckpointCapture from "../../checkpointing/TurnCheckpointCapture.ts";
+import * as CheckpointRevertRecovery from "../../checkpointing/CheckpointRevertRecovery.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { forkParked } from "../../serverActivation.ts";
@@ -88,6 +90,7 @@ const make = Effect.gen(function* () {
   const providerService = yield* ProviderService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const checkpointCapture = yield* TurnCheckpointCapture.TurnCheckpointCapture;
+  const checkpointReverts = yield* CheckpointRevertRecovery.make;
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
@@ -157,6 +160,34 @@ const make = Effect.gen(function* () {
         }),
       ),
     );
+
+  const appendRevertRecoveryActivity = Effect.fn("appendRevertRecoveryActivity")(function* (
+    attempt: CheckpointRevertRecovery.PreparedRevert,
+    detail: string,
+  ) {
+    const createdAt = yield* nowIso;
+    yield* orchestrationEngine.dispatch({
+      type: "thread.activity.append",
+      commandId: yield* serverCommandId("checkpoint-revert-recovery"),
+      threadId: attempt.threadId,
+      activity: {
+        id: yield* serverEventId,
+        tone: "error",
+        kind: "checkpoint.revert.recovery-required",
+        summary: `Revert to checkpoint ${attempt.turnCount} again to finish recovery`,
+        payload: {
+          attemptId: attempt.attemptId,
+          turnCount: attempt.turnCount,
+          stage: attempt.stage,
+          safetyCheckpointRef: attempt.safetyCheckpointRef,
+          detail,
+        },
+        turnId: null,
+        createdAt,
+      },
+      createdAt,
+    });
+  });
 
   const resolveSessionRuntimeForThread = Effect.fn("resolveSessionRuntimeForThread")(function* (
     threadId: ThreadId,
@@ -689,133 +720,242 @@ const make = Effect.gen(function* () {
   const handleRevertRequested = Effect.fn("handleRevertRequested")(function* (
     event: Extract<OrchestrationEvent, { type: "thread.checkpoint-revert-requested" }>,
   ) {
-    const now = DateTime.formatIso(yield* DateTime.now);
-
-    const thread = yield* resolveThreadDetail(event.payload.threadId);
-    if (!thread) {
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: "Thread was not found in read model.",
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
+    const savedAttempt = yield* checkpointReverts.get(event.payload.threadId);
+    // A queued duplicate can arrive after the first request already completed.
+    if (Option.isNone(savedAttempt) || savedAttempt.value.turnCount !== event.payload.turnCount) {
       return;
     }
+    let attempt = savedAttempt.value;
+    const resumed = attempt.stage !== "requested" || attempt.attemptId !== event.eventId;
 
-    const sessionRuntime = yield* resolveSessionRuntimeForThread(event.payload.threadId);
-    if (Option.isNone(sessionRuntime)) {
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: "No active provider session with workspace cwd is bound to this thread.",
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
-      return;
-    }
-    if (!(yield* checkpointStore.isGitRepository(sessionRuntime.value.cwd))) {
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: "Checkpoints are unavailable because this project is not a git repository.",
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
-      return;
-    }
-
-    const currentTurnCount = thread.checkpoints.reduce(
-      (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
-      0,
-    );
-
-    if (event.payload.turnCount > currentTurnCount) {
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: `Checkpoint turn count ${event.payload.turnCount} exceeds current turn count ${currentTurnCount}.`,
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
-      return;
-    }
-
-    const targetCheckpointRef =
-      event.payload.turnCount === 0
-        ? checkpointRefForThreadTurn(event.payload.threadId, 0)
-        : thread.checkpoints.find(
-            (checkpoint) => checkpoint.checkpointTurnCount === event.payload.turnCount,
-          )?.checkpointRef;
-
-    if (!targetCheckpointRef) {
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: `Checkpoint ref for turn ${event.payload.turnCount} is unavailable in read model.`,
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
-      return;
-    }
-
-    yield* providerService.assertConversationRollbackSupported(event.payload.threadId);
-
-    const restored = yield* checkpointStore.restoreCheckpoint({
-      cwd: sessionRuntime.value.cwd,
-      checkpointRef: targetCheckpointRef,
-      fallbackToHead: event.payload.turnCount === 0,
-    });
-    if (!restored) {
-      yield* appendRevertFailureActivity({
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        detail: `Filesystem checkpoint is unavailable for turn ${event.payload.turnCount}.`,
-        createdAt: now,
-      }).pipe(Effect.catch(() => Effect.void));
-      return;
-    }
-
-    // Refresh the workspace entry index so the @-mention file picker
-    // reflects the reverted filesystem state.
-    yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
-
-    const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
-    if (rolledBackTurns > 0) {
-      yield* providerService.rollbackConversation({
-        threadId: sessionRuntime.value.threadId,
-        numTurns: rolledBackTurns,
-      });
-    }
-
-    const staleCheckpointRefs: Array<CheckpointRef> = [];
-    for (const checkpoint of thread.checkpoints) {
-      if (checkpoint.checkpointTurnCount > event.payload.turnCount) {
-        staleCheckpointRefs.push(checkpoint.checkpointRef);
+    yield* Effect.gen(function* () {
+      if (attempt.stage === "requested") {
+        const thread = yield* resolveThreadDetail(attempt.threadId);
+        if (!thread) {
+          return yield* new CheckpointRevertRecovery.CheckpointRevertRecoveryError({
+            threadId: attempt.threadId,
+            detail: "Thread was not found in read model.",
+          });
+        }
+        const projects = yield* resolveThreadProjects(thread.projectId);
+        const cwd = yield* resolveCheckpointCwd({
+          threadId: attempt.threadId,
+          thread,
+          projects,
+          preferSessionRuntime: true,
+        });
+        if (!cwd) {
+          return yield* new CheckpointRevertRecovery.CheckpointRevertRecoveryError({
+            threadId: attempt.threadId,
+            detail: "Checkpoints are unavailable because this project is not a git repository.",
+          });
+        }
+        const currentTurnCount = thread.checkpoints.reduce(
+          (count, checkpoint) => Math.max(count, checkpoint.checkpointTurnCount),
+          0,
+        );
+        const targetCheckpointRef =
+          attempt.turnCount === 0
+            ? checkpointRefForThreadTurn(attempt.threadId, 0)
+            : thread.checkpoints.find(
+                (checkpoint) => checkpoint.checkpointTurnCount === attempt.turnCount,
+              )?.checkpointRef;
+        if (!targetCheckpointRef || attempt.turnCount > currentTurnCount) {
+          return yield* new CheckpointRevertRecovery.CheckpointRevertRecoveryError({
+            threadId: attempt.threadId,
+            detail: `Checkpoint turn ${attempt.turnCount} is unavailable in read model.`,
+          });
+        }
+        if (
+          attempt.turnCount > 0 &&
+          !(yield* checkpointStore.hasCheckpointRef({ cwd, checkpointRef: targetCheckpointRef }))
+        ) {
+          return yield* new CheckpointRevertRecovery.CheckpointRevertRecoveryError({
+            threadId: attempt.threadId,
+            detail: `Filesystem checkpoint is unavailable for turn ${attempt.turnCount}.`,
+          });
+        }
+        const rollbackPlan = yield* providerService.prepareConversationRollback({
+          threadId: attempt.threadId,
+          cwd,
+          numTurns: currentTurnCount - attempt.turnCount,
+        });
+        const planned = {
+          ...attempt,
+          stage: "preparing-provider",
+          cwd,
+          sourceTurnCount: currentTurnCount,
+          targetCheckpointRef,
+          safetyCheckpointRef: checkpointRefForRevertSafety(attempt.threadId, attempt.attemptId),
+          staleCheckpointRefs: thread.checkpoints
+            .filter((checkpoint) => checkpoint.checkpointTurnCount > attempt.turnCount)
+            .map((checkpoint) => checkpoint.checkpointRef),
+          completionCommandId: yield* serverCommandId("checkpoint-revert-complete"),
+          rollbackPlan,
+        } satisfies CheckpointRevertRecovery.PreparedRevert;
+        yield* checkpointReverts.save(planned);
+        attempt = planned;
       }
-    }
 
-    if (staleCheckpointRefs.length > 0) {
-      yield* checkpointStore.deleteCheckpointRefs({
-        cwd: sessionRuntime.value.cwd,
-        checkpointRefs: staleCheckpointRefs,
-      });
-    }
+      if (attempt.stage === "preparing-provider") {
+        const resumeCursor = yield* providerService.forkConversation(attempt.rollbackPlan);
+        const forked = {
+          ...attempt,
+          stage: "provider-prepared",
+          resumeCursor,
+        } satisfies CheckpointRevertRecovery.ForkedRevert;
+        yield* checkpointReverts.save(forked);
+        attempt = forked;
+      }
 
-    yield* orchestrationEngine
-      .dispatch({
-        type: "thread.revert.complete",
-        commandId: yield* serverCommandId("checkpoint-revert-complete"),
-        threadId: event.payload.threadId,
-        turnCount: event.payload.turnCount,
-        createdAt: now,
-      })
-      .pipe(
-        Effect.catch((error) =>
-          appendRevertFailureActivity({
-            threadId: event.payload.threadId,
-            turnCount: event.payload.turnCount,
-            detail: error.message,
-            createdAt: now,
-          }),
-        ),
-        Effect.asVoid,
-      );
+      if (attempt.stage === "provider-prepared") {
+        yield* providerService.stopSession({ threadId: attempt.threadId });
+        yield* checkpointStore.captureCheckpoint({
+          cwd: attempt.cwd,
+          checkpointRef: attempt.safetyCheckpointRef,
+        });
+        const restoring = { ...attempt, stage: "restoring-files" } as const;
+        yield* checkpointReverts.save(restoring);
+        attempt = restoring;
+      }
+
+      if (attempt.stage === "restoring-files") {
+        const restored = yield* checkpointStore.restoreCheckpoint({
+          cwd: attempt.cwd,
+          checkpointRef: attempt.targetCheckpointRef,
+          fallbackToHead: attempt.turnCount === 0,
+        });
+        if (!restored) {
+          return yield* new CheckpointRevertRecovery.CheckpointRevertRecoveryError({
+            threadId: attempt.threadId,
+            detail: `Filesystem checkpoint is unavailable for turn ${attempt.turnCount}.`,
+          });
+        }
+        const filesRestored = { ...attempt, stage: "files-restored" } as const;
+        yield* checkpointReverts.save(filesRestored);
+        attempt = filesRestored;
+      }
+
+      if (attempt.stage === "files-restored") {
+        yield* workspaceEntries.refresh(attempt.cwd);
+        const binding = { ...attempt, stage: "provider-started" } as const;
+        yield* checkpointReverts.save(binding);
+        attempt = binding;
+      }
+
+      if (attempt.stage === "provider-started") {
+        yield* providerService.rollbackConversation({
+          plan: attempt.rollbackPlan,
+          resumeCursor: attempt.resumeCursor,
+        });
+        if (attempt.rollbackPlan.numTurns > 0) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make(`server:checkpoint-revert-session:${attempt.attemptId}`),
+            threadId: attempt.threadId,
+            session: {
+              threadId: attempt.threadId,
+              status: "stopped",
+              providerName: attempt.rollbackPlan.source.provider ?? null,
+              ...(attempt.rollbackPlan.source.providerInstanceId !== undefined
+                ? { providerInstanceId: attempt.rollbackPlan.source.providerInstanceId }
+                : {}),
+              runtimeMode: attempt.rollbackPlan.source.runtimeMode,
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: yield* nowIso,
+            },
+            createdAt: yield* nowIso,
+          });
+        }
+        const bound = { ...attempt, stage: "provider-complete" } as const;
+        yield* checkpointReverts.save(bound);
+        attempt = bound;
+      }
+
+      if (attempt.stage === "provider-complete") {
+        yield* orchestrationEngine.dispatch({
+          type: "thread.revert.complete",
+          commandId: attempt.completionCommandId,
+          threadId: attempt.threadId,
+          turnCount: attempt.turnCount,
+          createdAt: yield* nowIso,
+        });
+        attempt = { ...attempt, stage: "committed" };
+      }
+
+      if (attempt.stage === "committed") {
+        yield* checkpointStore
+          .deleteCheckpointRefs({
+            cwd: attempt.cwd,
+            checkpointRefs: [...attempt.staleCheckpointRefs, attempt.safetyCheckpointRef],
+          })
+          .pipe(
+            Effect.catch((error) =>
+              Effect.logWarning("checkpoint revert completed with retained backup refs", {
+                threadId: attempt.threadId,
+                detail: error.message,
+              }),
+            ),
+          );
+        yield* checkpointReverts.clear(attempt);
+        if (resumed) {
+          const createdAt = yield* nowIso;
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: yield* serverCommandId("checkpoint-revert-recovered"),
+            threadId: attempt.threadId,
+            activity: {
+              id: yield* serverEventId,
+              tone: "info",
+              kind: "checkpoint.revert.recovered",
+              summary: "Checkpoint revert recovered",
+              payload: { attemptId: attempt.attemptId, turnCount: attempt.turnCount },
+              turnId: null,
+              createdAt,
+            },
+            createdAt,
+          });
+        }
+      }
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.gen(function* () {
+          if (
+            attempt.stage === "requested" ||
+            attempt.stage === "preparing-provider" ||
+            attempt.stage === "provider-prepared"
+          ) {
+            // A failed unbound fork cannot change files or the old conversation.
+            if (attempt.stage !== "requested") {
+              yield* checkpointStore
+                .deleteCheckpointRefs({
+                  cwd: attempt.cwd,
+                  checkpointRefs: [attempt.safetyCheckpointRef],
+                })
+                .pipe(Effect.ignore);
+            }
+            yield* checkpointReverts.clear(attempt);
+            yield* appendRevertFailureActivity({
+              threadId: attempt.threadId,
+              turnCount: attempt.turnCount,
+              detail: error.message,
+              createdAt: yield* nowIso,
+            });
+            return;
+          }
+          const current = Option.getOrUndefined(yield* checkpointReverts.get(attempt.threadId));
+          if (current?.stage === "committed" || attempt.stage === "committed") {
+            yield* Effect.logWarning("checkpoint revert cleanup needs another attempt", {
+              threadId: attempt.threadId,
+              detail: error.message,
+            });
+            return;
+          }
+          yield* appendRevertRecoveryActivity(attempt, error.message);
+        }),
+      ),
+    );
   });
 
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (event: OrchestrationEvent) {

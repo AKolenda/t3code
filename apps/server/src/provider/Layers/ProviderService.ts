@@ -9,6 +9,7 @@
  *
  * @module ProviderServiceLive
  */
+import { isDeepStrictEqual } from "node:util";
 import {
   EventId,
   MessageId,
@@ -68,6 +69,7 @@ import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
+import { ConversationRollbackPlan } from "../ConversationRollback.ts";
 import { type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
@@ -177,9 +179,14 @@ function turnEffort(modelSelection: ProviderSendTurnInput["modelSelection"]): st
 type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["Service"]> =
   ProviderService.ProviderService["Service"][Name];
 
-const ProviderRollbackConversationInput = Schema.Struct({
+const ProviderPrepareConversationRollbackInput = Schema.Struct({
   threadId: ThreadId,
+  cwd: Schema.String,
   numTurns: NonNegativeInt,
+});
+const ProviderRollbackConversationInput = Schema.Struct({
+  plan: ConversationRollbackPlan,
+  resumeCursor: Schema.NullOr(Schema.Unknown),
 });
 
 function toValidationError(
@@ -1903,13 +1910,80 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         operation: "ProviderService.assertConversationRollbackSupported",
         allowRecovery: false,
       });
-      if (routed.adapter.capabilities.supportsConversationRollback === false) {
+      if (routed.adapter.conversationRollback === undefined) {
         return yield* toValidationError(
           "ProviderService.assertConversationRollbackSupported",
           `Provider '${routed.adapter.provider}' does not support conversation rewind.`,
         );
       }
     });
+
+  const prepareConversationRollback: ProviderServiceMethod<"prepareConversationRollback"> =
+    Effect.fn("prepareConversationRollback")(function* (rawInput) {
+      const input = yield* decodeInputOrValidationError({
+        operation: "ProviderService.prepareConversationRollback",
+        schema: ProviderPrepareConversationRollbackInput,
+        payload: rawInput,
+      });
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.prepareConversationRollback",
+        allowRecovery: false,
+      });
+      if (routed.adapter.conversationRollback === undefined) {
+        return yield* toValidationError(
+          "ProviderService.prepareConversationRollback",
+          `Provider '${routed.adapter.provider}' does not support conversation rewind.`,
+        );
+      }
+      const binding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
+      const activeSession = (yield* routed.adapter.listSessions()).find(
+        (session) => session.threadId === input.threadId,
+      );
+      const modelSelection = readPersistedModelSelection(binding?.runtimePayload);
+      const source: ProviderSessionStartInput = {
+        threadId: input.threadId,
+        provider: routed.adapter.provider,
+        providerInstanceId: routed.instanceId,
+        cwd: input.cwd,
+        runtimeMode: activeSession?.runtimeMode ?? binding?.runtimeMode ?? "full-access",
+        resumeCursor: activeSession?.resumeCursor ?? binding?.resumeCursor ?? null,
+        ...(modelSelection !== undefined ? { modelSelection } : {}),
+      };
+      const target =
+        input.numTurns === 0
+          ? null
+          : yield* routed.adapter.conversationRollback.prepare({
+              ...source,
+              numTurns: input.numTurns,
+            });
+      return { source, target, numTurns: input.numTurns };
+    });
+
+  const forkConversation: ProviderServiceMethod<"forkConversation"> = Effect.fn("forkConversation")(
+    function* (rawPlan) {
+      const plan = yield* decodeInputOrValidationError({
+        operation: "ProviderService.forkConversation",
+        schema: ConversationRollbackPlan,
+        payload: rawPlan,
+      });
+      if (plan.numTurns === 0) {
+        return plan.source.resumeCursor ?? null;
+      }
+      const instanceId = yield* requireBindingInstanceId(
+        "ProviderService.forkConversation",
+        plan.source,
+      );
+      const adapter = yield* registry.getByInstance(instanceId);
+      if (adapter.provider !== plan.source.provider || adapter.conversationRollback === undefined) {
+        return yield* toValidationError(
+          "ProviderService.forkConversation",
+          "The provider for the saved rewind target is unavailable.",
+        );
+      }
+      return yield* adapter.conversationRollback.fork(plan.target);
+    },
+  );
 
   const rollbackConversation: ProviderServiceMethod<"rollbackConversation"> = Effect.fn(
     "rollbackConversation",
@@ -1919,28 +1993,64 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       schema: ProviderRollbackConversationInput,
       payload: rawInput,
     });
-    if (input.numTurns === 0) {
+    const plan = input.plan;
+    if (plan.numTurns === 0) {
       return;
     }
     let metricProvider = "unknown";
     return yield* Effect.gen(function* () {
-      yield* assertConversationRollbackSupported(input.threadId);
+      const threadId = plan.source.threadId;
+      const expectedInstanceId = yield* requireBindingInstanceId(
+        "ProviderService.rollbackConversation",
+        plan.source,
+      );
       const routed = yield* resolveRoutableSession({
-        threadId: input.threadId,
+        threadId,
         operation: "ProviderService.rollbackConversation",
-        allowRecovery: true,
+        allowRecovery: false,
       });
+      const binding = Option.getOrUndefined(yield* directory.getBinding(threadId));
+      if (
+        routed.instanceId !== expectedInstanceId ||
+        routed.adapter.provider !== plan.source.provider ||
+        (!isDeepStrictEqual(binding?.resumeCursor ?? null, plan.source.resumeCursor ?? null) &&
+          !isDeepStrictEqual(binding?.resumeCursor ?? null, input.resumeCursor))
+      ) {
+        return yield* toValidationError(
+          "ProviderService.rollbackConversation",
+          "The provider conversation changed after the rewind target was saved.",
+        );
+      }
       metricProvider = routed.adapter.provider;
       yield* Effect.annotateCurrentSpan({
         "provider.operation": "rollback-conversation",
         "provider.kind": routed.adapter.provider,
-        "provider.thread_id": input.threadId,
-        "provider.rollback_turns": input.numTurns,
+        "provider.thread_id": threadId,
+        "provider.rollback_turns": plan.numTurns,
       });
-      yield* routed.adapter.rollbackThread(routed.threadId, input.numTurns);
+      // Stop before replacing the durable cursor. A retry adopts the same
+      // fork instead of asking the provider to remove more turns.
+      yield* stopSession({ threadId });
+      yield* directory.upsert({
+        threadId,
+        provider: routed.adapter.provider,
+        providerInstanceId: routed.instanceId,
+        status: "stopped",
+        resumeCursor: input.resumeCursor,
+        runtimeMode: plan.source.runtimeMode,
+        runtimePayload: {
+          activeTurnId: null,
+          continueAfterServerUpdate: null,
+          continueAfterServerUpdatePrepared: null,
+          cwd: plan.source.cwd,
+          ...(plan.source.modelSelection !== undefined
+            ? { modelSelection: plan.source.modelSelection }
+            : {}),
+        },
+      });
       yield* analytics.record("provider.conversation.rolled_back", {
         provider: routed.adapter.provider,
-        turns: input.numTurns,
+        turns: plan.numTurns,
       });
     }).pipe(
       withMetrics({
@@ -2085,6 +2195,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     getCapabilities,
     getInstanceInfo,
     assertConversationRollbackSupported,
+    prepareConversationRollback,
+    forkConversation,
     rollbackConversation,
     uploadFeedback,
     // Each access creates a fresh PubSub subscription so that multiple

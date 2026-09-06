@@ -30,6 +30,7 @@ import type {
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
+import type { ConversationRollbackPlan } from "../ConversationRollback.ts";
 
 import type { ProviderServiceError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
@@ -113,12 +114,22 @@ export interface ProviderServiceShape {
     threadId: ThreadId,
   ) => Effect.Effect<void, ProviderServiceError>;
 
-  /**
-   * Roll back provider conversation state by a number of turns.
-   */
-  readonly rollbackConversation: (input: {
+  /** Read an absolute native boundary without resuming or changing the agent. */
+  readonly prepareConversationRollback: (input: {
     readonly threadId: ThreadId;
+    readonly cwd: string;
     readonly numTurns: number;
+  }) => Effect.Effect<ConversationRollbackPlan, ProviderServiceError>;
+
+  /** Fork the saved native prefix without changing the thread's bound cursor. */
+  readonly forkConversation: (
+    plan: ConversationRollbackPlan,
+  ) => Effect.Effect<unknown | null, ProviderServiceError>;
+
+  /** Stop the old agent and bind a saved fork. Repeating this is safe. */
+  readonly rollbackConversation: (input: {
+    readonly plan: ConversationRollbackPlan;
+    readonly resumeCursor: unknown | null;
   }) => Effect.Effect<void, ProviderServiceError>;
 
   /**

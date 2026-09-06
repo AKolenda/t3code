@@ -30,6 +30,7 @@ import {
   orchestrationCommandDuration,
 } from "../../observability/Metrics.ts";
 import { toPersistenceSqlError } from "../../persistence/Errors.ts";
+import * as CheckpointRevertRecovery from "../../checkpointing/CheckpointRevertRecovery.ts";
 import { OrchestrationEventStore } from "../../persistence/Services/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
 import {
@@ -83,6 +84,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
 
 const makeOrchestrationEngine = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const checkpointReverts = yield* CheckpointRevertRecovery.make;
   const eventStore = yield* OrchestrationEventStore;
   const commandReceiptRepository = yield* OrchestrationCommandReceiptRepository;
   const projectionPipeline = yield* OrchestrationProjectionPipeline;
@@ -195,6 +197,35 @@ const makeOrchestrationEngine = Effect.gen(function* () {
           });
         }
 
+        const command = envelope.command;
+        const pendingRevert =
+          command.type === "thread.checkpoint.revert" ||
+          command.type === "thread.revert.complete" ||
+          command.type === "thread.turn.start" ||
+          command.type === "thread.approval.respond" ||
+          command.type === "thread.user-input.respond" ||
+          command.type === "thread.delete" ||
+          (command.type === "thread.meta.update" &&
+            (command.worktreePath !== undefined || command.modelSelection !== undefined))
+            ? yield* checkpointReverts.get(command.threadId)
+            : Option.none();
+        if (Option.isSome(pendingRevert) && pendingRevert.value.stage !== "committed") {
+          const attempt = pendingRevert.value;
+          const canResume =
+            command.type === "thread.checkpoint.revert" && command.turnCount === attempt.turnCount;
+          const canCommit =
+            command.type === "thread.revert.complete" &&
+            attempt.stage === "provider-complete" &&
+            command.commandId === attempt.completionCommandId &&
+            command.turnCount === attempt.turnCount;
+          if (!canResume && !canCommit) {
+            return yield* new OrchestrationCommandInvariantError({
+              commandType: command.type,
+              detail: `Checkpoint revert to turn ${attempt.turnCount} is unfinished. Recover that revert before changing this thread.`,
+            });
+          }
+        }
+
         // Command snapshots omit activities at startup and cap them while running.
         // Read this request's durable state before deciding how to send the answer.
         const userInputActivity =
@@ -236,12 +267,37 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               const attachmentCleanups: Effect.Effect<void>[] = [];
               let nextCommandReadModel = commandReadModel;
 
+              if (Option.isSome(pendingRevert) && pendingRevert.value.stage === "committed") {
+                // Cleanup is best effort once the timeline is saved. Do not
+                // block a new turn because a backup ref could not be deleted.
+                yield* checkpointReverts.clear(pendingRevert.value);
+              }
               for (const nextEvent of eventBases) {
                 const savedEvent = yield* eventStore.append(nextEvent);
                 nextCommandReadModel = yield* projectEvent(nextCommandReadModel, savedEvent);
                 const cleanup = yield* projectionPipeline.projectEventDeferred(savedEvent);
                 attachmentCleanups.push(cleanup);
                 committedEvents.push(savedEvent);
+                if (savedEvent.type === "thread.checkpoint-revert-requested") {
+                  // Reserve before acknowledging the command. A second client
+                  // cannot start a turn before the checkpoint worker runs.
+                  yield* checkpointReverts.reserve({
+                    threadId: savedEvent.payload.threadId,
+                    attemptId: savedEvent.eventId,
+                    turnCount: savedEvent.payload.turnCount,
+                    createdAt: savedEvent.occurredAt,
+                    stage: "requested",
+                  });
+                } else if (
+                  savedEvent.type === "thread.reverted" &&
+                  Option.isSome(pendingRevert) &&
+                  pendingRevert.value.stage === "provider-complete"
+                ) {
+                  yield* checkpointReverts.save({
+                    ...pendingRevert.value,
+                    stage: "committed",
+                  });
+                }
               }
 
               const lastSavedEvent = committedEvents.at(-1) ?? null;
