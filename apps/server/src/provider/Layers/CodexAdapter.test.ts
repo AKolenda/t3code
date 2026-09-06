@@ -23,6 +23,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, vi } from "@effect/vitest";
 
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -40,6 +41,7 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
+import type { ProviderTurnStartOptions } from "../Services/ProviderAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
 import {
   CodexSessionRuntimePendingApprovalNotFoundError,
@@ -554,8 +556,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   getSession = Effect.promise(() => this.startImpl());
 
-  sendTurn(input: CodexSessionRuntimeSendTurnInput) {
-    return Effect.promise(() => this.sendTurnImpl(input));
+  sendTurn(input: CodexSessionRuntimeSendTurnInput, options?: ProviderTurnStartOptions) {
+    return (options?.beforeSubmit() ?? Effect.void).pipe(
+      Effect.andThen(Effect.promise(() => this.sendTurnImpl(input))),
+    );
   }
 
   interruptTurn(turnId?: TurnId) {
@@ -771,6 +775,46 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
         NodeAssert.equal(error._tag, "ProviderAdapterRequestNotFoundError");
         NodeAssert.equal(error.requestId, requestId);
       }),
+  );
+
+  it.effect("does not submit a parked message to a replaced session", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("replaced-before-submit");
+      const input = { threadId, runtimeMode: "full-access" as const };
+      yield* adapter.startSession(input);
+      const oldRuntime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(oldRuntime);
+      const parked = yield* Deferred.make<void>();
+      const released = yield* Deferred.make<void>();
+      let notSubmitted = false;
+      const send = yield* adapter
+        .sendTurn(
+          { threadId, input: "old message" },
+          {
+            beforeSubmit: () =>
+              Deferred.succeed(parked, undefined).pipe(Effect.andThen(Deferred.await(released))),
+            notSubmitted: Effect.sync(() => {
+              notSubmitted = true;
+            }),
+            nativeStopped: Effect.void,
+            nativeCompleted: () => Effect.die("old message was never submitted"),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(parked);
+      yield* adapter.startSession(input);
+      const newRuntime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(newRuntime);
+      NodeAssert.notEqual(newRuntime, oldRuntime);
+      yield* Deferred.succeed(released, undefined);
+      NodeAssert.equal(Exit.hasInterrupts(yield* Fiber.await(send)), true);
+      NodeAssert.equal(notSubmitted, true);
+      NodeAssert.equal(oldRuntime.sendTurnImpl.mock.calls.length, 0);
+      NodeAssert.equal(newRuntime.sendTurnImpl.mock.calls.length, 0);
+      yield* adapter.sendTurn({ threadId, input: "new message" });
+      NodeAssert.equal(newRuntime.sendTurnImpl.mock.calls.length, 1);
+    }),
   );
 
   it.effect("maps missing adapter sessions to ProviderAdapterSessionNotFoundError", () =>

@@ -40,6 +40,7 @@ import { buildCodexInitializeParams } from "./CodexProvider.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
+import type { ProviderTurnStartOptions } from "../Services/ProviderAdapter.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -195,6 +196,7 @@ export interface CodexSessionRuntimeShape {
   readonly getSession: Effect.Effect<ProviderSession>;
   readonly sendTurn: (
     input: CodexSessionRuntimeSendTurnInput,
+    options?: ProviderTurnStartOptions,
   ) => Effect.Effect<ProviderTurnStartResult, CodexSessionRuntimeError>;
   readonly compactThread: Effect.Effect<void, CodexSessionRuntimeError>;
   readonly interruptTurn: (turnId?: TurnId) => Effect.Effect<void, CodexSessionRuntimeError>;
@@ -1172,6 +1174,9 @@ export const makeCodexSessionRuntime = (
     const collabChildLiveTurnsRef = yield* Ref.make(new Map<string, string>());
     const suppressMemoryConsolidationNotification = makeMemoryConsolidationNotificationFilter();
     const closedRef = yield* Ref.make(false);
+    let nativeCompleted: ProviderTurnStartOptions["nativeCompleted"] | undefined;
+    let nativeStopped = Effect.void;
+    let nativeExited = false;
 
     // `~` is not shell-expanded when env vars are set via
     // `child_process.spawn`; `expandHomePath` lets a configured
@@ -1882,20 +1887,25 @@ export const makeCodexSessionRuntime = (
 
     yield* client.handleServerNotification("turn/completed", (payload) =>
       currentSessionProviderThreadId.pipe(
-        Effect.flatMap((providerThreadId) => {
-          if (providerThreadId && payload.threadId !== providerThreadId) {
-            return Effect.void;
-          }
-          const lastError =
-            payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
-              ? payload.turn.error.message
-              : undefined;
-          return updateSession(sessionRef, {
-            status: payload.turn.status === "failed" ? "error" : "ready",
-            activeTurnId: undefined,
-            ...(lastError ? { lastError } : {}),
-          });
-        }),
+        Effect.flatMap(
+          Effect.fnUntraced(function* (providerThreadId) {
+            if (providerThreadId && payload.threadId !== providerThreadId) {
+              return;
+            }
+            if (providerThreadId === payload.threadId && payload.turn.status !== "inProgress") {
+              yield* nativeCompleted?.(TurnId.make(payload.turn.id)) ?? Effect.void;
+            }
+            const lastError =
+              payload.turn.status === "failed" && "error" in payload.turn && payload.turn.error
+                ? payload.turn.error.message
+                : undefined;
+            yield* updateSession(sessionRef, {
+              status: payload.turn.status === "failed" ? "error" : "ready",
+              activeTurnId: undefined,
+              ...(lastError ? { lastError } : {}),
+            });
+          }),
+        ),
       ),
     );
 
@@ -2202,7 +2212,18 @@ export const makeCodexSessionRuntime = (
       Effect.forkIn(runtimeScope),
     );
 
+    const confirmNativeStopped = Effect.fnUntraced(function* () {
+      // Signal exits fail exitCode. The captured handle tracks the exit signal
+      // separately, so an exit-status error alone cannot release native work.
+      if (yield* child.isRunning) {
+        return;
+      }
+      nativeExited = true;
+      yield* nativeStopped;
+    }, Effect.ignore);
+
     yield* child.exitCode.pipe(
+      Effect.onExit(() => confirmNativeStopped()),
       Effect.flatMap((exitCode) =>
         Ref.get(closedRef).pipe(
           Effect.flatMap((closed) => {
@@ -2287,6 +2308,10 @@ export const makeCodexSessionRuntime = (
         ),
       );
       yield* Scope.close(runtimeScope, Exit.void);
+      yield* child.exitCode.pipe(
+        Effect.onExit(() => confirmNativeStopped()),
+        Effect.ignore,
+      );
       yield* Queue.shutdown(serverNotifications);
       yield* Queue.shutdown(events);
     });
@@ -2298,7 +2323,7 @@ export const makeCodexSessionRuntime = (
         const providerThreadId = yield* readProviderThreadId;
         yield* client.request("thread/compact/start", { threadId: providerThreadId });
       }),
-      sendTurn: (input) =>
+      sendTurn: (input, turnOptions) =>
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
           if (hasConfiguredMcpServer(options.appServerArgs)) {
@@ -2327,6 +2352,18 @@ export const makeCodexSessionRuntime = (
             // has even if the setting changed after the session started.
             browserToolsAvailable: hasConfiguredMcpServer(options.appServerArgs),
           });
+          if ((yield* Ref.get(closedRef)) || nativeExited) {
+            return yield* Effect.interrupt;
+          }
+          yield* Effect.interruptible(turnOptions?.beforeSubmit() ?? Effect.void);
+          if ((yield* Ref.get(closedRef)) || nativeExited) {
+            yield* turnOptions?.notSubmitted ?? Effect.void;
+            return yield* Effect.interrupt;
+          }
+          // Admission serializes turn/start calls. Keep this request's callbacks
+          // until the next admitted turn, even if its response cannot be read.
+          nativeCompleted = turnOptions?.nativeCompleted;
+          nativeStopped = turnOptions?.nativeStopped ?? Effect.void;
           const rawResponse = yield* client.raw.request("turn/start", params);
           const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
             Effect.mapError((error) =>
