@@ -769,6 +769,11 @@ describe("ProviderCommandReactor", () => {
         const thread = (yield* Effect.promise(harness.readModel)).threads.find(
           (entry) => entry.id === threadId,
         );
+        const outcomes = yield* harness.engine.readEvents(0).pipe(
+          Stream.filter((event) => event.type === "thread.activity-appended"),
+          Stream.map((event) => event.payload.operationResult),
+          Stream.runCollect,
+        );
         for (const requestId of ["restart-message", "queued-restart-message"]) {
           expect(thread?.activities).toEqual(
             expect.arrayContaining([
@@ -778,7 +783,11 @@ describe("ProviderCommandReactor", () => {
               }),
             ]),
           );
+          expect(outcomes.filter((outcome) => outcome?.requestId === requestId)).toEqual([
+            { requestId, outcome: "interrupted" },
+          ]);
         }
+        expect(thread?.pendingOperation).toBeNull();
       }
     }),
   );
@@ -867,6 +876,35 @@ describe("ProviderCommandReactor", () => {
           thread?.activities.some((activity) => activity.summary === "Queued message cancelled"),
         ).toBe(false);
       }),
+  );
+
+  effectIt.effect("records an interrupted request when session preparation interrupts itself", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({ startSessionEffect: () => Effect.interrupt }),
+      );
+      const events = yield* harness.engine.subscribeDomainEvents;
+      const result = yield* events.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "thread.activity-appended" &&
+            event.payload.operationResult?.requestId === "interrupted-preparation",
+        ),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* dispatchTestTurn(harness.engine, "interrupted-preparation", "hello");
+      const receipts = yield* Fiber.join(result);
+      expect(receipts[0]).toMatchObject({
+        payload: {
+          operationResult: { requestId: "interrupted-preparation", outcome: "interrupted" },
+          activity: { kind: "provider.turn.start.interrupted" },
+        },
+      });
+      expect((yield* Effect.promise(harness.readModel)).threads[0]?.pendingOperation).toBeNull();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+    }),
   );
 
   effectIt.effect("cancels compaction preparation before stopping its previous session", () =>
@@ -3900,90 +3938,68 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
-  it("restarts the provider session when runtime mode is updated on the thread", async () => {
-    const harness = await createHarness();
-    const now = "2026-01-01T00:00:00.000Z";
+  effectIt.effect(
+    "waits for a runtime-mode restart before sending after the command queue drains",
+    () =>
+      Effect.gen(function* () {
+        const firstSent = yield* Deferred.make<void>();
+        const restartStarted = yield* Deferred.make<void>();
+        const releaseRestart = yield* Deferred.make<void>();
+        const secondSent = yield* Deferred.make<void>();
+        let configuredSession: ProviderSession | undefined;
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            startSessionEffect: (session) =>
+              Effect.gen(function* () {
+                if (configuredSession !== undefined) {
+                  yield* Deferred.succeed(restartStarted, undefined);
+                  yield* Deferred.await(releaseRestart);
+                }
+                configuredSession = session;
+                return session;
+              }),
+            sendTurnEffect: (input) =>
+              Effect.gen(function* () {
+                expect(configuredSession?.runtimeMode).toBe(
+                  input.input === "first" ? "approval-required" : "full-access",
+                );
+                yield* Deferred.succeed(
+                  input.input === "first" ? firstSent : secondSent,
+                  undefined,
+                );
+                return { threadId: input.threadId, turnId: asTurnId("turn-1") };
+              }),
+          }),
+        );
+        yield* dispatchTestTurn(harness.engine, "runtime-mode-first", "first");
+        yield* Deferred.await(firstSent);
+        yield* harness.engine.dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("cmd-runtime-mode-set"),
+          threadId: ThreadId.make("thread-1"),
+          runtimeMode: "full-access",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+        yield* Deferred.await(restartStarted);
+        yield* Effect.promise(harness.drain);
+        expect(configuredSession?.runtimeMode).toBe("approval-required");
 
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.runtime-mode.set",
-        commandId: CommandId.make("cmd-runtime-mode-set-initial-full-access"),
-        threadId: ThreadId.make("thread-1"),
-        runtimeMode: "full-access",
-        createdAt: now,
+        yield* dispatchTestTurn(harness.engine, "runtime-mode-second", "second");
+        yield* Effect.promise(harness.drain);
+        expect(harness.sendTurn).toHaveBeenCalledOnce();
+        yield* Deferred.succeed(releaseRestart, undefined);
+        yield* Deferred.await(secondSent);
+
+        expect(harness.startSession).toHaveBeenCalledTimes(2);
+        expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+          threadId: ThreadId.make("thread-1"),
+          resumeCursor: { opaque: "resume-1" },
+          runtimeMode: "full-access",
+        });
+        const thread = (yield* Effect.promise(harness.readModel)).threads[0];
+        expect(thread?.session?.runtimeMode).toBe("full-access");
       }),
-    );
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-runtime-mode-1"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-runtime-mode-1"),
-          role: "user",
-          text: "first",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "full-access",
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(() => harness.startSession.mock.calls.length === 1);
-    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.runtime-mode.set",
-        commandId: CommandId.make("cmd-runtime-mode-set-1"),
-        threadId: ThreadId.make("thread-1"),
-        runtimeMode: "approval-required",
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(async () => {
-      const readModel = await harness.readModel();
-      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-      return thread?.runtimeMode === "approval-required";
-    });
-    await waitFor(() => harness.startSession.mock.calls.length === 2);
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.start",
-        commandId: CommandId.make("cmd-turn-start-runtime-mode-2"),
-        threadId: ThreadId.make("thread-1"),
-        message: {
-          messageId: asMessageId("user-message-runtime-mode-2"),
-          role: "user",
-          text: "second",
-          attachments: [],
-        },
-        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-        runtimeMode: "full-access",
-        createdAt: now,
-      }),
-    );
-
-    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
-
-    expect(harness.stopSession.mock.calls.length).toBe(0);
-    expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
-      threadId: ThreadId.make("thread-1"),
-      resumeCursor: { opaque: "resume-1" },
-      runtimeMode: "approval-required",
-    });
-    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
-      threadId: ThreadId.make("thread-1"),
-    });
-
-    const readModel = await harness.readModel();
-    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
-    expect(thread?.session?.threadId).toBe("thread-1");
-    expect(thread?.session?.runtimeMode).toBe("approval-required");
-  });
+  );
 
   it("does not inject derived model options when restarting claude on runtime mode changes", async () => {
     const harness = await createHarness({

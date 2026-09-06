@@ -97,6 +97,7 @@ interface PendingSessionCommand {
     { type: "thread.turn-start-requested" | "thread.runtime-mode-set" }
   >;
   preparing: boolean;
+  cancelledBeforeSend: boolean;
   fiber: Fiber.Fiber<void> | undefined;
 }
 type ProviderCommandInput =
@@ -354,7 +355,12 @@ const make = Effect.gen(function* () {
       pending: new Set<PendingSessionCommand>(),
     };
     sessionCommands.set(threadId, commands);
-    const command: PendingSessionCommand = { event, preparing: true, fiber: undefined };
+    const command: PendingSessionCommand = {
+      event,
+      preparing: true,
+      cancelledBeforeSend: false,
+      fiber: undefined,
+    };
     commands.pending.add(command);
     command.fiber = yield* run(commands.preparation, command).pipe(
       Effect.ensuring(
@@ -1666,8 +1672,13 @@ const make = Effect.gen(function* () {
           Effect.asVoid,
         );
       }).pipe(
-        Effect.catchCause(recoverTurnStartFailure),
-        Effect.onInterrupt(() => recoverTurnStartFailure(Cause.interrupt())),
+        Effect.catchCause((cause) =>
+          Cause.hasInterruptsOnly(cause) ? Effect.interrupt : recoverTurnStartFailure(cause),
+        ),
+        Effect.onInterrupt(() =>
+          // Interrupt and stop own the visible result for requests they cancel before send.
+          command.cancelledBeforeSend ? Effect.void : recoverTurnStartFailure(Cause.interrupt()),
+        ),
       ),
     );
   });
@@ -1973,6 +1984,7 @@ const make = Effect.gen(function* () {
       const pending = [...(sessionCommands.get(event.payload.threadId)?.pending ?? [])];
       for (const command of pending) {
         if (command.preparing && command.event.type === "thread.turn-start-requested") {
+          command.cancelledBeforeSend = true;
           delayed.add(command.event);
         }
       }
@@ -2159,6 +2171,7 @@ const make = Effect.gen(function* () {
   return {
     start,
     drain: Effect.gen(function* () {
+      // Parked session commands and native work have their own completion signals.
       yield* worker.drain;
       yield* threadTitleRegenerationWorker.drain;
     }),
