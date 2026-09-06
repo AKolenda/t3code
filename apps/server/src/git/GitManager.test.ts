@@ -1580,6 +1580,26 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       );
       expect(ghCalls).toHaveLength(callsBeforeMerge + 2);
 
+      scenario.prListByHeadSelector = {
+        ...scenario.prListByHeadSelector,
+        // Fake gh returns raw JSON stdout at the CLI boundary.
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        [headBranch]: JSON.stringify([
+          { ...pullRequest, state: "MERGED", mergedAt: merge.mergedAt },
+        ]),
+      };
+      // Retiring a confirmed merge must retire cached open answers that depended on it.
+      for (let number = 100; number < 100 + 2_048; number++) {
+        yield* manager.observePullRequestMerge({
+          ...merge,
+          url: `https://github.com/owner/repository/pull/${number}`,
+        });
+      }
+      expect((yield* manager.branchPullRequest({ cwd: repoDir, branch: headBranch }))?.state).toBe(
+        "merged",
+      );
+      expect((yield* manager.status({ cwd: worktreeDir })).pr?.state).toBe("merged");
+
       scenario.failAfterCalls = ghCalls.length;
       scenario.failWith = new GitHubCli.GitHubCliUnavailableError({
         command: "gh",
@@ -1591,62 +1611,83 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
-  it.effect("keeps a confirmed merge after a late open response", () =>
-    Effect.gen(function* () {
-      const repoDir = yield* makeTempDir("t3code-git-manager-");
-      yield* initRepo(repoDir);
-      const remoteDir = yield* createBareRemote();
-      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
-      const branch = "feature/late-merge";
-      yield* runGit(repoDir, ["checkout", "-b", branch]);
-      yield* runGit(repoDir, ["push", "-u", "origin", branch]);
-      const started = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      const pullRequest = {
-        number: 42,
-        title: "Late response",
-        url: "https://github.com/owner/repository/pull/42",
-        baseRefName: "main",
-        headRefName: branch,
-        state: "OPEN",
-        updatedAt: "2026-09-01T00:00:00Z",
-      };
-      const { manager, ghCalls } = yield* makeManager({
-        ghScenario: {
-          beforePrListResult: Deferred.succeed(started, undefined).pipe(
-            Effect.andThen(Deferred.await(release)),
-          ),
-          prListSequence: [
-            // Fake gh returns raw JSON stdout at the CLI boundary.
-            // @effect-diagnostics-next-line preferSchemaOverJson:off
-            JSON.stringify([pullRequest]),
-            // @effect-diagnostics-next-line preferSchemaOverJson:off
-            JSON.stringify([pullRequest]),
-          ],
-        },
-      });
-      const lookup = yield* manager
-        .branchPullRequest({ cwd: repoDir, branch })
-        .pipe(Effect.forkChild);
-      yield* Deferred.await(started);
-      const merge = {
-        provider: "github" as const,
-        url: pullRequest.url,
-        mergedAt: "2026-09-03T00:00:00.000Z",
-      };
-      expect(yield* manager.observePullRequestMerge(merge)).toEqual([]);
-      yield* Deferred.succeed(release, undefined);
+  for (const retireConfirmations of [false, true]) {
+    it.effect(
+      `keeps a confirmed merge after a late open response, retirement=${retireConfirmations}`,
+      () =>
+        Effect.gen(function* () {
+          const repoDir = yield* makeTempDir("t3code-git-manager-");
+          yield* initRepo(repoDir);
+          const remoteDir = yield* createBareRemote();
+          yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+          const branch = "feature/late-merge";
+          yield* runGit(repoDir, ["checkout", "-b", branch]);
+          yield* runGit(repoDir, ["push", "-u", "origin", branch]);
+          const started = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const pullRequest = {
+            number: 42,
+            title: "Late response",
+            url: "https://github.com/owner/repository/pull/42",
+            baseRefName: "main",
+            headRefName: branch,
+            state: "OPEN",
+            updatedAt: "2026-09-01T00:00:00Z",
+          };
+          const { manager, ghCalls } = yield* makeManager({
+            ghScenario: {
+              beforePrListResult: Deferred.succeed(started, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+              ),
+              prListSequence: [
+                // Fake gh returns raw JSON stdout at the CLI boundary.
+                // @effect-diagnostics-next-line preferSchemaOverJson:off
+                JSON.stringify([pullRequest]),
+                // @effect-diagnostics-next-line preferSchemaOverJson:off
+                JSON.stringify([
+                  {
+                    ...pullRequest,
+                    ...(retireConfirmations
+                      ? {
+                          state: "MERGED",
+                          mergedAt: "2026-09-03T00:00:00.000Z",
+                          updatedAt: "2026-09-03T00:00:00.000Z",
+                        }
+                      : {}),
+                  },
+                ]),
+              ],
+            },
+          });
+          const lookup = yield* manager
+            .branchPullRequest({ cwd: repoDir, branch })
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(started);
+          const merge = {
+            provider: "github" as const,
+            url: pullRequest.url,
+            mergedAt: "2026-09-03T00:00:00.000Z",
+          };
+          expect(yield* manager.observePullRequestMerge(merge)).toEqual([]);
+          for (let number = 100; retireConfirmations && number < 100 + 2_048; number++) {
+            yield* manager.observePullRequestMerge({
+              ...merge,
+              url: `https://github.com/owner/repository/pull/${number}`,
+            });
+          }
+          yield* Deferred.succeed(release, undefined);
 
-      expect(yield* Fiber.join(lookup)).toEqual({
-        state: "merged",
-        updatedAt: merge.mergedAt,
-        closedAt: null,
-        mergedAt: merge.mergedAt,
-      });
-      expect((yield* manager.status({ cwd: repoDir })).pr?.state).toBe("merged");
-      expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(2);
-    }),
-  );
+          expect(yield* Fiber.join(lookup)).toEqual({
+            state: "merged",
+            updatedAt: merge.mergedAt,
+            closedAt: null,
+            mergedAt: merge.mergedAt,
+          });
+          expect((yield* manager.status({ cwd: repoDir })).pr?.state).toBe("merged");
+          expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(2);
+        }),
+    );
+  }
 
   it.effect("rechecks a warm branch association before applying an older PR's merge", () =>
     Effect.gen(function* () {

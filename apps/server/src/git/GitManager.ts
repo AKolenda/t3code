@@ -1027,6 +1027,7 @@ export const make = Effect.gen(function* () {
   // provider's full PR URL, including its host, port and repository path.
   // Keep it separate so an older in-flight lookup cannot restore an open state.
   let mergeRevision = 0;
+  let retiredThroughMergeRevision = -1;
   const mergedPrByIdentity = new Map<
     string,
     { readonly mergedAt: DateTime.Utc; readonly revision: number }
@@ -1091,6 +1092,14 @@ export const make = Effect.gen(function* () {
       },
     },
   );
+  const readCurrentPrLookup = Effect.fn("readCurrentPrLookup")(function* (key: string) {
+    let result = yield* Cache.get(prLookupCache, key);
+    while (result.mergeRevision <= retiredThroughMergeRevision) {
+      yield* Cache.invalidateWhen(prLookupCache, key, (value) => value === result);
+      result = yield* Cache.get(prLookupCache, key);
+    }
+    return result;
+  });
   // A transient lookup failure (rate limit, network blip) must not clear an
   // already-known PR badge, so the last successful answer per branch sticks
   // around as the fallback. Keep the resolved head context with it so a
@@ -1172,7 +1181,7 @@ export const make = Effect.gen(function* () {
         yield* Cache.invalidate(prLookupCache, cacheKey);
       }
     }
-    return yield* Cache.get(prLookupCache, cacheKey).pipe(
+    return yield* readCurrentPrLookup(cacheKey).pipe(
       Effect.map(({ latest, headContext }) => {
         if (!latest) return { pr: null, provider: null, headContext };
         const observed = withObservedMerge(latest);
@@ -2152,7 +2161,7 @@ export const make = Effect.gen(function* () {
       localBranchExists,
       ...(localBranchExists ? {} : { remoteName }),
     });
-    let cached = yield* Cache.get(prLookupCache, cacheKey);
+    let cached = yield* readCurrentPrLookup(cacheKey);
     // The cached head context may have resolved on a different remote than
     // the saved upstream: a branch tracking origin/main but pushed to a fork
     // is looked up on the fork. Verify against the remote the lookup used.
@@ -2189,10 +2198,11 @@ export const make = Effect.gen(function* () {
       const observed =
         cached.latest === null ? undefined : mergedPrByIdentity.get(prIdentity(cached.latest));
       const predatesMerge = observed !== undefined && cached.mergeRevision < observed.revision;
-      if (sameIdentity && !predatesMerge) break;
+      if (sameIdentity && !predatesMerge && cached.mergeRevision > retiredThroughMergeRevision)
+        break;
 
       yield* Cache.invalidateWhen(prLookupCache, cacheKey, (value) => value === cached);
-      cached = yield* Cache.get(prLookupCache, cacheKey);
+      cached = yield* readCurrentPrLookup(cacheKey);
       currentIdentity = yield* resolvePrLookupRepositoryIdentity(
         cacheCwd,
         branch,
@@ -2226,14 +2236,22 @@ export const make = Effect.gen(function* () {
     "observePullRequestMerge",
   )(function* (input) {
     const identity = prIdentity(input);
-    if (!mergedPrByIdentity.has(identity) && mergedPrByIdentity.size >= PR_LOOKUP_CACHE_CAPACITY) {
-      const oldest = mergedPrByIdentity.keys().next().value;
-      if (oldest !== undefined) mergedPrByIdentity.delete(oldest);
+    const retireLookups =
+      !mergedPrByIdentity.has(identity) && mergedPrByIdentity.size >= PR_LOOKUP_CACHE_CAPACITY;
+    if (retireLookups) {
+      // Retire the whole batch with its cached answers. A version check makes
+      // in-flight reads retry too, without keeping another identity index.
+      retiredThroughMergeRevision = mergeRevision;
+      mergedPrByIdentity.clear();
     }
     const mergedAt = DateTime.makeUnsafe(input.mergedAt);
     mergedPrByIdentity.set(identity, { mergedAt, revision: ++mergeRevision });
-    const branches: Array<{ readonly cwd: string; readonly branch: string }> = [];
+    if (retireLookups) {
+      yield* Cache.invalidateAll(prLookupCache);
+      yield* Cache.invalidateAll(remoteStatusResultCache);
+    }
     const cwds = new Set<string>();
+    const branches: Array<{ readonly cwd: string; readonly branch: string }> = [];
     for (const [branchKey, known] of lastKnownPrByBranchKey) {
       if (known.pr?.url !== input.url || known.provider !== input.provider) continue;
       const [cwd = "", branch = ""] = branchKey.split("\u0000");
