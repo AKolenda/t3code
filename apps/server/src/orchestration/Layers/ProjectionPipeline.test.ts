@@ -4348,7 +4348,7 @@ engineLayer("pending operation facts", (it) => {
 
         // B's response arrives before turn.started. No public running state is invented.
         yield* accept("b", "turn-b");
-        yield* check(null, "a");
+        yield* check("b", "a");
         const waiting =
           yield* sql`SELECT state, started_at FROM projection_turns WHERE thread_id = ${threadId} AND turn_id = 'turn-b'`;
         assert.deepEqual(waiting, [{ state: "pending", started_at: null }]);
@@ -4375,7 +4375,7 @@ engineLayer("pending operation facts", (it) => {
           reconnect.activities
             .filter((activity) => activity.turnId === "turn-c")
             .map((activity) => turnStartAcceptance(activity)?.requestId),
-          ["d", "c"],
+          [MessageId.make("d"), MessageId.make("c")],
         );
         yield* session("running", "turn-c");
         yield* check(null, "d");

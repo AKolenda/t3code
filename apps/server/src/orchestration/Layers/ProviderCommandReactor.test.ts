@@ -1156,12 +1156,56 @@ describe("ProviderCommandReactor", () => {
         });
         expect(
           (yield* Effect.promise(() => harness.readModel())).threads[0]?.pendingOperation,
-        ).toBeNull();
+        ).toEqual(outcome === "accepted" ? { kind: "turn", requestId: "correlated-send" } : null);
+        if (outcome === "accepted") {
+          yield* harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("correlated-turn-started"),
+            threadId: ThreadId.make("thread-1"),
+            session: {
+              threadId: ThreadId.make("thread-1"),
+              status: "running",
+              providerName: "codex",
+              runtimeMode: "approval-required",
+              activeTurnId: TurnId.make("returned-turn"),
+              lastError: null,
+              updatedAt: createdAt,
+            },
+            createdAt,
+          });
+          expect(
+            (yield* Effect.promise(() => harness.readModel())).threads[0]?.pendingOperation,
+          ).toBeNull();
+        }
         expect(
           (yield* Effect.promise(() => harness.readModel())).threads[0]?.proposedPlans[0]
             ?.implementedAt,
         ).toBe(outcome === "accepted" ? createdAt : null);
         if (outcome === "accepted") {
+          // Another sender can have read the unimplemented plan before this send finished.
+          yield* harness.engine.dispatch({
+            type: "thread.proposed-plan.upsert",
+            commandId: CommandId.make("late-source-plan-claim"),
+            threadId: ThreadId.make("thread-1"),
+            onlyIfUnimplemented: true,
+            proposedPlan: {
+              id: "source-plan",
+              turnId: null,
+              planMarkdown: "stale copy",
+              implementedAt: "2026-01-01T00:00:01.000Z",
+              implementationThreadId: ThreadId.make("other-thread"),
+              createdAt,
+              updatedAt: "2026-01-01T00:00:01.000Z",
+            },
+            createdAt,
+          });
+          expect(
+            (yield* Effect.promise(() => harness.readModel())).threads[0]?.proposedPlans[0],
+          ).toMatchObject({
+            implementationThreadId: "thread-1",
+            implementedAt: createdAt,
+            planMarkdown: "# Plan",
+          });
           expect(receipts[0]).toMatchObject({
             payload: {
               activity: {
@@ -1254,55 +1298,131 @@ describe("ProviderCommandReactor", () => {
       }),
   );
 
-  effectIt.effect("does not let an older send failure stop an adopted newer request", () =>
+  effectIt.effect("clears pending compaction when a native sign-out stops the session", () =>
     Effect.gen(function* () {
-      const firstStarted = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
-      const failFirst = yield* Deferred.make<void>();
-      const secondSent = yield* Deferred.make<void>();
-      const harness = yield* Effect.promise(() => createHarness());
-      harness.sendTurn
-        .mockImplementationOnce(() =>
-          Effect.gen(function* () {
-            yield* Deferred.succeed(firstStarted, yield* Effect.fiber);
-            yield* Deferred.await(failFirst);
-            return yield* new ProviderAdapterRequestError({
-              provider: "codex",
-              method: "turn.start",
-              detail: "first send failed late",
-            });
-          }),
-        )
-        .mockImplementationOnce(() =>
-          Deferred.succeed(secondSent, undefined).pipe(
-            Effect.as({ threadId: ThreadId.make("thread-1"), turnId: TurnId.make("second-turn") }),
-          ),
-        );
-      yield* dispatchTestTurn(harness.engine, "first-send", "first");
-      const firstFiber = yield* Deferred.await(firstStarted);
-      yield* dispatchTestTurn(harness.engine, "second-send", "second");
-      yield* Deferred.await(secondSent);
-      yield* harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("second-send-started"),
-        threadId: ThreadId.make("thread-1"),
-        session: {
-          threadId: ThreadId.make("thread-1"),
-          status: "running",
-          providerName: "codex",
-          providerInstanceId: ProviderInstanceId.make("codex"),
-          runtimeMode: "approval-required",
-          activeTurnId: TurnId.make("second-turn"),
-          lastError: null,
-          updatedAt: "2026-01-01T00:00:00.000Z",
-        },
-        createdAt: "2026-01-01T00:00:00.000Z",
-      });
-      yield* Deferred.succeed(failFirst, undefined);
-      yield* Fiber.await(firstFiber);
-      const thread = (yield* Effect.promise(() => harness.readModel())).threads[0];
-      expect(thread?.latestTurn?.requestId).toBe("second-send");
-      expect(thread?.session).toMatchObject({ status: "running", activeTurnId: "second-turn" });
+      const compactStarted = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+      const finishCompact = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          compactThreadEffect: () =>
+            Effect.gen(function* () {
+              yield* Deferred.succeed(compactStarted, yield* Effect.fiber);
+              yield* Deferred.await(finishCompact);
+            }),
+          tryHandlePromptCommandEffect: ({ text }) => Effect.succeed(text === "/logout"),
+        }),
+      );
+      const events = yield* harness.engine.subscribeDomainEvents;
+      const accepted = yield* events.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "thread.activity-appended" &&
+            event.payload.operationResult?.requestId === "before-sign-out",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkChild,
+      );
+      yield* dispatchTestTurn(harness.engine, "before-sign-out", "hello");
+      yield* Fiber.join(accepted);
+      yield* readyAfterTestTurn(harness.engine, "before-sign-out");
+      yield* dispatchTestTurn(harness.engine, "compact-sign-out", "/compact");
+      const compactFiber = yield* Deferred.await(compactStarted);
+      const stopped = yield* events.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "thread.session-set" && event.payload.session.status === "stopped",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkChild,
+      );
+      yield* dispatchTestTurn(harness.engine, "sign-out", "/logout");
+      yield* Fiber.join(stopped);
+      const signedOut = (yield* Effect.promise(() => harness.readModel())).threads[0];
+      expect(signedOut?.pendingOperation).toBeNull();
+      expect(signedOut?.session?.status).toBe("stopped");
+      yield* Deferred.succeed(finishCompact, undefined);
+      yield* Fiber.await(compactFiber);
+      const finished = (yield* Effect.promise(() => harness.readModel())).threads[0];
+      expect(finished?.pendingOperation).toBeNull();
+      expect(finished?.session?.status).toBe("stopped");
     }),
+  );
+
+  effectIt.effect.each([false, true])(
+    "ignores older send failure after newer acceptance, with start: %s",
+    (secondStarted) =>
+      Effect.gen(function* () {
+        const firstStarted = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+        const failFirst = yield* Deferred.make<void>();
+        const secondSent = yield* Deferred.make<void>();
+        const harness = yield* Effect.promise(() => createHarness());
+        harness.sendTurn
+          .mockImplementationOnce(() =>
+            Effect.gen(function* () {
+              yield* Deferred.succeed(firstStarted, yield* Effect.fiber);
+              yield* Deferred.await(failFirst);
+              return yield* new ProviderAdapterRequestError({
+                provider: "codex",
+                method: "turn.start",
+                detail: "first send failed late",
+              });
+            }),
+          )
+          .mockImplementationOnce(() =>
+            Deferred.succeed(secondSent, undefined).pipe(
+              Effect.as({
+                threadId: ThreadId.make("thread-1"),
+                turnId: TurnId.make("second-turn"),
+              }),
+            ),
+          );
+        yield* dispatchTestTurn(harness.engine, "first-send", "first");
+        const firstFiber = yield* Deferred.await(firstStarted);
+        const events = yield* harness.engine.subscribeDomainEvents;
+        const accepted = yield* events.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "thread.activity-appended" &&
+              event.payload.operationResult?.requestId === "second-send",
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkChild,
+        );
+        yield* dispatchTestTurn(harness.engine, "second-send", "second");
+        yield* Deferred.await(secondSent);
+        yield* Fiber.join(accepted);
+        if (secondStarted)
+          yield* harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("second-send-started"),
+            threadId: ThreadId.make("thread-1"),
+            session: {
+              threadId: ThreadId.make("thread-1"),
+              status: "running",
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "approval-required",
+              activeTurnId: TurnId.make("second-turn"),
+              lastError: null,
+              updatedAt: "2026-01-01T00:00:00.000Z",
+            },
+            createdAt: "2026-01-01T00:00:00.000Z",
+          });
+        yield* Deferred.succeed(failFirst, undefined);
+        yield* Fiber.await(firstFiber);
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads[0];
+        expect(thread?.latestTurn?.requestId).toBe(secondStarted ? "second-send" : undefined);
+        expect(thread?.pendingOperation).toEqual(
+          secondStarted ? null : { kind: "turn", requestId: "second-send" },
+        );
+        expect(thread?.session).toMatchObject({
+          status: secondStarted ? "running" : "starting",
+          activeTurnId: secondStarted ? "second-turn" : null,
+        });
+      }),
   );
 
   effectIt.effect.each(["/COMPACT", "queued message"])(

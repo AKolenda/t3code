@@ -16,6 +16,7 @@ import {
   isImportedAgentSessionMessageId,
   getThreadPendingOperation,
   pendingOperationAfterEvent,
+  acceptedRequestIdForEvent,
   bindAcceptedTurn,
   bindTurnFromActivities,
   turnStartAcceptance,
@@ -482,7 +483,12 @@ export function applyThreadDetailEvent(
         thread: {
           ...thread,
           session: event.payload.session,
-          pendingOperation: pendingOperationAfterEvent(getThreadPendingOperation(thread), event),
+          pendingOperation: pendingOperationAfterEvent(
+            getThreadPendingOperation(thread),
+            event,
+            undefined,
+            acceptedRequestIdForEvent(thread, event),
+          ),
           latestTurn,
           updatedAt: event.occurredAt,
         },
@@ -639,7 +645,12 @@ export function applyThreadDetailEvent(
         event.payload.activity.kind === "provider.turn.start.accepted"
           ? { ...event.payload.activity, sequence: event.sequence }
           : event.payload.activity;
-      const pendingOperation = pendingOperationAfterEvent(getThreadPendingOperation(thread), event);
+      const pendingOperation = pendingOperationAfterEvent(
+        getThreadPendingOperation(thread),
+        event,
+        undefined,
+        acceptedRequestIdForEvent(thread, event),
+      );
       const latestTurn = bindAcceptedTurn(thread.latestTurn, turnStartAcceptance(activity));
       // A resolvable context-window update supersedes earlier resolvable ones
       // for the same turn: consumers only read the latest value (walking the

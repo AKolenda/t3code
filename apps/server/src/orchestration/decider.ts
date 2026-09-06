@@ -1433,11 +1433,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.proposed-plan.upsert": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      const existing = thread.proposedPlans.find((plan) => plan.id === command.proposedPlan.id);
+      if (command.onlyIfUnimplemented && !existing)
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "Source plan no longer exists.",
+        });
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -1448,7 +1454,17 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         type: "thread.proposed-plan-upserted",
         payload: {
           threadId: command.threadId,
-          proposedPlan: command.proposedPlan,
+          proposedPlan:
+            command.onlyIfUnimplemented && existing
+              ? existing.implementedAt !== null
+                ? existing
+                : {
+                    ...existing,
+                    implementedAt: command.proposedPlan.implementedAt,
+                    implementationThreadId: command.proposedPlan.implementationThreadId,
+                    updatedAt: command.proposedPlan.updatedAt,
+                  }
+              : command.proposedPlan,
         },
       };
     }

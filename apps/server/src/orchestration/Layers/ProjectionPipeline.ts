@@ -1236,11 +1236,13 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
         case "thread.activity-appended": {
           const accepted = turnStartAcceptance(event.payload.activity);
+          let acceptedTurnStarted = false;
           if (accepted) {
             const current = yield* projectionTurnRepository.getByTurnId({
               threadId: event.payload.threadId,
               turnId: accepted.turnId,
             });
+            acceptedTurnStarted = Option.isSome(current) && current.value.state !== "pending";
             if (Option.isNone(current) || current.value.pendingMessageId === null) {
               yield* projectionTurnRepository.upsertByTurnId({
                 ...(Option.isSome(current)
@@ -1271,26 +1273,49 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           );
           if (Option.isNone(existing)) return;
           const pending = yield* resolvePendingOperation(existing.value);
-          if (pendingOperationAfterEvent(pending, event) === null) {
+          if (
+            pendingOperationAfterEvent(
+              pending,
+              event,
+              undefined,
+              accepted && acceptedTurnStarted ? accepted.requestId : undefined,
+            ) === null
+          ) {
             yield* projectionTurnRepository.deletePendingTurnStartByThreadId(event.payload);
           }
           return;
         }
 
         case "thread.session-set": {
+          const turnId = event.payload.session.activeTurnId;
+          const acceptedTurn =
+            turnId !== null && event.payload.session.status === "running"
+              ? yield* projectionTurnRepository.getByTurnId({
+                  threadId: event.payload.threadId,
+                  turnId,
+                })
+              : Option.none();
           const pending = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
             threadId: event.payload.threadId,
           });
           if (Option.isSome(pending)) {
             const operation = yield* resolvePendingOperation(pending.value);
-            if (pendingOperationAfterEvent(operation, event) === null) {
+            if (
+              pendingOperationAfterEvent(
+                operation,
+                event,
+                undefined,
+                Option.isSome(acceptedTurn)
+                  ? (acceptedTurn.value.pendingMessageId ?? undefined)
+                  : undefined,
+              ) === null
+            ) {
               yield* projectionTurnRepository.deletePendingTurnStartByThreadId(event.payload);
             }
           }
           // Only old logs infer a request binding from the next running session.
           const pendingTurnStart =
             event.payload.operationResult === undefined ? pending : Option.none();
-          const turnId = event.payload.session.activeTurnId;
           if (turnId === null || event.payload.session.status !== "running") {
             // Leaving the "running" session status is the turn-end signal:
             // settle still-running turns so their duration reflects the whole
@@ -1343,10 +1368,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             { concurrency: 1 },
           );
 
-          const existingTurn = yield* projectionTurnRepository.getByTurnId({
-            threadId: event.payload.threadId,
-            turnId,
-          });
+          const existingTurn = acceptedTurn;
           if (Option.isSome(existingTurn)) {
             const nextState =
               existingTurn.value.state === "completed" || existingTurn.value.state === "error"

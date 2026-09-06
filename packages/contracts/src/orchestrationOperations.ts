@@ -75,6 +75,30 @@ export function bindTurnFromActivities(
   return turn;
 }
 
+/** Identifies a request only after its accepted provider turn is visible. */
+export function acceptedRequestIdForEvent(
+  thread: Pick<OrchestrationThread, "latestTurn" | "activities">,
+  event: OrchestrationEvent,
+): MessageId | undefined {
+  if (event.type === "thread.activity-appended") {
+    const accepted = turnStartAcceptance(event.payload.activity);
+    return accepted && thread.latestTurn?.turnId === accepted.turnId
+      ? accepted.requestId
+      : undefined;
+  }
+  if (event.type !== "thread.session-set" || event.payload.session.status !== "running")
+    return undefined;
+  const turnId = event.payload.session.activeTurnId;
+  if (thread.latestTurn?.turnId === turnId && thread.latestTurn.requestId !== undefined)
+    return thread.latestTurn.requestId;
+  for (const activity of thread.activities) {
+    if (activity.turnId !== turnId) continue;
+    const accepted = turnStartAcceptance(activity);
+    if (accepted) return accepted.requestId;
+  }
+  return undefined;
+}
+
 function operationResultForEvent(
   pending: OrchestrationPendingOperation,
   event: OrchestrationEvent,
@@ -112,6 +136,7 @@ export function pendingOperationAfterEvent(
   pending: OrchestrationPendingOperation | null,
   event: OrchestrationEvent,
   legacyMessage?: CommandMessage,
+  acceptedRequestId?: MessageId,
 ): OrchestrationPendingOperation | null {
   switch (event.type) {
     case "thread.created":
@@ -133,6 +158,12 @@ export function pendingOperationAfterEvent(
       if (pending === null) return null;
       const result = operationResultForEvent(pending, event);
       if (result !== null) {
+        if (
+          event.type === "thread.activity-appended" &&
+          turnStartAcceptance(event.payload.activity) &&
+          acceptedRequestId !== result.requestId
+        )
+          return pending;
         return result.requestId === pending.requestId ? null : pending;
       }
       if (event.type === "thread.session-set") {
@@ -140,6 +171,7 @@ export function pendingOperationAfterEvent(
         // A stopped session ends all requests. Other modern lifecycle updates
         // can belong to an older turn and cannot identify the pending request.
         if (session.status === "stopped") return null;
+        if (session.status === "running" && acceptedRequestId === pending.requestId) return null;
         if (event.payload.operationResult !== undefined) return pending;
         if (
           session.status === "error" ||

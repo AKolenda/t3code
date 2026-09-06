@@ -4,6 +4,7 @@ import {
   isImportedAgentSessionMessageId,
   getThreadPendingOperation,
   pendingOperationAfterEvent,
+  acceptedRequestIdForEvent,
   bindAcceptedTurn,
   bindTurnFromActivities,
   turnStartAcceptance,
@@ -675,7 +676,12 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             session,
-            pendingOperation: pendingOperationAfterEvent(getThreadPendingOperation(thread), event),
+            pendingOperation: pendingOperationAfterEvent(
+              getThreadPendingOperation(thread),
+              event,
+              undefined,
+              acceptedRequestIdForEvent(thread, event),
+            ),
             latestTurn: bindTurnFromActivities(
               session.status === "running" && session.activeTurnId !== null
                 ? {
@@ -927,6 +933,8 @@ export function projectEvent(
               pendingOperation: pendingOperationAfterEvent(
                 getThreadPendingOperation(thread),
                 event,
+                undefined,
+                acceptedRequestIdForEvent(thread, event),
               ),
               updatedAt: event.occurredAt,
             }),
