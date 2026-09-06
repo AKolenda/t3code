@@ -10,6 +10,7 @@ import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
@@ -162,102 +163,176 @@ const cursorAdapterTestLayer = it.layer(
 );
 
 cursorAdapterTestLayer("CursorAdapterLive", (it) => {
-  for (const failPreparation of [false, true]) {
-    it.effect(
-      `shares a turn with a steer during initial preparation${failPreparation ? " failure" : ""}`,
-      () =>
-        Effect.gen(function* () {
-          const threadId = ThreadId.make("cursor-steer-during-configuration");
-          const configurationStarted = yield* Deferred.make<void>();
-          const releaseConfiguration = yield* Deferred.make<void>();
-          let holdConfiguration = false;
-          let held = false;
-          const isConfigurationStart = Schema.is(
-            Schema.Struct({
-              event: Schema.Struct({
-                kind: Schema.Literal("request"),
-                payload: Schema.Struct({
-                  method: Schema.Literal("session/set_config_option"),
-                  status: Schema.Literal("started"),
-                }),
+  for (const preparation of ["configuration", "attachment", "failure"] as const) {
+    it.effect(`keeps prompt order while Cursor ${preparation} preparation is pending`, () =>
+      Effect.gen(function* () {
+        const threadId = ThreadId.make("cursor-steer-during-configuration");
+        const fileSystem = yield* FileSystem.FileSystem;
+        const failPreparation = preparation === "failure";
+        let promptStarts = 0;
+        const isPromptStart = Schema.is(
+          Schema.Struct({
+            event: Schema.Struct({
+              kind: Schema.Literal("request"),
+              payload: Schema.Struct({
+                method: Schema.Literal("session/prompt"),
+                status: Schema.Literal("started"),
               }),
             }),
-          );
-          const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
-          const adapter = yield* makeCursorAdapter(
-            decodeCursorSettings({ binaryPath: wrapperPath }),
-            {
-              nativeEventLogger: {
-                filePath: "memory://cursor-admission-configuration",
-                write: (record) =>
-                  Effect.gen(function* () {
-                    if (holdConfiguration && !held && isConfigurationStart(record)) {
-                      held = true;
-                      yield* Deferred.succeed(configurationStarted, undefined);
-                      yield* Deferred.await(releaseConfiguration);
-                    }
-                  }),
-                close: () => Effect.void,
-              },
-            },
-          );
-          yield* Effect.addFinalizer(() => Deferred.succeed(releaseConfiguration, undefined));
-          const started: ProviderRuntimeEvent[] = [];
-          const terminal =
-            yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "turn.completed" }>>();
-          yield* adapter.streamEvents.pipe(
-            Stream.runForEach((event) => {
-              if (event.type === "turn.started") started.push(event);
-              return event.type === "turn.completed"
-                ? Deferred.succeed(terminal, event)
-                : Effect.void;
+          }),
+        );
+        const configurationStarted = yield* Deferred.make<void>();
+        const releaseConfiguration = yield* Deferred.make<void>();
+        let holdConfiguration = false;
+        let held = false;
+        const isConfigurationStart = Schema.is(
+          Schema.Struct({
+            event: Schema.Struct({
+              kind: Schema.Literal("request"),
+              payload: Schema.Struct({
+                method: Schema.Literal("session/set_config_option"),
+                status: Schema.Literal("started"),
+              }),
             }),
-            Effect.forkChild,
-          );
-          yield* adapter.startSession({
+          }),
+        );
+        const directory = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-preparation-order-")),
+        );
+        const requestLog = NodePath.join(directory, "requests.ndjson");
+        const wrapperPath = yield* Effect.promise(() =>
+          makeMockAgentWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLog }),
+        );
+        const adapter = yield* makeCursorAdapter(
+          decodeCursorSettings({ binaryPath: wrapperPath }),
+          {
+            nativeEventLogger: {
+              filePath: "memory://cursor-admission-configuration",
+              write: (record) =>
+                Effect.gen(function* () {
+                  if (isPromptStart(record)) promptStarts += 1;
+                  if (
+                    preparation !== "attachment" &&
+                    holdConfiguration &&
+                    !held &&
+                    isConfigurationStart(record)
+                  ) {
+                    held = true;
+                    yield* Deferred.succeed(configurationStarted, undefined);
+                    yield* Deferred.await(releaseConfiguration);
+                  }
+                }),
+              close: () => Effect.void,
+            },
+          },
+        ).pipe(
+          Effect.provideService(FileSystem.FileSystem, {
+            ...fileSystem,
+            readFile: (path) =>
+              path.endsWith("blocked-attachment.png")
+                ? Deferred.succeed(configurationStarted, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseConfiguration)),
+                    Effect.as(new Uint8Array([1, 2, 3])),
+                  )
+                : fileSystem.readFile(path),
+          }),
+        );
+        yield* Effect.addFinalizer(() => Deferred.succeed(releaseConfiguration, undefined));
+        const started: ProviderRuntimeEvent[] = [];
+        const terminal =
+          yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "turn.completed" }>>();
+        yield* adapter.streamEvents.pipe(
+          Stream.runForEach((event) => {
+            if (event.type === "turn.started") started.push(event);
+            return event.type === "turn.completed"
+              ? Deferred.succeed(terminal, event)
+              : Effect.void;
+          }),
+          Effect.forkChild,
+        );
+        yield* adapter.startSession({
+          threadId,
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+          modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+        });
+        holdConfiguration = true;
+        const first = yield* adapter
+          .sendTurn({
             threadId,
-            cwd: process.cwd(),
-            runtimeMode: "full-access",
-            modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
-          });
-          holdConfiguration = true;
-          const first = yield* adapter
-            .sendTurn({
-              threadId,
-              input: "first",
-              attachments: failPreparation
+            input: "first",
+            attachments: failPreparation
+              ? [
+                  {
+                    type: "image",
+                    id: "missing-attachment",
+                    name: "missing.png",
+                    mimeType: "image/png",
+                    sizeBytes: 1,
+                  },
+                ]
+              : preparation === "attachment"
                 ? [
                     {
                       type: "image",
-                      id: "missing-attachment",
-                      name: "missing.png",
+                      id: "blocked-attachment",
+                      name: "blocked-attachment.png",
                       mimeType: "image/png",
-                      sizeBytes: 1,
+                      sizeBytes: 3,
                     },
                   ]
                 : [],
-              modelSelection: {
-                instanceId: ProviderInstanceId.make("cursor"),
-                model: "composer-2",
-              },
-            })
-            .pipe(Effect.forkChild);
-          yield* Deferred.await(configurationStarted);
-          const steer = yield* adapter.sendTurn({ threadId, input: "steer" });
-          yield* Deferred.succeed(releaseConfiguration, undefined);
-          if (failPreparation) {
-            const error = yield* Fiber.join(first).pipe(Effect.flip);
-            assert.equal(error._tag, "ProviderAdapterRequestError");
-          } else {
-            const initial = yield* Fiber.join(first);
-            assert.equal(initial.turnId, steer.turnId);
-          }
-          const completed = yield* Deferred.await(terminal);
-          assert.equal(completed.turnId, steer.turnId);
-          assert.equal(completed.payload.state, failPreparation ? "failed" : "completed");
-          assert.lengthOf(started, 1);
-          yield* adapter.stopSession(threadId);
-        }),
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("cursor"),
+              model: "composer-2",
+            },
+          })
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(configurationStarted);
+        const steering = yield* adapter
+          .sendTurn({
+            threadId,
+            input: "steer",
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("cursor"),
+              model: preparation === "attachment" ? "composer-2" : "default",
+            },
+          })
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        assert.equal(promptStarts, 0);
+        yield* Deferred.succeed(releaseConfiguration, undefined);
+        const steer = yield* Fiber.join(steering);
+        if (failPreparation) {
+          const error = yield* Fiber.join(first).pipe(Effect.flip);
+          assert.equal(error._tag, "ProviderAdapterRequestError");
+        } else {
+          const initial = yield* Fiber.join(first);
+          assert.equal(initial.turnId, steer.turnId);
+        }
+        const completed = yield* Deferred.await(terminal);
+        assert.equal(completed.turnId, steer.turnId);
+        assert.equal(completed.payload.state, "completed");
+        assert.lengthOf(started, 1);
+        yield* adapter.stopSession(threadId);
+        const requests = yield* Effect.promise(() => readJsonLines(requestLog));
+        const decodePromptRequest = Schema.decodeUnknownEffect(
+          Schema.Struct({
+            params: Schema.Struct({
+              prompt: Schema.Array(
+                Schema.Struct({ type: Schema.String, text: Schema.optional(Schema.String) }),
+              ),
+            }),
+          }),
+        );
+        const promptInputs = yield* Effect.forEach(
+          requests.filter((request) => request.method === "session/prompt"),
+          (request) =>
+            decodePromptRequest(request).pipe(
+              Effect.map((decoded) => decoded.params.prompt[0]?.text),
+            ),
+        );
+        assert.deepEqual(promptInputs, failPreparation ? ["steer"] : ["first", "steer"]);
+      }),
     );
   }
 
