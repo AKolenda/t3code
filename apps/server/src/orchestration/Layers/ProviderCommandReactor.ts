@@ -3,6 +3,7 @@ import {
   type ApprovalRequestId,
   type ProviderRequestFailureReason,
   OrchestrationRequestResponseFailedPayload,
+  OrchestrationProposedPlanId,
   CommandId,
   EventId,
   isContextCompactionMessage,
@@ -49,6 +50,8 @@ import { ProviderAuthService } from "../../provider/Services/ProviderAuthService
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
+import { ProjectionThreadProposedPlanRepository } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
+import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
   ProviderCommandReactor,
@@ -292,6 +295,7 @@ const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
+  const projectionThreadProposedPlans = yield* ProjectionThreadProposedPlanRepository;
   const providerAuthService = yield* ProviderAuthService;
   const providerService = yield* ProviderService;
   const checkpointCapture = yield* TurnCheckpointCapture.TurnCheckpointCapture;
@@ -1201,8 +1205,14 @@ const make = Effect.gen(function* () {
   ) {
     const source = event.payload.sourceProposedPlan;
     if (!source) return;
-    const sourceThread = yield* resolveThreadDetail(source.threadId);
-    const sourcePlan = sourceThread?.proposedPlans.find((plan) => plan.id === source.planId);
+    const sourceThread = yield* resolveThreadShell(source.threadId);
+    if (!sourceThread) return;
+    const sourcePlan = Option.getOrUndefined(
+      yield* projectionThreadProposedPlans.getByPlanId({
+        threadId: source.threadId,
+        planId: OrchestrationProposedPlanId.make(source.planId),
+      }),
+    );
     if (!sourcePlan || sourcePlan.implementedAt !== null) return;
     yield* orchestrationEngine.dispatch({
       type: "thread.proposed-plan.upsert",
@@ -1210,7 +1220,10 @@ const make = Effect.gen(function* () {
       threadId: source.threadId,
       onlyIfUnimplemented: true,
       proposedPlan: {
-        ...sourcePlan,
+        id: sourcePlan.planId,
+        turnId: sourcePlan.turnId,
+        planMarkdown: sourcePlan.planMarkdown,
+        createdAt: sourcePlan.createdAt,
         implementedAt: event.payload.createdAt,
         implementationThreadId: event.payload.threadId,
         updatedAt: event.payload.createdAt,
@@ -1908,6 +1921,7 @@ const make = Effect.gen(function* () {
               detail: "This message was cancelled before the previous turn's checkpoint finished.",
               turnId: null,
               requestId: request.payload.messageId,
+              operationResult: { requestId: request.payload.messageId, outcome: "interrupted" },
               createdAt: event.occurredAt,
             }).pipe(
               Effect.catchCause((cause) =>
@@ -2067,4 +2081,6 @@ const make = Effect.gen(function* () {
   } satisfies ProviderCommandReactorShape;
 });
 
-export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make);
+export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
+  Layer.provide(ProjectionThreadProposedPlanRepositoryLive),
+);

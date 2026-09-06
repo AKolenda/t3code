@@ -636,13 +636,16 @@ describe("ProviderCommandReactor", () => {
     };
   }
 
-  effectIt.effect.each(["thread.turn.interrupt", "thread.session.stop"] as const)(
-    "still dispatches %s when a queued cancellation activity cannot be saved",
-    (type) =>
+  effectIt.effect.each([
+    { type: "thread.turn.interrupt", failCancellationActivity: false },
+    { type: "thread.session.stop", failCancellationActivity: false },
+    { type: "thread.turn.interrupt", failCancellationActivity: true },
+    { type: "thread.session.stop", failCancellationActivity: true },
+  ] as const)(
+    "dispatches $type after queued cancellation with save failure: $failCancellationActivity",
+    ({ type, failCancellationActivity }) =>
       Effect.gen(function* () {
-        const harness = yield* Effect.promise(() =>
-          createHarness({ failCancellationActivity: true }),
-        );
+        const harness = yield* Effect.promise(() => createHarness({ failCancellationActivity }));
         const threadId = ThreadId.make("thread-1");
         const createdAt = "2026-01-01T00:00:00.000Z";
         yield* harness.engine.dispatch({
@@ -685,6 +688,10 @@ describe("ProviderCommandReactor", () => {
           createdAt,
         });
         yield* Effect.promise(harness.drain);
+        expect((yield* Effect.promise(harness.readModel)).threads[0]?.pendingOperation).toEqual({
+          kind: "turn",
+          requestId: MessageId.make("cancellation-failure-message"),
+        });
         yield* harness.engine.dispatch({
           type,
           commandId: CommandId.make("cancellation-failure-stop"),
@@ -696,6 +703,13 @@ describe("ProviderCommandReactor", () => {
           type === "thread.turn.interrupt" ? harness.interruptTurn : harness.stopSession,
         ).toHaveBeenCalledOnce();
         expect(harness.sendTurn).not.toHaveBeenCalled();
+        if (!failCancellationActivity) {
+          expect(
+            (yield* Effect.promise(harness.readModel)).threads[0]?.pendingOperation,
+          ).toBeNull();
+          const reloaded = yield* harness.snapshotQuery.getCommandReadModel();
+          expect(reloaded.threads[0]?.pendingOperation).toBeNull();
+        }
         yield* harness.checkpointCapture.complete(terminal, "captured");
       }),
   );

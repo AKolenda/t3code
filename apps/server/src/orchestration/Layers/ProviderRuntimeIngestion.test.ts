@@ -1798,8 +1798,21 @@ describe("ProviderRuntimeIngestion", () => {
       implementedAt: null,
       implementationThreadId: null,
     });
-    const implementedPlan = sourceThreadAfterStart.proposedPlans.find(
-      (entry) => entry.id === sourcePlan.id,
+    const implementedAt = "2026-01-01T00:00:30.000Z";
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.proposed-plan.upsert",
+        commandId: CommandId.make("cmd-source-plan-accepted"),
+        threadId: sourceThreadId,
+        onlyIfUnimplemented: true,
+        proposedPlan: {
+          ...sourcePlan,
+          implementedAt,
+          implementationThreadId: targetThreadId,
+          updatedAt: implementedAt,
+        },
+        createdAt: implementedAt,
+      }),
     );
     await harness.emitAndDrain([
       {
@@ -1820,7 +1833,7 @@ describe("ProviderRuntimeIngestion", () => {
     ).toMatchObject({
       planMarkdown: "# Source plan with late details",
       createdAt: sourcePlan.createdAt,
-      implementedAt: implementedPlan?.implementedAt,
+      implementedAt,
       implementationThreadId: targetThreadId,
     });
   });
