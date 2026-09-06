@@ -36,6 +36,17 @@ import {
 import { execScriptSource, writeFakeCli } from "../../testUtils/fakeCli.ts";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
+const isCompletedNativePromptLog = Schema.is(
+  Schema.Struct({
+    event: Schema.Struct({
+      kind: Schema.Literal("request"),
+      payload: Schema.Struct({
+        method: Schema.Literal("session/prompt"),
+        status: Schema.Literal("succeeded"),
+      }),
+    }),
+  }),
+);
 
 const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
 const mockAgentPath = NodePath.join(__dirname, "../../../scripts/acp-mock-agent.ts");
@@ -212,22 +223,38 @@ it("requires a settlement to match the live Grok turn", () => {
 });
 
 it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
-  it.effect("records a fresh terminal after native completion follows local cancellation", () =>
+  it.effect("retains an unresolved turn's terminal when a later parked turn is cancelled", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("grok-late-native-proof");
       const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
-      const adapter = yield* makeTestAdapter(wrapperPath);
+      const nativeRequestDone = yield* Deferred.make<void>();
+      const adapter = yield* makeTestAdapter(wrapperPath, {
+        nativeEventLogger: {
+          filePath: "memory://grok-terminal-ordering",
+          write: (record) =>
+            isCompletedNativePromptLog(record)
+              ? Deferred.succeed(nativeRequestDone, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          close: () => Effect.void,
+        },
+      });
       const nativeReply = yield* Deferred.make<void>();
       const releaseProof = yield* Deferred.make<void>();
       yield* Effect.addFinalizer(() => Deferred.succeed(releaseProof, undefined));
       const terminalBeforeProof = yield* Deferred.make<void>();
       const terminalAfterProof = yield* Deferred.make<void>();
+      const parkedTerminal = yield* Deferred.make<void>();
+      const exited = yield* Deferred.make<void>();
+      let oldTurnId: TurnId | undefined;
       let proved = false;
       const terminalEvents: Array<Extract<ProviderRuntimeEvent, { type: "turn.completed" }>> = [];
       yield* adapter.streamEvents.pipe(
         Stream.runForEach((event) => {
-          if (event.threadId !== threadId || event.type !== "turn.completed") return Effect.void;
+          if (event.threadId !== threadId) return Effect.void;
+          if (event.type === "session.exited") return Deferred.succeed(exited, undefined);
+          if (event.type !== "turn.completed") return Effect.void;
           terminalEvents.push(event);
+          if (event.turnId !== oldTurnId) return Deferred.succeed(parkedTerminal, undefined);
           return Deferred.succeed(proved ? terminalAfterProof : terminalBeforeProof, undefined);
         }),
         Effect.forkChild,
@@ -237,7 +264,10 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
         .sendTurn(
           { threadId, input: "finish this prompt" },
           {
-            beforeSubmit: () => Effect.void,
+            beforeSubmit: (turnId) =>
+              Effect.sync(() => {
+                oldTurnId = turnId;
+              }),
             nativeCompleted: () =>
               Deferred.succeed(nativeReply, undefined).pipe(
                 Effect.andThen(Deferred.await(releaseProof)),
@@ -257,13 +287,38 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
       yield* Fiber.join(sending);
       yield* Deferred.await(terminalBeforeProof);
       assert.isFalse(proved);
+      const entered = yield* Deferred.make<void>();
+      const rejected = yield* Deferred.make<void>();
+      const parked = yield* adapter
+        .sendTurn(
+          { threadId, input: "do not submit this turn" },
+          {
+            beforeSubmit: (turnId) =>
+              Effect.gen(function* () {
+                assert.notEqual(turnId, oldTurnId);
+                yield* Deferred.succeed(entered, undefined);
+                return yield* Effect.never;
+              }),
+            nativeCompleted: () => Effect.die("The parked turn was never submitted."),
+            nativeStopped: Effect.die("The parked turn has no native work."),
+            notSubmitted: Deferred.succeed(rejected, undefined).pipe(Effect.asVoid),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(parked);
+      yield* Deferred.await(rejected);
+      yield* adapter.interruptTurn(threadId);
+      yield* Deferred.await(parkedTerminal);
       yield* Deferred.succeed(releaseProof, undefined);
-      yield* Deferred.await(terminalAfterProof);
-      assert.lengthOf(terminalEvents, 2);
-      assert.equal(terminalEvents[0]?.turnId, terminalEvents[1]?.turnId);
-      assert.deepEqual(terminalEvents[0]?.payload, terminalEvents[1]?.payload);
-      assert.notEqual(terminalEvents[0]?.eventId, terminalEvents[1]?.eventId);
+      yield* Deferred.await(nativeRequestDone);
       yield* adapter.stopSession(threadId);
+      yield* Deferred.await(exited);
+      assert.isTrue(yield* Deferred.isDone(terminalAfterProof));
+      assert.lengthOf(terminalEvents, 3);
+      assert.equal(terminalEvents[0]?.turnId, terminalEvents[2]?.turnId);
+      assert.deepEqual(terminalEvents[0]?.payload, terminalEvents[2]?.payload);
+      assert.notEqual(terminalEvents[0]?.eventId, terminalEvents[2]?.eventId);
     }),
   );
 

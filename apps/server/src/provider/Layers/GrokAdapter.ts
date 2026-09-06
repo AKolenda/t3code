@@ -129,8 +129,13 @@ interface GrokTurnLivenessSignal {
   readonly turnId: TurnId;
 }
 
+interface GrokNativeTurnCompletion {
+  readonly turnId: TurnId;
+  completion: Extract<ProviderRuntimeEvent, { type: "turn.completed" }> | undefined;
+}
+
 interface GrokSessionContext {
-  lastTurnCompletion?: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>;
+  readonly nativeTurnCompletions: Set<GrokNativeTurnCompletion>;
   readonly threadId: ThreadId;
   readonly acpSessionId: string;
   session: ProviderSession;
@@ -410,25 +415,28 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
       Effect.gen(function* () {
         if (event.type === "turn.completed") {
           const context = sessions.get(event.threadId);
-          if (context) context.lastTurnCompletion = event;
+          for (const pending of context?.nativeTurnCompletions ?? []) {
+            if (pending.turnId === event.turnId) pending.completion = event;
+          }
         }
         yield* PubSub.publish(runtimeEventPubSub, event);
       });
     // A local terminal can precede native completion. Capture again after proof,
-    // using the last result so a late cancelled steer cannot replace the final result.
-    const repeatNativeTerminal = (context: GrokSessionContext, turnId: TurnId, stopped = false) =>
+    // using that outstanding request's terminal even if another turn has ended.
+    const repeatNativeTerminal = (
+      context: GrokSessionContext,
+      pending: GrokNativeTurnCompletion,
+      stopped = false,
+    ) =>
       Effect.gen(function* () {
-        const previous = context.lastTurnCompletion;
-        if (!stopped && previous?.turnId !== turnId) return;
+        const previous = pending.completion;
+        if (!stopped && previous === undefined) return;
         yield* offerRuntimeEvent({
           type: "turn.completed",
           provider: PROVIDER,
           threadId: context.threadId,
-          turnId,
-          payload:
-            previous?.turnId === turnId
-              ? previous.payload
-              : { state: "cancelled", stopReason: "cancelled" },
+          turnId: pending.turnId,
+          payload: previous?.payload ?? { state: "cancelled", stopReason: "cancelled" },
           ...(yield* makeEventStamp()),
         });
       }).pipe(
@@ -1301,6 +1309,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
           };
 
           const ctx: GrokSessionContext = {
+            nativeTurnCompletions: new Set(),
             threadId: input.threadId,
             acpSessionId: started.sessionId,
             session,
@@ -1730,6 +1739,13 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                 return { _tag: "Skipped" as const, interrupted: true };
               }
               const dispatched = yield* Deferred.make<void>();
+              const nativeCompletion: GrokNativeTurnCompletion = {
+                turnId: prepared.turnId,
+                completion: undefined,
+              };
+              const forgetNativeCompletion = Effect.sync(() =>
+                liveCtx.nativeTurnCompletions.delete(nativeCompletion),
+              );
               const fiber = yield* liveCtx.acp
                 .prompt(
                   {
@@ -1741,6 +1757,15 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                   {
                     dispatched,
                     beforeSubmit: Effect.gen(function* () {
+                      if (startOptions) {
+                        for (const pending of liveCtx.nativeTurnCompletions) {
+                          if (pending.turnId === prepared.turnId) {
+                            nativeCompletion.completion = pending.completion;
+                            break;
+                          }
+                        }
+                        liveCtx.nativeTurnCompletions.add(nativeCompletion);
+                      }
                       yield* startOptions?.beforeSubmit(prepared.turnId) ?? Effect.void;
                       if (
                         liveCtx.stopped ||
@@ -1759,14 +1784,20 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                     nativeCompleted: startOptions
                       ? startOptions
                           .nativeCompleted(prepared.turnId)
-                          .pipe(Effect.andThen(repeatNativeTerminal(liveCtx, prepared.turnId)))
+                          .pipe(
+                            Effect.andThen(repeatNativeTerminal(liveCtx, nativeCompletion)),
+                            Effect.ensuring(forgetNativeCompletion),
+                          )
                       : Effect.void,
                     nativeStopped: startOptions
                       ? startOptions.nativeStopped.pipe(
-                          Effect.andThen(repeatNativeTerminal(liveCtx, prepared.turnId, true)),
+                          Effect.andThen(repeatNativeTerminal(liveCtx, nativeCompletion, true)),
+                          Effect.ensuring(forgetNativeCompletion),
                         )
                       : Effect.void,
-                    notSubmitted: startOptions?.notSubmitted ?? Effect.void,
+                    notSubmitted: (startOptions?.notSubmitted ?? Effect.void).pipe(
+                      Effect.ensuring(forgetNativeCompletion),
+                    ),
                   },
                 )
                 .pipe(Effect.forkChild({ startImmediately: true }));
