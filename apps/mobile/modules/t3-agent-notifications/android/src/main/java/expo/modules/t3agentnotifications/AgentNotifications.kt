@@ -1,11 +1,14 @@
 package expo.modules.t3agentnotifications
 
 import android.app.NotificationChannel
+import android.app.Notification
+import android.app.AlarmManager
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Build
 import android.text.TextPaint
@@ -33,6 +36,12 @@ class AgentActivityDismissReceiver : BroadcastReceiver() {
   }
 }
 
+class AgentActivityExpiryReceiver : BroadcastReceiver() {
+  override fun onReceive(context: Context, intent: Intent) {
+    AgentNotifications.expire(context)
+  }
+}
+
 /** Handles data pushes natively so delivery does not depend on a running JS bridge. */
 object AgentNotifications {
   private const val STORE = "t3-agent-notifications"
@@ -46,23 +55,35 @@ object AgentNotifications {
   private const val MAX_LIFETIME_MS = 24 * 60 * 60 * 1000L
 
   @Synchronized
-  fun configure(context: Context, deviceId: String, userId: String, scheme: String, ongoingEnabled: Boolean) {
+  fun configure(
+    context: Context,
+    deviceId: String,
+    userId: String,
+    scheme: String,
+    ongoingEnabled: Boolean
+  ) {
     val prefs = context.getSharedPreferences(STORE, Context.MODE_PRIVATE)
     // JS identity is empty on a cold start. Compare the durable identity here
     // so reopening preserves cards, dismissal and replay history for this user.
-    if (prefs.getString("userId", null) != userId || prefs.getString("deviceId", null) != deviceId) {
+    if (prefs.getString("userId", null) != userId ||
+      prefs.getString("deviceId", null) != deviceId
+    ) {
       clear(context)
     }
     val wasEnabled = prefs.getBoolean("ongoing", false)
-    prefs.edit().putString("deviceId", deviceId).putString("userId", userId).putString("scheme", scheme)
+    prefs.edit().putString(
+      "deviceId",
+      deviceId
+    ).putString("userId", userId).putString("scheme", scheme)
       .putBoolean("enabled", true).putBoolean("ongoing", ongoingEnabled).apply()
     if (ongoingEnabled && !wasEnabled) prefs.edit().putBoolean("dismissed", false).apply()
-    if (!ongoingEnabled) manager(context).cancel(ACTIVITY_TAG, ACTIVITY_ID)
+    if (!ongoingEnabled) cancelActivity(context)
     channels(context)
   }
 
   @Synchronized
   fun clear(context: Context) {
+    cancelActivity(context)
     context.getSharedPreferences(STORE, Context.MODE_PRIVATE).edit().clear().apply()
     val manager = manager(context)
     manager.activeNotifications.filter { it.tag == ACTIVITY_TAG || it.tag == ALERT_TAG }
@@ -71,22 +92,45 @@ object AgentNotifications {
 
   @Synchronized
   fun dismiss(context: Context) {
-    context.getSharedPreferences(STORE, Context.MODE_PRIVATE).edit().putBoolean("dismissed", true).apply()
-    manager(context).cancel(ACTIVITY_TAG, ACTIVITY_ID)
+    context.getSharedPreferences(
+      STORE,
+      Context.MODE_PRIVATE
+    ).edit().putBoolean("dismissed", true).apply()
+    cancelActivity(context)
+  }
+
+  @Synchronized
+  fun expire(context: Context, now: Long = System.currentTimeMillis()) {
+    val expiresAt = context.getSharedPreferences(
+      STORE,
+      Context.MODE_PRIVATE
+    ).getLong("expiresAt", 0)
+    // An already-dispatched alarm must not remove a newer run's card.
+    if (expiresAt > 0 && expiresAt <= now) cancelActivity(context)
   }
 
   @Synchronized
   fun receive(context: Context, data: Map<String, String>) {
     val prefs = context.getSharedPreferences(STORE, Context.MODE_PRIVATE)
-    if (!prefs.getBoolean("enabled", false) || data["device_id"] != prefs.getString("deviceId", null)) return
-    if (data["user_id"] != prefs.getString("userId", null)) return
     val updatedAt = data["updated_at"]?.toLongOrNull() ?: return
-    if (System.currentTimeMillis() - updatedAt > MAX_MESSAGE_AGE_MS) return
-    channels(context)
-    val manager = manager(context)
-    val scheme = prefs.getString("scheme", null) ?: return
-    if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) return
+    val registered = prefs.getBoolean("enabled", false) &&
+      data["device_id"] == prefs.getString("deviceId", null) &&
+      data["user_id"] == prefs.getString("userId", null)
+    val fresh = System.currentTimeMillis() - updatedAt in -MAX_MESSAGE_AGE_MS..MAX_MESSAGE_AGE_MS
+    if (registered && fresh && NotificationManagerCompat.from(context).areNotificationsEnabled()) {
+      channels(context)
+      val scheme = prefs.getString("scheme", "t3code") ?: "t3code"
+      showAlert(context, prefs, scheme, data)
+      updateActivity(context, prefs, scheme, data, updatedAt)
+    }
+  }
 
+  private fun showAlert(
+    context: Context,
+    prefs: SharedPreferences,
+    scheme: String,
+    data: Map<String, String>
+  ) {
     // Queue retries carry the same alert id. Keep a bounded history even when
     // notification A is retried after notification B has already arrived.
     val alertId = data["alert_id"]
@@ -105,11 +149,22 @@ object AgentNotifications {
           .setAutoCancel(true)
           .setContentIntent(contentIntent(context, scheme, data["alert_path"], id))
           .build()
-        manager.notify(ALERT_TAG, id, notification)
+        manager(context).notify(ALERT_TAG, id, notification)
       }
-      prefs.edit().putStringSet("seenAlerts", (seen.toList().takeLast(63) + alertId).toSet()).apply()
+      prefs.edit().putStringSet(
+        "seenAlerts",
+        (seen.toList().takeLast(63) + alertId).toSet()
+      ).apply()
     }
+  }
 
+  private fun updateActivity(
+    context: Context,
+    prefs: SharedPreferences,
+    scheme: String,
+    data: Map<String, String>,
+    updatedAt: Long
+  ) {
     // Ignore reordered status updates without dropping an unrelated alert.
     if (updatedAt < prefs.getLong("lastUpdate", 0)) return
     prefs.edit().putLong("lastUpdate", updatedAt).apply()
@@ -122,19 +177,35 @@ object AgentNotifications {
     val wasActive = prefs.getBoolean("lastActive", false)
     prefs.edit().putBoolean("lastActive", active).apply()
     if (remainingMs <= 0 || !prefs.getBoolean("ongoing", false)) {
-      manager.cancel(ACTIVITY_TAG, ACTIVITY_ID)
+      cancelActivity(context)
       prefs.edit().putBoolean("dismissed", false).apply()
       return
     }
     // Dismissing a run includes its finished card. A new run, or toggling
     // activity off/on, arms it again; terminal replays stay dismissed.
     if (active && !wasActive) prefs.edit().putBoolean("dismissed", false).apply()
-    if (prefs.getBoolean("dismissed", false)) return
+    if (!prefs.getBoolean("dismissed", false)) {
+      showActivity(context, scheme, data, active, remainingMs)
+    }
+  }
+
+  private fun showActivity(
+    context: Context,
+    scheme: String,
+    data: Map<String, String>,
+    active: Boolean,
+    remainingMs: Long
+  ) {
     val body = data["activity_body"].orEmpty().take(240)
-    val dismissIntent = PendingIntent.getBroadcast(context, ACTIVITY_ID,
+    val dismissIntent = PendingIntent.getBroadcast(
+      context,
+      ACTIVITY_ID,
       Intent(context, AgentActivityDismissReceiver::class.java),
-      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-    val lines = (0..4).mapNotNull { data["activity_line_$it"]?.let { line -> activityLine(context, line) } }
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+    val lines = (0..4).mapNotNull {
+      data["activity_line_$it"]?.let { line -> activityLine(context, line) }
+    }
     // BigTextStyle remains eligible for Android Live Update promotion.
     val style = NotificationCompat.BigTextStyle().bigText(
       if (lines.isEmpty()) body else lines.joinToString("\n")
@@ -145,12 +216,40 @@ object AgentNotifications {
       .setStyle(style)
       .setOngoing(active).setOnlyAlertOnce(true).setSilent(true)
       .setTimeoutAfter(remainingMs)
+      // Android 16 requires colorization to consider a non-call card promotable.
+      .setColorized(active)
       .setRequestPromotedOngoing(active)
       .setContentIntent(contentIntent(context, scheme, data["activity_path"], ACTIVITY_ID))
       .setDeleteIntent(dismissIntent)
       .addAction(0, "Dismiss", dismissIntent)
       .build()
-    manager.notify(ACTIVITY_TAG, ACTIVITY_ID, notification)
+    manager(context).notify(ACTIVITY_TAG, ACTIVITY_ID, notification)
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+      // Notification timeouts were added in API 26. One inexact alarm also
+      // expires cards on Android 7, including when the app process has exited.
+      // No exact-alarm permission, foreground service or periodic work needed.
+      val expiresAt = System.currentTimeMillis() + remainingMs
+      context.getSharedPreferences(STORE, Context.MODE_PRIVATE).edit()
+        .putLong("expiresAt", expiresAt).apply()
+      context.getSystemService(
+        AlarmManager::class.java
+      ).setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, expiresAt, expiryIntent(context))
+    }
+  }
+
+  private fun expiryIntent(context: Context): PendingIntent = PendingIntent.getBroadcast(
+    context,
+    ACTIVITY_ID,
+    Intent(context, AgentActivityExpiryReceiver::class.java),
+    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+  )
+
+  private fun cancelActivity(context: Context) {
+    manager(context).cancel(ACTIVITY_TAG, ACTIVITY_ID)
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+      context.getSystemService(AlarmManager::class.java).cancel(expiryIntent(context))
+      context.getSharedPreferences(STORE, Context.MODE_PRIVATE).edit().remove("expiresAt").apply()
+    }
   }
 
   private fun activityLine(context: Context, value: String): String {
@@ -170,7 +269,12 @@ object AgentNotifications {
     val projectWidth = paint.measureText(parts[2]).coerceAtMost(available * 0.4f)
     val titleWidth = paint.measureText(parts[1]).coerceAtMost(available - projectWidth)
     val title = TextUtils.ellipsize(parts[1], paint, titleWidth, TextUtils.TruncateAt.END)
-    val project = TextUtils.ellipsize(parts[2], paint, available - titleWidth, TextUtils.TruncateAt.END)
+    val project = TextUtils.ellipsize(
+      parts[2],
+      paint,
+      available - titleWidth,
+      TextUtils.TruncateAt.END
+    )
     return "$prefix$title$separator$project"
   }
 
@@ -178,26 +282,53 @@ object AgentNotifications {
 
   private fun channels(context: Context) {
     if (Build.VERSION.SDK_INT >= 26) {
-      manager(context).createNotificationChannels(listOf(
-        NotificationChannel(ALERT_CHANNEL, "Agent alerts", NotificationManager.IMPORTANCE_HIGH),
-        NotificationChannel(ACTIVITY_CHANNEL, "Ongoing agent activity", NotificationManager.IMPORTANCE_LOW),
-      ))
+      manager(context).createNotificationChannels(
+        listOf(
+          NotificationChannel(ALERT_CHANNEL, "Agent alerts", NotificationManager.IMPORTANCE_HIGH),
+          NotificationChannel(
+            ACTIVITY_CHANNEL,
+            "Ongoing agent activity",
+            NotificationManager.IMPORTANCE_LOW
+          ),
+        )
+      )
     }
   }
 
   private fun base(context: Context, channel: String): NotificationCompat.Builder {
     val icon = context.resources.getIdentifier("notification_icon", "drawable", context.packageName)
     return NotificationCompat.Builder(context, channel)
+      .setPriority(
+        if (channel ==
+          ALERT_CHANNEL
+        ) {
+          NotificationCompat.PRIORITY_HIGH
+        } else {
+          NotificationCompat.PRIORITY_LOW
+        }
+      )
+      .setDefaults(if (channel == ALERT_CHANNEL) Notification.DEFAULT_ALL else 0)
       .setSmallIcon(if (icon != 0) icon else android.R.drawable.ic_dialog_info)
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
       .setShowWhen(false)
   }
 
-  private fun contentIntent(context: Context, scheme: String, path: String?, id: Int): PendingIntent {
-    val route = if (path != null && path.startsWith("/threads/") && !path.contains('?') && !path.contains('#')) path else "/"
+  private fun contentIntent(
+    context: Context,
+    scheme: String,
+    path: String?,
+    id: Int
+  ): PendingIntent {
+    val threadPath = path?.takeIf { it.startsWith("/threads/") }
+    val route = threadPath?.takeUnless { it.contains('?') || it.contains('#') } ?: "/"
     val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)!!
       .setAction(Intent.ACTION_VIEW).setData(Uri.parse("$scheme:/$route"))
       .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-    return PendingIntent.getActivity(context, id, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    return PendingIntent.getActivity(
+      context,
+      id,
+      intent,
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
   }
 }

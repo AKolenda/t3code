@@ -9,5 +9,6 @@
       </intent-filter>
     </service>
     <receiver android:name=".AgentActivityDismissReceiver" android:exported="false" />
+    <receiver android:name=".AgentActivityExpiryReceiver" android:exported="false" />
   </application>
 </manifest>

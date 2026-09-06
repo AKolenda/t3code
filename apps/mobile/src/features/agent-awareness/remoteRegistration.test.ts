@@ -55,6 +55,7 @@ import {
 } from "./androidNotifications";
 
 vi.mock("./androidNotifications", () => ({
+  supportsAndroidAgentNotifications: vi.fn(() => true),
   configureAndroidAgentNotifications: vi.fn(),
   clearAndroidAgentNotifications: vi.fn(),
 }));

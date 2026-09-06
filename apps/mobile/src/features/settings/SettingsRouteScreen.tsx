@@ -160,6 +160,10 @@ function ConfiguredSettingsRouteScreen() {
   const savePreferences = useAtomSet(updateMobilePreferencesAtom);
   const agentAwarenessPushAvailable = supportsAgentAwarenessPush();
   const agentAwarenessPlatform = resolveAgentAwarenessPlatformPresentation(Platform.OS);
+  const agentAwarenessSubtitle =
+    Platform.OS === "android" && !agentAwarenessPushAvailable
+      ? "Install a newer app build to enable notifications"
+      : agentAwarenessPlatform.subtitle;
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const { getToken, isLoaded, isSignedIn } = useAuth({ treatPendingAsSignedOut: false });
@@ -515,7 +519,7 @@ function ConfiguredSettingsRouteScreen() {
               notificationStatus === "checking" ||
               notificationStatus === "unsupported"
             }
-            subtitle={agentAwarenessPlatform.subtitle}
+            subtitle={agentAwarenessSubtitle}
             // Only reads as on when this device is actually registered with the
             // relay; otherwise notifications cannot be delivered regardless of
             // the local iOS permission.
@@ -534,7 +538,7 @@ function ConfiguredSettingsRouteScreen() {
             }
             icon="bolt.circle"
             label={Platform.OS === "android" ? "Ongoing Agent Activity" : "Live Activity Updates"}
-            subtitle={agentAwarenessPlatform.subtitle}
+            subtitle={agentAwarenessSubtitle}
             // Same gate: a saved preference is meaningless until the device
             // registration the relay needs to push updates has succeeded.
             value={

@@ -2,9 +2,7 @@
   "version": "8",
   "dialect": "postgres",
   "id": "1109ed23-036c-4c39-a459-52422a7ffd99",
-  "prevIds": [
-    "2374caff-40bf-423c-9255-55e76dddbc2a"
-  ],
+  "prevIds": ["2374caff-40bf-423c-9255-55e76dddbc2a"],
   "ddl": [
     {
       "isRlsEnabled": false,
@@ -1442,11 +1440,7 @@
       "table": "relay_mobile_devices"
     },
     {
-      "columns": [
-        "environment_id",
-        "environment_public_key",
-        "thread_id"
-      ],
+      "columns": ["environment_id", "environment_public_key", "thread_id"],
       "nameExplicit": false,
       "name": "relay_agent_activity_rows_pkey",
       "entityType": "pks",
@@ -1454,10 +1448,7 @@
       "table": "relay_agent_activity_rows"
     },
     {
-      "columns": [
-        "thumbprint",
-        "jti"
-      ],
+      "columns": ["thumbprint", "jti"],
       "nameExplicit": false,
       "name": "relay_dpop_proofs_pkey",
       "entityType": "pks",
@@ -1465,10 +1456,7 @@
       "table": "relay_dpop_proofs"
     },
     {
-      "columns": [
-        "user_id",
-        "environment_id"
-      ],
+      "columns": ["user_id", "environment_id"],
       "nameExplicit": false,
       "name": "relay_environment_links_pkey",
       "entityType": "pks",
@@ -1476,10 +1464,7 @@
       "table": "relay_environment_links"
     },
     {
-      "columns": [
-        "user_id",
-        "device_id"
-      ],
+      "columns": ["user_id", "device_id"],
       "nameExplicit": false,
       "name": "relay_live_activities_pkey",
       "entityType": "pks",
@@ -1487,10 +1472,7 @@
       "table": "relay_live_activities"
     },
     {
-      "columns": [
-        "user_id",
-        "environment_id"
-      ],
+      "columns": ["user_id", "environment_id"],
       "nameExplicit": false,
       "name": "relay_managed_endpoint_allocations_pkey",
       "entityType": "pks",
@@ -1498,10 +1480,7 @@
       "table": "relay_managed_endpoint_allocations"
     },
     {
-      "columns": [
-        "user_id",
-        "device_id"
-      ],
+      "columns": ["user_id", "device_id"],
       "nameExplicit": false,
       "name": "relay_mobile_devices_pkey",
       "entityType": "pks",
@@ -1509,9 +1488,7 @@
       "table": "relay_mobile_devices"
     },
     {
-      "columns": [
-        "id"
-      ],
+      "columns": ["id"],
       "nameExplicit": false,
       "name": "relay_delivery_attempts_pkey",
       "schema": "public",
@@ -1519,9 +1496,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "credential_id"
-      ],
+      "columns": ["credential_id"],
       "nameExplicit": false,
       "name": "relay_environment_credentials_pkey",
       "schema": "public",
@@ -1529,9 +1504,7 @@
       "entityType": "pks"
     },
     {
-      "columns": [
-        "user_id"
-      ],
+      "columns": ["user_id"],
       "nameExplicit": false,
       "name": "relay_managed_tunnel_limits_pkey",
       "schema": "public",

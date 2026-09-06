@@ -20,6 +20,14 @@ const device = {
 };
 
 describe("mobile device platforms", () => {
+  it.each([
+    [23, "Failure"],
+    [24, "Success"],
+    [37, "Success"],
+  ])("enforces the Android minimum without an upper bound (API %i)", (androidApiLevel, result) => {
+    expect(decodeDevice({ ...device, platform: "android", androidApiLevel })._tag).toBe(result);
+  });
+
   it("accepts Android tokens without Apple routing and preserves older iOS registrations", () => {
     expect(decodeDevice({ ...device, platform: "android", androidApiLevel: 36 })._tag).toBe(
       "Success",
