@@ -20,7 +20,7 @@ const CATEGORY_COLORS: Readonly<Record<string, string>> = {
 
 const FALLBACK_COLORS = ["#4f8ef7", "#f0783c", "#3fb27f", "#d9a441", "#e0529a", "#8b6ee8"];
 
-export const FREE_SPACE_CATEGORY = "Free space";
+const FREE_SPACE_CATEGORY = "Free space";
 const MUTED_COLOR = "color-mix(in oklab, var(--color-muted-foreground) 45%, transparent)";
 const FREE_COLOR = "color-mix(in oklab, var(--color-muted-foreground) 18%, transparent)";
 
