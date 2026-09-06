@@ -2,6 +2,7 @@ import * as Haptics from "expo-haptics";
 import { KeyboardAwareLegendList } from "@legendapp/list/keyboard";
 import { useViewabilityAmount, type LegendListRef } from "@legendapp/list/react-native";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { resolveUserMessagePresentation } from "@t3tools/client-runtime/user-message";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
 import {
   ThreadId,
@@ -1514,11 +1515,12 @@ function renderFeedEntry(
   if (entry.type === "message") {
     const { message } = entry;
     const isUser = message.role === "user";
-    const renderedText = renderAssistantCitationsAsText(message.text);
+    const presentation = resolveUserMessagePresentation(message);
+    const renderedText = renderAssistantCitationsAsText(presentation.text);
     const styles = isUser ? markdownStyles.user : markdownStyles.assistant;
     const timestampLabel = formatMessageTime(isUser ? message.createdAt : message.updatedAt);
     const attachments = message.attachments ?? [];
-    const hasReviewCommentContext = message.text.includes("<review_comment");
+    const hasReviewCommentContext = presentation.text.includes("<review_comment");
     // A bubble that sizes itself from its content cannot lay out a block whose
     // intrinsic width overflows `maxWidth`: Android positions the bubble's
     // children during the unclamped pass and never moves them once the width
@@ -1543,9 +1545,9 @@ function renderFeedEntry(
           className="mb-5 items-end"
           {...(enterAnimated ? { entering: FadeInUp.duration(220) } : {})}
         >
-          {message.createdBy === "agent" ? (
+          {presentation.isAutomation || message.createdBy === "agent" ? (
             <Text className="mb-1 pr-1 font-t3-medium text-2xs text-foreground-muted opacity-60">
-              Sent by another agent
+              {presentation.isAutomation ? "Sent by automation" : "Sent by another agent"}
             </Text>
           ) : null}
           <View
@@ -1560,7 +1562,7 @@ function renderFeedEntry(
                   : null),
             }}
           >
-            {message.text.trim().length > 0 ? (
+            {presentation.text.trim().length > 0 ? (
               <UserMessageContent
                 text={renderedText}
                 markdownStyles={styles}
@@ -1622,10 +1624,10 @@ function renderFeedEntry(
             <Text className="font-t3-medium text-xs tabular-nums text-adaptive-neutral-600-400">
               {timestampLabel}
             </Text>
-            {message.text.trim().length > 0 ? (
+            {presentation.text.trim().length > 0 ? (
               <CopyTextButton
                 accessibilityLabel="Copy message"
-                text={message.text}
+                text={presentation.text}
                 tintColor={iconSubtleColor}
                 buttonSize={28}
                 iconSize={13}
