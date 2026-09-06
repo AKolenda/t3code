@@ -1574,6 +1574,527 @@ describe("ClaudeAdapterLive", () => {
     },
   );
 
+  it.effect.each([
+    { resultFirst: true, terminal: "completed", reset: false },
+    { resultFirst: false, terminal: "completed", reset: false },
+    { resultFirst: false, terminal: "cancelled", reset: false },
+    { resultFirst: true, terminal: "completed", reset: true },
+  ])(
+    "keeps accepted steering reserved across local result/terminal order %j",
+    ({ resultFirst, terminal, reset }) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        let completions = 0;
+        let sessionId = "sdk-local-command";
+        const resultSessionId = reset ? "sdk-after-clear" : sessionId;
+        const turn = yield* adapter.sendTurn(
+          { threadId: THREAD_ID, input: reset ? "/clear" : "/agents" },
+          admissionOptions({
+            nativeCompleted: () =>
+              Effect.sync(() => {
+                completions += 1;
+              }),
+          }),
+        );
+        const [prompt] = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 1),
+        );
+        assert.isDefined(prompt?.uuid);
+        const lifecycle = (state: string, commandUuid: string = prompt!.uuid!) =>
+          ({
+            type: "command_lifecycle",
+            command_uuid: commandUuid,
+            state,
+            session_id: sessionId,
+            uuid: `lifecycle-${state}-${commandUuid}`,
+          }) as unknown as SDKMessage;
+        const result = {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          num_turns: 0,
+          session_id: resultSessionId,
+          uuid: "local-command-result",
+          result: "Local command output",
+          usage: { input_tokens: 0, output_tokens: 0 },
+        } as unknown as SDKMessage;
+        harness.query.emit(lifecycle("queued"));
+        harness.query.emit(lifecycle("started"));
+        if (reset) {
+          harness.query.emit({
+            type: "conversation_reset",
+            session_id: sessionId,
+            new_conversation_id: "independent-conversation-id",
+            uuid: "clear-reset",
+          } as unknown as SDKMessage);
+          sessionId = resultSessionId;
+        }
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          session_id: resultSessionId,
+          uuid: "local-command-init",
+        } as unknown as SDKMessage);
+        harness.query.emit(lifecycle("completed", "unrelated-command"));
+        const firstHalf = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "runtime.warning" && event.payload.message === "First half processed",
+          ),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit(resultFirst ? result : lifecycle(terminal));
+        harness.query.emit({
+          type: "system",
+          subtype: "notification",
+          key: "local-command-first-half",
+          text: "First half processed",
+          priority: "high",
+          session_id: resultSessionId,
+          uuid: "local-command-first-half",
+        } as unknown as SDKMessage);
+        const firstEvents = yield* Fiber.join(firstHalf);
+        assert.equal(completions, resultFirst ? 0 : 1);
+        assert.equal(
+          firstEvents.some((event) => event.type === "turn.completed"),
+          false,
+        );
+        const steer = yield* adapter.sendTurn(
+          { threadId: THREAD_ID, input: "/agents" },
+          admissionOptions(),
+        );
+        assert.equal(steer.turnId, turn.turnId);
+        const [steerPrompt] = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 1),
+        );
+        const firstCommand = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "runtime.warning" &&
+              event.payload.message === "First command processed",
+          ),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit(resultFirst ? lifecycle(terminal) : result);
+        harness.query.emit({
+          type: "system",
+          subtype: "notification",
+          key: "first-command-processed",
+          text: "First command processed",
+          priority: "high",
+          session_id: resultSessionId,
+          uuid: "first-command-processed",
+        } as unknown as SDKMessage);
+        const firstCommandEvents = yield* Fiber.join(firstCommand);
+        assert.equal(
+          firstCommandEvents.some((event) => event.type === "turn.completed"),
+          false,
+        );
+        const completed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit(lifecycle("started", steerPrompt!.uuid));
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          session_id: resultSessionId,
+          uuid: "steer-init",
+        } as unknown as SDKMessage);
+        harness.query.emit({ ...result, uuid: "steer-result" } as unknown as SDKMessage);
+        harness.query.emit(lifecycle("completed", steerPrompt!.uuid));
+        const [event] = yield* Fiber.join(completed);
+        assert.equal(event?.turnId, turn.turnId);
+        if (event?.type === "turn.completed") {
+          assert.equal(event.payload.state, terminal === "cancelled" ? "interrupted" : "completed");
+          assert.equal(event.payload.tokenUsage?.inputTokens, 0);
+        }
+        assert.equal(completions, 1);
+        harness.query.emit(lifecycle("completed"));
+        const next = yield* adapter.sendTurn(
+          { threadId: THREAD_ID, input: "/agents" },
+          admissionOptions(),
+        );
+        assert.notEqual(next.turnId, turn.turnId);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect.each([false, true])(
+    "ignores unrelated anonymous results with an old initial batch: %s",
+    (withOldInitialBatch) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        const oldPrompt = withOldInitialBatch
+          ? yield* Effect.gen(function* () {
+              yield* adapter.sendTurn(
+                { threadId: THREAD_ID, input: "Initial input" },
+                admissionOptions(),
+              );
+              return yield* Effect.promise(() =>
+                readFirstPromptMessage(harness.getLastCreateQueryInput()),
+              );
+            })
+          : undefined;
+        const first = yield* adapter.sendTurn(
+          { threadId: THREAD_ID, input: "Folded input" },
+          admissionOptions(),
+        );
+        const [prompt] = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 1),
+        );
+        const processed = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil(
+            (event) =>
+              event.type === "runtime.warning" &&
+              event.payload.message === "Folded terminal processed",
+          ),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        if (oldPrompt)
+          harness.query.emit({
+            type: "command_lifecycle",
+            command_uuid: oldPrompt.uuid,
+            state: "started",
+            session_id: "sdk-folded",
+            uuid: "initial-started",
+          } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          session_id: "sdk-folded",
+          uuid: "previous-turn-init",
+        } as unknown as SDKMessage);
+        if (oldPrompt) {
+          harness.query.emit({
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            num_turns: 0,
+            session_id: "sdk-folded",
+            uuid: "initial-result",
+            usage: { input_tokens: 7, output_tokens: 1 },
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            type: "command_lifecycle",
+            command_uuid: oldPrompt.uuid,
+            state: "completed",
+            session_id: "sdk-folded",
+            uuid: "initial-completed",
+          } as unknown as SDKMessage);
+        }
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: prompt!.uuid,
+          state: "started",
+          session_id: "sdk-folded",
+          uuid: "folded-started",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          num_turns: 0,
+          session_id: "sdk-folded",
+          uuid: "unrelated-meta-result",
+          usage: { input_tokens: 999, output_tokens: 999 },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: prompt!.uuid,
+          state: "completed",
+          session_id: "sdk-folded",
+          uuid: "folded-completed",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "notification",
+          key: "folded-processed",
+          text: "Folded terminal processed",
+          priority: "high",
+          session_id: "sdk-folded",
+          uuid: "folded-processed",
+        } as unknown as SDKMessage);
+        const earlyEvents = yield* Fiber.join(processed);
+        assert.equal(
+          earlyEvents.some((event) => event.type === "turn.completed"),
+          false,
+        );
+        const steer = yield* adapter.sendTurn(
+          { threadId: THREAD_ID, input: "More input" },
+          admissionOptions(),
+        );
+        assert.equal(steer.turnId, first.turnId);
+        const [steerPrompt] = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 1),
+        );
+        const completed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          session_id: "sdk-folded",
+          uuid: "actual-folded-result",
+          user_message_uuids: [prompt!.uuid, steerPrompt!.uuid],
+          usage: { input_tokens: 50, output_tokens: 10 },
+        } as unknown as SDKMessage);
+        const [event] = yield* Fiber.join(completed);
+        if (event?.type === "turn.completed")
+          assert.equal(event.payload.tokenUsage?.inputTokens, withOldInitialBatch ? 57 : 50);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect("joins a folded command to its initial batch result", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const first = yield* adapter.sendTurn(
+        { threadId: THREAD_ID, input: "First" },
+        admissionOptions(),
+      );
+      const folded = yield* adapter.sendTurn(
+        { threadId: THREAD_ID, input: "Steer" },
+        admissionOptions(),
+      );
+      assert.equal(folded.turnId, first.turnId);
+      const [firstPrompt, foldedPrompt] = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 2),
+      );
+      const lifecycle = (commandUuid: string, state: "started" | "completed") =>
+        ({
+          type: "command_lifecycle",
+          command_uuid: commandUuid,
+          state,
+          session_id: "sdk-folded-success",
+          uuid: `${commandUuid}-${state}`,
+        }) as unknown as SDKMessage;
+      const processed = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "runtime.warning"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      harness.query.emit(lifecycle(firstPrompt!.uuid!, "started"));
+      harness.query.emit({
+        type: "system",
+        subtype: "init",
+        session_id: "sdk-folded-success",
+        uuid: "own-initial-batch",
+      } as unknown as SDKMessage);
+      harness.query.emit(lifecycle(foldedPrompt!.uuid!, "started"));
+      harness.query.emit(lifecycle(foldedPrompt!.uuid!, "completed"));
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        session_id: "sdk-folded-success",
+        uuid: "shared-result",
+        usage: { input_tokens: 50, output_tokens: 10 },
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "notification",
+        key: "shared-result-processed",
+        text: "Shared result processed",
+        priority: "high",
+        session_id: "sdk-folded-success",
+        uuid: "shared-result-processed",
+      } as unknown as SDKMessage);
+      const earlyEvents = yield* Fiber.join(processed);
+      assert.equal(
+        earlyEvents.some((event) => event.type === "turn.completed"),
+        false,
+      );
+      const completed = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "turn.completed"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      harness.query.emit(lifecycle(firstPrompt!.uuid!, "completed"));
+      const [event] = yield* Fiber.join(completed);
+      assert.equal(event?.turnId, first.turnId);
+      if (event?.type === "turn.completed") {
+        assert.equal(event.payload.state, "completed");
+        assert.equal(event.payload.tokenUsage?.inputTokens, 50);
+      }
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect(
+    "rejects input before preparation after an unknown result and recovers on exact receipts",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        const first = yield* adapter.sendTurn(
+          { threadId: THREAD_ID, input: "First" },
+          admissionOptions(),
+        );
+        const [prompt] = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 1),
+        );
+        const processed = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((event) => event.type === "session.configured"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          num_turns: 0,
+          session_id: "sdk-unknown",
+          uuid: "unknown-result",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          session_id: "sdk-unknown",
+          uuid: "unknown-result-processed",
+        } as unknown as SDKMessage);
+        const events = yield* Fiber.join(processed);
+        assert.equal(
+          events.some((event) => event.type === "runtime.warning"),
+          false,
+        );
+        const rejected = yield* adapter
+          .sendTurn(
+            {
+              threadId: THREAD_ID,
+              input: "Blocked",
+              modelSelection: createModelSelection(
+                ProviderInstanceId.make("claudeAgent"),
+                SYNTHETIC_CLAUDE_STANDARD_MODEL,
+              ),
+            },
+            admissionOptions(),
+          )
+          .pipe(Effect.flip);
+        assert.equal(rejected._tag, "ProviderAdapterRequestError");
+        assert.equal(harness.query.setModelCalls.length, 0);
+        const completed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: prompt!.uuid,
+          state: "started",
+          session_id: "sdk-unknown",
+          uuid: "late-started",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "system",
+          subtype: "init",
+          session_id: "sdk-unknown",
+          uuid: "late-init",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          num_turns: 0,
+          session_id: "sdk-unknown",
+          uuid: "confirmed-command-result",
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: prompt!.uuid,
+          state: "completed",
+          session_id: "sdk-unknown",
+          uuid: "late-completed",
+        } as unknown as SDKMessage);
+        yield* Fiber.join(completed);
+        const next = yield* adapter.sendTurn(
+          { threadId: THREAD_ID, input: "Next" },
+          admissionOptions(),
+        );
+        assert.notEqual(next.turnId, first.turnId);
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect.each(["cancelled", "discarded", "refused"] as const)(
+    "finishes an exact %s command without waiting for a result that will not arrive",
+    (state) => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        let completions = 0;
+        const turn = yield* adapter.sendTurn(
+          { threadId: THREAD_ID, input: "Queued input" },
+          admissionOptions({
+            nativeCompleted: () =>
+              Effect.sync(() => {
+                completions += 1;
+              }),
+          }),
+        );
+        const [prompt] = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 1),
+        );
+        const completed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "command_lifecycle",
+          command_uuid: prompt!.uuid,
+          state,
+          session_id: "sdk-command-rejected",
+          uuid: "command-terminal",
+        } as unknown as SDKMessage);
+        const [event] = yield* Fiber.join(completed);
+        assert.equal(event?.turnId, turn.turnId);
+        assert.equal(completions, 1);
+        if (event?.type === "turn.completed")
+          assert.equal(event.payload.state, state === "refused" ? "failed" : "interrupted");
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
   it.effect("does not treat a local query close as native completion", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

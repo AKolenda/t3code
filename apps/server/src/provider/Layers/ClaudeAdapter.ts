@@ -291,18 +291,44 @@ function rememberPendingTaskModel(
   }
 }
 
+interface ClaudePromptSubmission {
+  readonly turnId: TurnId;
+  readonly options: ProviderTurnStartOptions;
+  started: boolean;
+  nativeInitSessionId?: string;
+  nativeInitSequence?: number;
+  initialBatch: boolean;
+  nativeFinished: boolean;
+  resultObserved: boolean;
+  terminalState?: "cancelled" | "discarded" | "refused";
+}
+
+interface ClaudePendingResult {
+  readonly message: SDKResultMessage;
+  readonly submissions: ReadonlyArray<ClaudePromptSubmission>;
+  readonly exactMatch: boolean;
+}
+
+const decodeClaudeCommandLifecycle = Schema.decodeUnknownExit(
+  Schema.Struct({
+    type: Schema.Literal("command_lifecycle"),
+    command_uuid: Schema.String,
+    session_id: Schema.String,
+    state: Schema.Literals(["queued", "started", "completed", "cancelled", "discarded", "refused"]),
+  }),
+);
+
 interface ClaudeSessionContext {
   session: ProviderSession;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
   readonly submissionSemaphore: Semaphore.Semaphore;
-  readonly submittedPrompts: Map<
-    string,
-    {
-      readonly turnId: TurnId;
-      readonly options: ProviderTurnStartOptions;
-    }
-  >;
+  readonly submittedPrompts: Map<string, ClaudePromptSubmission>;
+  pendingResult: ClaudePendingResult | undefined;
+  recoveryRequired: boolean;
+  nativeInitSequence: number;
+  nativeInitSessionId: string | undefined;
+  lastResultUuid: string | undefined;
   readonly nativeProcess: {
     captured: boolean;
     readonly exited: Deferred.Deferred<void>;
@@ -3315,55 +3341,61 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* updateResumeCursor(context);
   });
 
-  const handleResultMessage = Effect.fn("handleResultMessage")(function* (
-    context: ClaudeSessionContext,
-    message: SDKMessage,
-  ) {
-    if (message.type !== "result") {
-      return;
+  const preservePendingClaudeUsage = (context: ClaudeSessionContext) => {
+    const pending = context.pendingResult;
+    if (
+      context.turnState &&
+      pending &&
+      (pending.exactMatch || pending.submissions.every((submitted) => submitted.nativeFinished))
+    ) {
+      context.turnState.priorTokenUsage = addClaudeTurnTokenUsage(
+        context.turnState.priorTokenUsage,
+        normalizeClaudeTurnTokenUsage(
+          pending.message,
+          context.turnState.hasSubagents,
+          turnStatusFromResult(pending.message),
+        ),
+      );
     }
+    context.pendingResult = undefined;
+  };
 
+  const finishPendingClaudeTurn = Effect.fn("finishPendingClaudeTurn")(function* (
+    context: ClaudeSessionContext,
+  ) {
+    if (context.stopped) return;
+    const pending = context.pendingResult;
+    const submissions = [...context.submittedPrompts.values()];
+    const refused = submissions.some((submitted) => submitted.terminalState === "refused");
+    const interrupted = submissions.some(
+      (submitted) =>
+        submitted.terminalState === "cancelled" || submitted.terminalState === "discarded",
+    );
+    const status = refused
+      ? "failed"
+      : interrupted
+        ? "interrupted"
+        : pending
+          ? turnStatusFromResult(pending.message)
+          : undefined;
+    if (
+      status === undefined ||
+      submissions.some((submitted) => !submitted.nativeFinished || !submitted.resultObserved)
+    )
+      return;
+    const errorMessage = refused
+      ? "Claude refused a command."
+      : interrupted
+        ? "Claude cancelled or discarded a command."
+        : pending
+          ? resultUserFacingError(pending.message)
+          : undefined;
     const completion = Deferred.makeUnsafe<void>();
     context.turnCompletion = completion;
-    yield* Effect.gen(function* () {
-      const status = turnStatusFromResult(message);
-      const errorMessage = resultUserFacingError(message);
-      const completedMessageIds = new Set(message.user_message_uuids ?? []);
-      if (message.user_message_uuid !== undefined)
-        completedMessageIds.add(message.user_message_uuid);
-      let completedOwnPrompt = false;
-      for (const [messageId, submitted] of context.submittedPrompts) {
-        // A result identifies consumed prompts. An echoed or queued prompt can still be pending.
-        if (!completedMessageIds.has(messageId)) continue;
-        completedOwnPrompt = true;
-        context.submittedPrompts.delete(messageId);
-        yield* submitted.options.nativeCompleted(submitted.turnId);
-      }
-      if (status === "failed") {
-        yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
-      }
-      if (context.submittedPrompts.size === 0) {
-        yield* completeTurn(context, status, errorMessage, message);
-      } else if (context.turnState && completedOwnPrompt) {
-        context.turnState.priorTokenUsage = addClaudeTurnTokenUsage(
-          context.turnState.priorTokenUsage,
-          normalizeClaudeTurnTokenUsage(message, context.turnState.hasSubagents, status),
-        );
-      } else if (context.submittedPrompts.size > 0 && completedMessageIds.size === 0) {
-        const stamp = yield* makeEventStamp();
-        yield* offerRuntimeEvent({
-          type: "runtime.warning",
-          eventId: stamp.eventId,
-          provider: PROVIDER,
-          threadId: context.session.threadId,
-          createdAt: stamp.createdAt,
-          payload: {
-            message:
-              "Claude did not identify the completed prompt. Stop the session to confirm that its work has finished.",
-          },
-        });
-      }
-    }).pipe(
+    context.pendingResult = undefined;
+    context.recoveryRequired = false;
+    context.submittedPrompts.clear();
+    yield* completeTurn(context, status, errorMessage, pending?.message).pipe(
       Effect.ensuring(
         Effect.gen(function* () {
           context.turnCompletion = undefined;
@@ -3371,6 +3403,107 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         }),
       ),
     );
+  });
+
+  const handleCommandLifecycle = Effect.fn("handleCommandLifecycle")(function* (
+    context: ClaudeSessionContext,
+    message: unknown,
+  ) {
+    // Real stdout frames are forwarded by the SDK but absent from its message union.
+    const decoded = decodeClaudeCommandLifecycle(message);
+    if (Exit.isFailure(decoded)) return;
+    const receipt = decoded.value;
+    const submitted = context.submittedPrompts.get(receipt.command_uuid);
+    if (!submitted) return;
+    if (receipt.state === "queued") return;
+    context.recoveryRequired = false;
+    if (receipt.state === "started") {
+      submitted.started = true;
+      if (context.nativeInitSessionId !== undefined) {
+        submitted.nativeInitSessionId = context.nativeInitSessionId;
+        submitted.nativeInitSequence = context.nativeInitSequence;
+      }
+      return;
+    }
+    if (receipt.state !== "completed") {
+      submitted.terminalState = receipt.state;
+      // An already-started cancellation can still have a final result in flight.
+      if (receipt.state !== "cancelled" || !submitted.started) submitted.resultObserved = true;
+    }
+    if (!submitted.nativeFinished) {
+      submitted.nativeFinished = true;
+      yield* submitted.options.nativeCompleted(submitted.turnId);
+    }
+    // Folded commands can finish before their result. Keep status and usage pending.
+    yield* finishPendingClaudeTurn(context);
+  });
+
+  const handleResultMessage = Effect.fn("handleResultMessage")(function* (
+    context: ClaudeSessionContext,
+    message: SDKMessage,
+  ) {
+    if (message.type !== "result") return;
+    if (typeof message.uuid === "string" && message.uuid === context.lastResultUuid) return;
+    context.lastResultUuid = message.uuid;
+    const status = turnStatusFromResult(message);
+    const errorMessage = resultUserFacingError(message);
+    const completedMessageIds = new Set(message.user_message_uuids ?? []);
+    if (message.user_message_uuid !== undefined) completedMessageIds.add(message.user_message_uuid);
+    const resultSegments = new Set<number>();
+    for (const [messageId, submitted] of context.submittedPrompts) {
+      if (
+        submitted.nativeInitSequence !== undefined &&
+        submitted.nativeInitSessionId === message.session_id &&
+        (completedMessageIds.has(messageId) ||
+          (completedMessageIds.size === 0 &&
+            submitted.initialBatch &&
+            !submitted.resultObserved &&
+            submitted.nativeInitSequence === context.nativeInitSequence))
+      )
+        resultSegments.add(submitted.nativeInitSequence);
+    }
+    let exactMatch = false;
+    const observedSubmissions: Array<ClaudePromptSubmission> = [];
+    for (const [messageId, submitted] of context.submittedPrompts) {
+      const matches = completedMessageIds.has(messageId);
+      if (matches) {
+        context.recoveryRequired = false;
+        exactMatch = true;
+        if (!submitted.nativeFinished) {
+          submitted.nativeFinished = true;
+          yield* submitted.options.nativeCompleted(submitted.turnId);
+        }
+      }
+      if (
+        matches ||
+        (submitted.nativeInitSessionId === message.session_id &&
+          submitted.nativeInitSequence !== undefined &&
+          resultSegments.has(submitted.nativeInitSequence))
+      ) {
+        submitted.resultObserved = true;
+        observedSubmissions.push(submitted);
+      }
+    }
+    if (status === "failed")
+      yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
+    if (context.stopped) return;
+    if (context.submittedPrompts.size === 0) {
+      context.pendingResult = { message, submissions: [], exactMatch: false };
+      yield* finishPendingClaudeTurn(context);
+      return;
+    }
+    if (observedSubmissions.length > 0) {
+      preservePendingClaudeUsage(context);
+      context.pendingResult = { message, submissions: observedSubmissions, exactMatch };
+      yield* finishPendingClaudeTurn(context);
+    } else if (
+      completedMessageIds.size === 0 &&
+      ![...context.submittedPrompts.values()].some(
+        (submitted) => submitted.started && !submitted.nativeFinished,
+      )
+    ) {
+      context.recoveryRequired = true;
+    }
   });
 
   /**
@@ -3488,6 +3621,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
 
     switch (message.subtype) {
       case "init":
+        context.nativeInitSequence += 1;
+        context.nativeInitSessionId = message.session_id;
+        // This owned local query runs one initial batch at a time while stdin is
+        // open. Its started receipts precede init, even when /clear changes the
+        // session ID. Folded commands start after init and finish before the next.
+        for (const submitted of context.submittedPrompts.values()) {
+          if (submitted.started && !submitted.nativeFinished) {
+            submitted.nativeInitSessionId = message.session_id;
+            submitted.nativeInitSequence = context.nativeInitSequence;
+            submitted.initialBatch = true;
+            submitted.resultObserved = false;
+          }
+        }
         yield* offerRuntimeEvent({
           ...base,
           type: "session.configured",
@@ -4004,10 +4150,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     message: SDKMessage,
   ) {
     yield* logNativeSdkMessage(context, message);
+    if (context.stopped) return;
     yield* ensureThreadId(context, message);
+    if (context.stopped) return;
 
-    // Wire-only command bookkeeping has no user-facing T3 lifecycle.
     if (sdkMessageType(message) === "command_lifecycle") {
+      yield* handleCommandLifecycle(context, message);
       return;
     }
 
@@ -4130,6 +4278,9 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
+    // Closing input permits held-result ordering that has no anonymous-result anchor.
+    if (!context.pendingResult?.exactMatch) context.pendingResult = undefined;
+
     // Schedule process termination before any cleanup that can wait on the
     // provider. The SDK closes stdin, then escalates from SIGTERM to SIGKILL.
     yield* Effect.try({
@@ -4203,10 +4354,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (context.nativeProcess.captured) {
       yield* Deferred.await(context.nativeProcess.exited);
       for (const submitted of context.submittedPrompts.values()) {
+        submitted.nativeFinished = true;
         yield* submitted.options.nativeStopped;
       }
       context.submittedPrompts.clear();
     }
+    preservePendingClaudeUsage(context);
     if (context.turnState) {
       yield* completeTurn(
         context,
@@ -4906,6 +5059,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         query: queryRuntime,
         submissionSemaphore: Semaphore.makeUnsafe(1),
         submittedPrompts: new Map(),
+        pendingResult: undefined,
+        recoveryRequired: false,
+        nativeInitSequence: 0,
+        nativeInitSessionId: undefined,
+        lastResultUuid: undefined,
         nativeProcess,
         turnCompletion: undefined,
         streamFiber: undefined,
@@ -5009,9 +5167,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
+  const requireClaudeCompletionEvidence = (context: ClaudeSessionContext) => {
+    if (!context.recoveryRequired) return Effect.void;
+    return new ProviderAdapterRequestError({
+      provider: PROVIDER,
+      method: "turn/start",
+      detail:
+        "Claude has not confirmed the previous input. Stop the session before sending more input, or retry after its exact command receipt arrives.",
+    });
+  };
+
   const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(
     function* (input, turnOptions) {
       const context = yield* requireSession(input.threadId);
+      yield* requireClaudeCompletionEvidence(context);
       const modelCatalog = yield* modelCatalogEffect;
       const selectedModel =
         input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
@@ -5093,6 +5262,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           Effect.gen(function* () {
             while (true) {
               if (context.turnCompletion) yield* Deferred.await(context.turnCompletion);
+              yield* requireClaudeCompletionEvidence(context);
               if (context.stopped || sessions.get(input.threadId) !== context) {
                 return yield* new ProviderAdapterSessionClosedError({
                   provider: PROVIDER,
@@ -5107,6 +5277,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               const turnId = steeringTurnState?.turnId ?? TurnId.make(yield* randomUUIDv4);
               const stamp = yield* makeEventStamp();
               if (turnOptions) yield* turnOptions.beforeSubmit(turnId);
+              if (context.recoveryRequired) {
+                if (turnOptions) yield* turnOptions.notSubmitted;
+                yield* requireClaudeCompletionEvidence(context);
+              }
               if (context.stopped || sessions.get(input.threadId) !== context) {
                 if (turnOptions) yield* turnOptions.notSubmitted;
                 return yield* new ProviderAdapterSessionClosedError({
@@ -5143,6 +5317,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                 context.submittedPrompts.set(messageId, {
                   turnId,
                   options: turnOptions,
+                  started: false,
+                  initialBatch: false,
+                  nativeFinished: false,
+                  resultObserved: false,
                 });
               // No async work may separate admission from this queue write.
               const offered = Queue.offerUnsafe(context.promptQueue, { type: "message", message });
