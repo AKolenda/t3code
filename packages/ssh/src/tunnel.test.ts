@@ -577,6 +577,11 @@ itOnPosix.for(["reused", "missing", "matching"] as const)(
       await NodeFSP.writeFile(NodePath.join(stateDir, "pid"), String(unrelated.pid));
       await NodeFSP.writeFile(NodePath.join(stateDir, "port"), String(address.port));
       await NodeFSP.writeFile(NodePath.join(stateDir, "managed"), "managed");
+      // Same runner as this launch, so the unready server is not replaced as an upgrade.
+      await NodeFSP.writeFile(
+        NodePath.join(stateDir, "run-t3.sh"),
+        `${buildRemoteT3RunnerScript({ nodeScriptPath: entry })}\n`,
+      );
       if (identity !== "missing") {
         const actual = await NodeUtil.promisify(NodeChildProcess.execFile)(
           "ps",
@@ -629,6 +634,105 @@ server.listen(port, "127.0.0.1");
       }
       unrelated.kill("SIGTERM");
       await exited;
+      await NodeFSP.rm(home, { recursive: true, force: true });
+    }
+  },
+);
+
+// The runner script embeds the package spec. A changed spec after an app
+// update must replace the launcher's own server, and only that server.
+itOnPosix.for(["own", "foreign"] as const)(
+  "replaces a running server after a runner change only when its identity matches: %s",
+  async (identity) => {
+    const home = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-ssh-upgrade-test-"));
+    const stateDir = NodePath.join(home, ".t3", "ssh-launch", "test");
+    const marker = NodePath.join(home, "launched-pid");
+    const entry = NodePath.join(home, "server.mjs");
+    const oldServer = NodeHttp.createServer((_request, response) => response.end("ready"));
+    oldServer.listen(0, "127.0.0.1");
+    await NodeEvents.EventEmitter.once(oldServer, "listening");
+    const address = oldServer.address();
+    if (!address || typeof address === "string") throw new Error("Expected TCP address");
+    // Stands in for the previously launched server process.
+    const oldProcess = NodeChildProcess.spawn(process.execPath, ["-e", "process.stdin.resume()"], {
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    const oldExit = NodeEvents.EventEmitter.once(oldProcess, "exit");
+    try {
+      await NodeFSP.mkdir(stateDir, { recursive: true });
+      await NodeFSP.mkdir(NodePath.join(home, ".t3", "userdata"));
+      await NodeFSP.writeFile(NodePath.join(stateDir, "pid"), String(oldProcess.pid));
+      await NodeFSP.writeFile(NodePath.join(stateDir, "port"), String(address.port));
+      await NodeFSP.writeFile(NodePath.join(stateDir, "managed"), "managed");
+      await NodeFSP.writeFile(NodePath.join(stateDir, "run-t3.sh"), "#!/bin/sh\nexit 1\n");
+      const actual = await NodeUtil.promisify(NodeChildProcess.execFile)(
+        "ps",
+        ["-p", String(oldProcess.pid), "-o", "lstart="],
+        { env: { ...process.env, LC_ALL: "C" } },
+      );
+      await NodeFSP.writeFile(
+        NodePath.join(stateDir, "started-at"),
+        identity === "own" ? actual.stdout : "old process start time",
+      );
+      await NodeFSP.writeFile(
+        NodePath.join(home, ".t3", "userdata", "server-runtime.json"),
+        JSON.stringify({
+          version: 1,
+          pid: oldProcess.pid,
+          port: address.port,
+          origin: `http://127.0.0.1:${address.port}`,
+        }),
+      );
+      await NodeFSP.writeFile(
+        entry,
+        `
+import * as http from "node:http";
+import * as fs from "node:fs";
+fs.writeFileSync(${JSON.stringify(marker)}, String(process.pid));
+const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
+const server = http.createServer((_request, response) => {
+  response.end("ready");
+  server.close();
+});
+server.listen(port, "127.0.0.1");
+`,
+      );
+      const result = await NodeUtil.promisify(NodeChildProcess.execFile)(
+        "sh",
+        ["-c", buildRemoteLaunchScript({ nodeScriptPath: entry }), "sh", "test"],
+        { env: { ...process.env, HOME: home } },
+      );
+      const parsed = JSON.parse(result.stdout);
+      if (identity === "own") {
+        await oldExit;
+        assert.equal(oldProcess.signalCode, "SIGTERM");
+        assert.equal(parsed.serverKind, "managed");
+        assert.notEqual(parsed.remotePort, address.port);
+        assert.equal(
+          await NodeFSP.readFile(NodePath.join(stateDir, "managed"), "utf8"),
+          "managed\n",
+        );
+      } else {
+        assert.equal(oldProcess.exitCode, null);
+        assert.equal(oldProcess.signalCode, null);
+        assert.deepEqual(parsed, { remotePort: address.port, serverKind: "external" });
+        await expect(NodeFSP.readFile(marker)).rejects.toMatchObject({ code: "ENOENT" });
+      }
+    } finally {
+      const pid = await NodeFSP.readFile(marker, "utf8").catch(() => undefined);
+      if (pid !== undefined) {
+        // This PID was captured by the fixture at spawn, not found by a process scan.
+        try {
+          process.kill(Number(pid), "SIGTERM");
+        } catch {
+          /* The one-request fixture already exited. */
+        }
+      }
+      oldProcess.kill("SIGTERM");
+      await oldExit;
+      await new Promise<void>((resolve, reject) =>
+        oldServer.close((error) => (error ? reject(error) : resolve())),
+      );
       await NodeFSP.rm(home, { recursive: true, force: true });
     }
   },

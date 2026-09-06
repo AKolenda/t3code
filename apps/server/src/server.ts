@@ -584,7 +584,15 @@ export const makeServerLayer = Layer.unwrap(
         const address = server.address;
         if (typeof address === "string" || !("port" in address)) return;
         const state = yield* makePersistedServerRuntimeState({ config, port: address.port });
-        yield* ownership.publish(state);
+        // The server already owns the directory and is listening. A failed
+        // discovery record only degrades CLI and SSH discovery.
+        yield* ownership
+          .publish(state)
+          .pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Failed to publish server runtime state", { cause }),
+            ),
+          );
       }),
     );
     const tailscaleServeLayer = config.tailscaleServeEnabled

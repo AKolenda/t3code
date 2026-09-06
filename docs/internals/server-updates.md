@@ -24,7 +24,9 @@ different file while the first still runs. A crash releases the lock automatical
 
 Older releases do not honor this lock. A legacy record with a live PID blocks
 startup unless its process start time proves PID reuse. An unknown start time
-keeps the refusal in place. PID existence never authorizes a stop. Service setup
+keeps the refusal in place. PID existence never authorizes a stop. A refused
+server exits with code 78 so the desktop app can stop its restart loop and tell
+the user instead of retrying against a lock that will not clear. Service setup
 requires an explicit stop of unmanaged servers rather than terminating active
 agent work.
 

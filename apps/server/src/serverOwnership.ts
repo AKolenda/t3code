@@ -3,9 +3,11 @@ import * as NodeCrypto from "node:crypto";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
+import { SERVER_EXIT_CODE_STATE_DIR_OWNED } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Option from "effect/Option";
+import * as Runtime from "effect/Runtime";
 import * as Schema from "effect/Schema";
 
 import * as ProcessRunner from "./processRunner.ts";
@@ -21,6 +23,10 @@ export class ServerAlreadyRunningError extends Schema.TaggedErrorClass<ServerAlr
   "ServerAlreadyRunningError",
   { stateDir: Schema.String },
 ) {
+  // Distinct process exit code so a supervisor can tell "owned by another
+  // server" apart from a crash and stop restarting.
+  override readonly [Runtime.errorExitCode] = SERVER_EXIT_CODE_STATE_DIR_OWNED;
+
   override get message(): string {
     return `A T3 Code server already owns ${this.stateDir}. Finish active agent work, stop that server through the app or terminal that started it, then retry this command with the same home directory. No server was stopped.`;
   }

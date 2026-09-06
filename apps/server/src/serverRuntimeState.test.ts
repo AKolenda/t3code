@@ -279,6 +279,46 @@ it("serializes simultaneous process starts, including symlink aliases", async ()
   }
 });
 
+// A supervisor (the desktop app) reads this code to stop restarting.
+it("exits the real CLI with the state-directory-owned code while another owner holds the lock", async () => {
+  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-ownership-test-"));
+  const stateDir = NodePath.join(root, "userdata");
+  await NodeFSP.mkdir(stateDir);
+  const owner = await spawnOwner(NodePath.join(stateDir, "server-runtime.json"));
+  try {
+    assert.equal(await owner.start(), "acquired");
+    const cli = NodeChildProcess.spawn(
+      process.execPath,
+      // Ownership is checked before HTTP binds, so this port is never opened.
+      ["src/bin.ts", "serve", "--base-dir", root, "--host", "127.0.0.1", "--port", "47999"],
+      {
+        cwd: NodeURL.fileURLToPath(new URL("..", import.meta.url)),
+        env: {
+          ...process.env,
+          T3CODE_HOME: undefined,
+          T3_SERVICE_LAUNCHER_CONTEXT: undefined,
+          T3_BOOT_SERVICE_UNIT: undefined,
+          T3CODE_NO_BROWSER: "1",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let output = "";
+    for (const stream of [cli.stdout, cli.stderr]) {
+      stream.setEncoding("utf8");
+      stream.on("data", (chunk: string) => {
+        output += chunk;
+      });
+    }
+    const [code] = (await NodeEvents.EventEmitter.once(cli, "exit")) as [number | null];
+    assert.equal(code, 78, output);
+    assert.include(output, "ServerAlreadyRunningError");
+  } finally {
+    await owner.stop();
+    await NodeFSP.rm(root, { recursive: true, force: true });
+  }
+});
+
 it("keeps independent directories independent and recovers a crashed owner", async () => {
   const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-ownership-test-"));
   const firstPath = NodePath.join(root, "first", "server-runtime.json");
