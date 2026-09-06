@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off - The SDK spawn hook requires synchronous Node streams and process events.
 /**
  * ClaudeAdapterLive - Scoped live implementation for the Claude Agent provider adapter.
  *
@@ -20,6 +21,7 @@ import {
   type SDKUserMessage,
   type ModelUsage,
 } from "@anthropic-ai/claude-agent-sdk";
+import * as NodeChildProcess from "node:child_process";
 import { parseCliArgs } from "@t3tools/shared/cliArgs";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 import { type ClaudeScopedLimitNames, claudeRateLimitEventToUpdate } from "./claudeUsageLimits.ts";
@@ -77,6 +79,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -109,6 +112,7 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import type { ProviderTurnStartOptions } from "../Services/ProviderAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 const encodeUnknownJsonStringExit = Schema.encodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
 const decodeUnknownJsonStringExit = Schema.decodeUnknownExit(Schema.fromJsonString(Schema.Unknown));
@@ -160,6 +164,7 @@ interface ClaudeTurnState {
   compactedSinceLatestAssistantUsage: boolean;
   hasSubagents: boolean;
   nextSyntheticAssistantBlockIndex: number;
+  priorTokenUsage?: TurnTokenUsage;
 }
 
 interface AssistantTextBlockState {
@@ -290,6 +295,19 @@ interface ClaudeSessionContext {
   session: ProviderSession;
   readonly promptQueue: Queue.Queue<PromptQueueItem>;
   readonly query: ClaudeQueryRuntime;
+  readonly submissionSemaphore: Semaphore.Semaphore;
+  readonly submittedPrompts: Map<
+    string,
+    {
+      readonly turnId: TurnId;
+      readonly options: ProviderTurnStartOptions;
+    }
+  >;
+  readonly nativeProcess: {
+    captured: boolean;
+    readonly exited: Deferred.Deferred<void>;
+  };
+  turnCompletion: Deferred.Deferred<void> | undefined;
   streamFiber: Fiber.Fiber<void, Error> | undefined;
   readonly startedAt: string;
   readonly basePermissionMode: PermissionMode | undefined;
@@ -775,6 +793,39 @@ function normalizeClaudeTurnTokenUsage(
     usageStatus: "partial",
     ...(inputTokens !== undefined ? { inputTokens } : {}),
     ...(rawOutputTokens !== undefined ? { outputTokens: rawOutputTokens } : {}),
+  };
+}
+
+function addClaudeTurnTokenUsage(
+  previous: TurnTokenUsage | undefined,
+  current: TurnTokenUsage,
+): TurnTokenUsage {
+  if (!previous) return current;
+  const sum = (left: number | undefined, right: number | undefined) =>
+    left === undefined && right === undefined ? undefined : (left ?? 0) + (right ?? 0);
+  const common = {
+    usageScope: "main_agent" as const,
+    hasSubagents: previous.hasSubagents || current.hasSubagents,
+    cachedInputTokens: sum(previous.cachedInputTokens, current.cachedInputTokens),
+    cacheCreationTokens: sum(previous.cacheCreationTokens, current.cacheCreationTokens),
+    reasoningTokens: sum(previous.reasoningTokens, current.reasoningTokens),
+  };
+  if (previous.usageStatus === "complete" && current.usageStatus === "complete") {
+    return {
+      ...common,
+      usageStatus: "complete",
+      inputTokens: previous.inputTokens + current.inputTokens,
+      outputTokens: previous.outputTokens + current.outputTokens,
+    };
+  }
+  return {
+    ...common,
+    usageStatus:
+      previous.usageStatus === "unavailable" && current.usageStatus === "unavailable"
+        ? "unavailable"
+        : "partial",
+    inputTokens: sum(previous.inputTokens, current.inputTokens),
+    outputTokens: sum(previous.outputTokens, current.outputTokens),
   };
 }
 
@@ -2638,7 +2689,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ? { totalCostUsd: result.total_cost_usd }
           : {}),
         ...(errorMessage ? { errorMessage } : {}),
-        tokenUsage: normalizeClaudeTurnTokenUsage(result, turnState.hasSubagents, status),
+        tokenUsage: addClaudeTurnTokenUsage(
+          turnState.priorTokenUsage,
+          normalizeClaudeTurnTokenUsage(result, turnState.hasSubagents, status),
+        ),
       },
       providerRefs: nativeProviderRefs(context),
     });
@@ -3269,14 +3323,54 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
-    const status = turnStatusFromResult(message);
-    const errorMessage = resultUserFacingError(message);
-
-    if (status === "failed") {
-      yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
-    }
-
-    yield* completeTurn(context, status, errorMessage, message);
+    const completion = Deferred.makeUnsafe<void>();
+    context.turnCompletion = completion;
+    yield* Effect.gen(function* () {
+      const status = turnStatusFromResult(message);
+      const errorMessage = resultUserFacingError(message);
+      const completedMessageIds = new Set(message.user_message_uuids ?? []);
+      if (message.user_message_uuid !== undefined)
+        completedMessageIds.add(message.user_message_uuid);
+      let completedOwnPrompt = false;
+      for (const [messageId, submitted] of context.submittedPrompts) {
+        // A result identifies consumed prompts. An echoed or queued prompt can still be pending.
+        if (!completedMessageIds.has(messageId)) continue;
+        completedOwnPrompt = true;
+        context.submittedPrompts.delete(messageId);
+        yield* submitted.options.nativeCompleted(submitted.turnId);
+      }
+      if (status === "failed") {
+        yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
+      }
+      if (context.submittedPrompts.size === 0) {
+        yield* completeTurn(context, status, errorMessage, message);
+      } else if (context.turnState && completedOwnPrompt) {
+        context.turnState.priorTokenUsage = addClaudeTurnTokenUsage(
+          context.turnState.priorTokenUsage,
+          normalizeClaudeTurnTokenUsage(message, context.turnState.hasSubagents, status),
+        );
+      } else if (context.submittedPrompts.size > 0 && completedMessageIds.size === 0) {
+        const stamp = yield* makeEventStamp();
+        yield* offerRuntimeEvent({
+          type: "runtime.warning",
+          eventId: stamp.eventId,
+          provider: PROVIDER,
+          threadId: context.session.threadId,
+          createdAt: stamp.createdAt,
+          payload: {
+            message:
+              "Claude did not identify the completed prompt. Stop the session to confirm that its work has finished.",
+          },
+        });
+      }
+    }).pipe(
+      Effect.ensuring(
+        Effect.gen(function* () {
+          context.turnCompletion = undefined;
+          yield* Deferred.succeed(completion, undefined);
+        }),
+      ),
+    );
   });
 
   /**
@@ -3997,11 +4091,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
+    let turnStatus: ProviderRuntimeTurnStatus = "interrupted";
+    let turnError = "Claude runtime stream ended.";
     if (Exit.isFailure(exit)) {
       if (isClaudeInterruptedCause(exit.cause)) {
-        if (context.turnState) {
-          yield* completeTurn(context, "interrupted", "Claude runtime interrupted.");
-        }
+        turnError = "Claude runtime interrupted.";
       } else {
         const failures = exit.cause.reasons.flatMap((reason) =>
           Cause.isFailReason(reason) ? [reason.error] : [],
@@ -4011,22 +4105,30 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           failureCount: failures.length,
           failureTags: failures.map((failure) => failure._tag),
         });
-        yield* completeTurn(context, "failed", message);
+        turnStatus = "failed";
+        turnError = message;
       }
-    } else if (context.turnState) {
-      yield* completeTurn(context, "interrupted", "Claude runtime stream ended.");
     }
 
     yield* stopSessionInternal(context, {
       emitExitEvent: true,
+      turnStatus,
+      turnError,
     });
   });
 
   const stopSessionInternal = Effect.fn("stopSessionInternal")(function* (
     context: ClaudeSessionContext,
-    options?: { readonly emitExitEvent?: boolean },
+    options?: {
+      readonly emitExitEvent?: boolean;
+      readonly turnStatus?: ProviderRuntimeTurnStatus;
+      readonly turnError?: string;
+    },
   ) {
-    if (context.stopped) return;
+    if (context.stopped) {
+      if (context.nativeProcess.captured) yield* Deferred.await(context.nativeProcess.exited);
+      return;
+    }
 
     // Schedule process termination before any cleanup that can wait on the
     // provider. The SDK closes stdin, then escalates from SIGTERM to SIGKILL.
@@ -4090,16 +4192,27 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       yield* pending.cancel;
     }
 
-    if (context.turnState) {
-      yield* completeTurn(context, "interrupted", "Session stopped.");
-    }
-
     yield* Queue.shutdown(context.promptQueue);
 
     const streamFiber = context.streamFiber;
     context.streamFiber = undefined;
     if (streamFiber && streamFiber.pollUnsafe() === undefined) {
       yield* Fiber.interrupt(streamFiber);
+    }
+
+    if (context.nativeProcess.captured) {
+      yield* Deferred.await(context.nativeProcess.exited);
+      for (const submitted of context.submittedPrompts.values()) {
+        yield* submitted.options.nativeStopped;
+      }
+      context.submittedPrompts.clear();
+    }
+    if (context.turnState) {
+      yield* completeTurn(
+        context,
+        options?.turnStatus ?? "interrupted",
+        options?.turnError ?? "Session stopped.",
+      );
     }
 
     const updatedAt = yield* nowIso;
@@ -4653,6 +4766,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(input.cwd ? [input.cwd] : []),
         serverConfig.attachmentsDir,
       ];
+      const nativeProcess = { captured: false, exited: Deferred.makeUnsafe<void>() };
       const queryOptions: ClaudeQueryOptions = {
         ...(input.cwd ? { cwd: input.cwd } : {}),
         ...(apiModelId ? { model: apiModelId } : {}),
@@ -4683,6 +4797,19 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         onUserDialog,
         supportedDialogKinds: ["resume_return"],
         env: claudeEnvironment,
+        spawnClaudeCodeProcess: ({ command, args, cwd, env, signal }) => {
+          const child = NodeChildProcess.spawn(command, args, {
+            cwd,
+            env,
+            signal,
+            stdio: ["pipe", "pipe", "pipe"],
+            windowsHide: true,
+          });
+          nativeProcess.captured = child.pid !== undefined;
+          child.stderr.resume();
+          child.once("exit", () => Deferred.doneUnsafe(nativeProcess.exited, Exit.void));
+          return child;
+        },
         additionalDirectories,
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession
@@ -4763,6 +4890,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         session,
         promptQueue,
         query: queryRuntime,
+        submissionSemaphore: Semaphore.makeUnsafe(1),
+        submittedPrompts: new Map(),
+        nativeProcess,
+        turnCompletion: undefined,
         streamFiber: undefined,
         startedAt,
         basePermissionMode: permissionMode,
@@ -4864,142 +4995,182 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
-  const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
-    const context = yield* requireSession(input.threadId);
-    const modelCatalog = yield* modelCatalogEffect;
-    const selectedModel =
-      input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
-        ? input.modelSelection
+  const sendTurn: ClaudeAdapterShape["sendTurn"] = Effect.fn("sendTurn")(
+    function* (input, turnOptions) {
+      const context = yield* requireSession(input.threadId);
+      const modelCatalog = yield* modelCatalogEffect;
+      const selectedModel =
+        input.modelSelection !== undefined && input.modelSelection.instanceId === boundInstanceId
+          ? input.modelSelection
+          : undefined;
+      const modelSelection = selectedModel
+        ? { ...selectedModel, model: resolveClaudeModelSlug(modelCatalog, selectedModel.model) }
         : undefined;
-    const modelSelection = selectedModel
-      ? { ...selectedModel, model: resolveClaudeModelSlug(modelCatalog, selectedModel.model) }
-      : undefined;
 
-    // A sendTurn while a real turn is running is a steer: the message is
-    // queued into the live SDK agent loop and the work continues as the same
-    // turn — no synthetic turn boundary. Stale synthetic turns (from
-    // background agent responses between user prompts) are auto-closed
-    // instead, so they don't block the user's next turn.
-    const steeringTurnState =
-      context.turnState && context.turnState.synthetic !== true ? context.turnState : null;
-    if (context.turnState && steeringTurnState === null) {
-      yield* completeTurn(context, "completed");
-    }
-
-    if (modelSelection?.model) {
-      const apiModelId = resolveClaudeCatalogApiModelId(modelCatalog, modelSelection);
-      if (context.currentApiModelId !== apiModelId) {
-        yield* Effect.tryPromise({
-          try: () => context.query.setModel(apiModelId),
-          catch: (cause) => toRequestError(input.threadId, "turn/setModel", cause),
-        });
-        context.currentApiModelId = apiModelId;
+      if (modelSelection?.model) {
+        const apiModelId = resolveClaudeCatalogApiModelId(modelCatalog, modelSelection);
+        if (context.currentApiModelId !== apiModelId) {
+          yield* Effect.tryPromise({
+            try: () => context.query.setModel(apiModelId),
+            catch: (cause) => toRequestError(input.threadId, "turn/setModel", cause),
+          });
+          context.currentApiModelId = apiModelId;
+        }
+        context.session = {
+          ...context.session,
+          model: modelSelection.model,
+        };
+        const turnEffort = resolveClaudeCatalogEffort(
+          modelCatalog,
+          modelSelection.model,
+          getModelSelectionStringOptionValue(modelSelection, "effort"),
+        );
+        context.currentEffort =
+          getEffectiveClaudeAgentEffort(modelCatalog, turnEffort ?? null, modelSelection.model) ??
+          undefined;
       }
-      context.session = {
-        ...context.session,
-        model: modelSelection.model,
-      };
-      const turnEffort = resolveClaudeCatalogEffort(
-        modelCatalog,
-        modelSelection.model,
-        getModelSelectionStringOptionValue(modelSelection, "effort"),
+
+      // Apply interaction mode by switching the SDK's permission mode.
+      // "plan" maps directly to the SDK's "plan" permission mode;
+      // "default" restores the session's original permission mode.
+      // When interactionMode is absent we leave the current mode unchanged.
+      if (input.interactionMode === "plan") {
+        yield* Effect.tryPromise({
+          try: () => context.query.setPermissionMode("plan"),
+          catch: (cause) => toRequestError(input.threadId, "turn/setPermissionMode", cause),
+        });
+      } else if (input.interactionMode === "default") {
+        yield* Effect.tryPromise({
+          try: () => context.query.setPermissionMode(context.basePermissionMode ?? "default"),
+          catch: (cause) => toRequestError(input.threadId, "turn/setPermissionMode", cause),
+        });
+      }
+
+      // Re-scan on every send: skills are added and switched off mid-session,
+      // and the scan is a few directory reads. A skill switched off via
+      // skillOverrides, or reserved for the agent with `user-invocable: false`,
+      // is left as prose: the CLI would answer `/name` with a notice instead of
+      // running it.
+      const skills = yield* discoverClaudeSkills(
+        claudeSettings,
+        context.session.cwd,
+        claudeEnvironment,
+      ).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, path),
       );
-      context.currentEffort =
-        getEffectiveClaudeAgentEffort(modelCatalog, turnEffort ?? null, modelSelection.model) ??
-        undefined;
-    }
-
-    // Apply interaction mode by switching the SDK's permission mode.
-    // "plan" maps directly to the SDK's "plan" permission mode;
-    // "default" restores the session's original permission mode.
-    // When interactionMode is absent we leave the current mode unchanged.
-    if (input.interactionMode === "plan") {
-      yield* Effect.tryPromise({
-        try: () => context.query.setPermissionMode("plan"),
-        catch: (cause) => toRequestError(input.threadId, "turn/setPermissionMode", cause),
+      const message = yield* buildUserMessageEffect(input, {
+        fileSystem,
+        attachmentsDir: serverConfig.attachmentsDir,
+        boundInstanceId,
+        modelCatalog,
+        skillNames: new Set(
+          skills
+            .filter((skill) => skill.enabled && skill.userInvocable !== false)
+            .map((skill) => skill.name),
+        ),
       });
-    } else if (input.interactionMode === "default") {
-      yield* Effect.tryPromise({
-        try: () => context.query.setPermissionMode(context.basePermissionMode ?? "default"),
-        catch: (cause) => toRequestError(input.threadId, "turn/setPermissionMode", cause),
-      });
-    }
 
-    const turnId = steeringTurnState?.turnId ?? TurnId.make(yield* randomUUIDv4);
-    if (steeringTurnState === null) {
-      const turnState: ClaudeTurnState = {
-        turnId,
-        startedAt: yield* nowIso,
-        items: [],
-        assistantTextBlocks: new Map(),
-        assistantTextBlockOrder: [],
-        capturedProposedPlanKeys: new Set(),
-        latestAssistantUsage: undefined,
-        compactedSinceLatestAssistantUsage: false,
-        hasSubagents: false,
-        nextSyntheticAssistantBlockIndex: -1,
-      };
-
-      const updatedAt = yield* nowIso;
-      context.turnState = turnState;
-      context.session = {
-        ...context.session,
-        status: "running",
-        activeTurnId: turnId,
-        updatedAt,
-      };
-
-      const turnStartedStamp = yield* makeEventStamp();
-      yield* offerRuntimeEvent({
-        type: "turn.started",
-        eventId: turnStartedStamp.eventId,
-        provider: PROVIDER,
-        createdAt: turnStartedStamp.createdAt,
-        threadId: context.session.threadId,
-        turnId,
-        payload: modelSelection?.model ? { model: modelSelection.model } : {},
-        providerRefs: {},
-      });
-    }
-
-    // Re-scan on every send: skills are added and switched off mid-session,
-    // and the scan is a few directory reads. A skill switched off via
-    // skillOverrides, or reserved for the agent with `user-invocable: false`,
-    // is left as prose: the CLI would answer `/name` with a notice instead of
-    // running it.
-    const skills = yield* discoverClaudeSkills(
-      claudeSettings,
-      context.session.cwd,
-      claudeEnvironment,
-    ).pipe(
-      Effect.provideService(FileSystem.FileSystem, fileSystem),
-      Effect.provideService(Path.Path, path),
-    );
-    const message = yield* buildUserMessageEffect(input, {
-      fileSystem,
-      attachmentsDir: serverConfig.attachmentsDir,
-      boundInstanceId,
-      modelCatalog,
-      skillNames: new Set(
-        skills
-          .filter((skill) => skill.enabled && skill.userInvocable !== false)
-          .map((skill) => skill.name),
-      ),
-    });
-
-    yield* Queue.offer(context.promptQueue, {
-      type: "message",
-      message,
-    }).pipe(Effect.mapError((cause) => toRequestError(input.threadId, "turn/start", cause)));
-
-    return {
-      threadId: context.session.threadId,
-      turnId,
-      ...(context.session.resumeCursor !== undefined
-        ? { resumeCursor: context.session.resumeCursor }
-        : {}),
-    };
-  });
+      const messageId = yield* randomUUIDv4;
+      message.uuid = messageId as NonNullable<SDKUserMessage["uuid"]>;
+      let submitted = false;
+      return yield* context.submissionSemaphore
+        .withPermit(
+          Effect.gen(function* () {
+            while (true) {
+              if (context.turnCompletion) yield* Deferred.await(context.turnCompletion);
+              if (context.stopped || sessions.get(input.threadId) !== context) {
+                return yield* new ProviderAdapterSessionClosedError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                });
+              }
+              // Re-read after preparation. The previous turn can finish during file reads.
+              const steeringTurnState =
+                context.turnState?.synthetic !== true ? context.turnState : undefined;
+              if (context.turnState && !steeringTurnState)
+                yield* completeTurn(context, "completed");
+              const turnId = steeringTurnState?.turnId ?? TurnId.make(yield* randomUUIDv4);
+              const stamp = yield* makeEventStamp();
+              if (turnOptions) yield* turnOptions.beforeSubmit(turnId);
+              if (context.stopped || sessions.get(input.threadId) !== context) {
+                if (turnOptions) yield* turnOptions.notSubmitted;
+                return yield* new ProviderAdapterSessionClosedError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                });
+              }
+              if (context.turnCompletion || context.turnState !== steeringTurnState) {
+                if (turnOptions) yield* turnOptions.notSubmitted;
+                continue;
+              }
+              const previousSession = context.session;
+              if (!steeringTurnState) {
+                context.turnState = {
+                  turnId,
+                  startedAt: stamp.createdAt,
+                  items: [],
+                  assistantTextBlocks: new Map(),
+                  assistantTextBlockOrder: [],
+                  capturedProposedPlanKeys: new Set(),
+                  latestAssistantUsage: undefined,
+                  compactedSinceLatestAssistantUsage: false,
+                  hasSubagents: false,
+                  nextSyntheticAssistantBlockIndex: -1,
+                };
+                context.session = {
+                  ...context.session,
+                  status: "running",
+                  activeTurnId: turnId,
+                  updatedAt: stamp.createdAt,
+                };
+              }
+              if (turnOptions)
+                context.submittedPrompts.set(messageId, {
+                  turnId,
+                  options: turnOptions,
+                });
+              // No async work may separate admission from this queue write.
+              const offered = Queue.offerUnsafe(context.promptQueue, { type: "message", message });
+              if (!offered) {
+                context.submittedPrompts.delete(messageId);
+                if (!steeringTurnState) {
+                  context.turnState = undefined;
+                  context.session = previousSession;
+                }
+                if (turnOptions) yield* turnOptions.notSubmitted;
+                return yield* new ProviderAdapterSessionClosedError({
+                  provider: PROVIDER,
+                  threadId: input.threadId,
+                });
+              }
+              submitted = true;
+              if (!steeringTurnState)
+                Queue.offerUnsafe(runtimeEventQueue, {
+                  type: "turn.started",
+                  eventId: stamp.eventId,
+                  provider: PROVIDER,
+                  createdAt: stamp.createdAt,
+                  threadId: context.session.threadId,
+                  turnId,
+                  payload: modelSelection?.model ? { model: modelSelection.model } : {},
+                  providerRefs: {},
+                });
+              return {
+                threadId: context.session.threadId,
+                turnId,
+                ...(context.session.resumeCursor !== undefined
+                  ? { resumeCursor: context.session.resumeCursor }
+                  : {}),
+              };
+            }
+          }),
+        )
+        .pipe(
+          Effect.onExit(() => (!submitted && turnOptions ? turnOptions.notSubmitted : Effect.void)),
+        );
+    },
+  );
 
   const interruptTurn: ClaudeAdapterShape["interruptTurn"] = Effect.fn("interruptTurn")(
     function* (threadId, _turnId) {

@@ -23,6 +23,7 @@ import {
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import { assert, describe, it } from "@effect/vitest";
+import { vi } from "vite-plus/test";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
@@ -47,6 +48,7 @@ import {
 } from "../ClaudeModelCatalog.testFixtures.ts";
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import type { ProviderTurnStartOptions } from "../Services/ProviderAdapter.ts";
 import type { ClaudeScopedLimitNames } from "./claudeUsageLimits.ts";
 import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
@@ -216,6 +218,18 @@ function makeHarness(config?: {
     ),
     query,
     getLastCreateQueryInput: () => createInput,
+  };
+}
+
+function admissionOptions(
+  overrides: Partial<ProviderTurnStartOptions> = {},
+): ProviderTurnStartOptions {
+  return {
+    beforeSubmit: () => Effect.void,
+    notSubmitted: Effect.void,
+    nativeCompleted: () => Effect.void,
+    nativeStopped: Effect.void,
+    ...overrides,
   };
 }
 
@@ -1396,6 +1410,242 @@ describe("ClaudeAdapterLive", () => {
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
     );
+  });
+
+  it.effect("rechecks the active turn after message preparation and waits before queueing", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const first = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "First" });
+      const modelStarted = Promise.withResolvers<void>();
+      const modelRelease = Promise.withResolvers<void>();
+      vi.spyOn(harness.query, "setModel").mockImplementation(async () => {
+        modelStarted.resolve();
+        await modelRelease.promise;
+      });
+      const admitted = yield* Deferred.make<void>();
+      const admissionRelease = yield* Deferred.make<void>();
+      const secondFiber = yield* adapter
+        .sendTurn(
+          {
+            threadId: THREAD_ID,
+            input: "Second",
+            modelSelection: createModelSelection(
+              ProviderInstanceId.make("claudeAgent"),
+              SYNTHETIC_CLAUDE_STANDARD_MODEL,
+            ),
+          },
+          admissionOptions({
+            beforeSubmit: () =>
+              Deferred.succeed(admitted, undefined).pipe(
+                Effect.andThen(Deferred.await(admissionRelease)),
+              ),
+          }),
+        )
+        .pipe(Effect.forkChild);
+      yield* Effect.promise(() => modelStarted.promise);
+      const completed = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "turn.completed"),
+        Stream.runHead,
+        Effect.forkChild,
+      );
+      harness.query.emit({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        session_id: "sdk-admission",
+        uuid: "result-first",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(completed);
+      modelRelease.resolve();
+      yield* Deferred.await(admitted);
+      const sessions = yield* adapter.listSessions();
+      assert.equal(sessions[0]?.activeTurnId, undefined);
+      const prompt = harness.getLastCreateQueryInput()?.prompt[Symbol.asyncIterator]();
+      assert.isDefined(prompt);
+      const firstMessage = yield* Effect.promise(() => prompt!.next());
+      assert.equal(firstMessage.done, false);
+      let secondQueued = false;
+      const secondMessage = prompt!.next().then((value) => {
+        secondQueued = true;
+        return value;
+      });
+      assert.equal(secondQueued, false);
+      yield* Deferred.succeed(admissionRelease, undefined);
+      const second = yield* Fiber.join(secondFiber);
+      assert.notEqual(second.turnId, first.turnId);
+      assert.equal((yield* Effect.promise(() => secondMessage)).done, false);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect(
+    "keeps concurrent first sends in one turn and does not finish an unconsumed prompt",
+    () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        yield* adapter.startSession({
+          threadId: THREAD_ID,
+          provider: ProviderDriverKind.make("claudeAgent"),
+          runtimeMode: "full-access",
+        });
+        const firstAdmitted = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const firstFinished = yield* Deferred.make<void>();
+        let secondFinished = false;
+        const firstFiber = yield* adapter
+          .sendTurn(
+            { threadId: THREAD_ID, input: "First" },
+            admissionOptions({
+              beforeSubmit: () =>
+                Deferred.succeed(firstAdmitted, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                ),
+              nativeCompleted: () => Deferred.succeed(firstFinished, undefined).pipe(Effect.asVoid),
+            }),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(firstAdmitted);
+        const secondFiber = yield* adapter
+          .sendTurn(
+            { threadId: THREAD_ID, input: "Steer" },
+            admissionOptions({
+              nativeCompleted: () =>
+                Effect.sync(() => {
+                  secondFinished = true;
+                }),
+            }),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.succeed(release, undefined);
+        const first = yield* Fiber.join(firstFiber);
+        const second = yield* Fiber.join(secondFiber);
+        assert.equal(second.turnId, first.turnId);
+        const messages = yield* Effect.promise(() =>
+          readPromptMessages(harness.getLastCreateQueryInput(), 2),
+        );
+        const [firstMessage, secondMessage] = messages;
+        assert.isDefined(firstMessage?.uuid);
+        assert.isDefined(secondMessage?.uuid);
+        harness.query.emit({ ...firstMessage!, session_id: "sdk-admission" });
+        harness.query.emit({ ...secondMessage!, session_id: "sdk-admission" });
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          session_id: "sdk-admission",
+          uuid: "result-first",
+          user_message_uuid: firstMessage!.uuid,
+          queued_turn_count: 1,
+          usage: { input_tokens: 100, output_tokens: 20 },
+        } as unknown as SDKMessage);
+        yield* Deferred.await(firstFinished);
+        assert.equal(secondFinished, false);
+        const completed = yield* adapter.streamEvents.pipe(
+          Stream.filter((event) => event.type === "turn.completed"),
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit({ ...secondMessage!, session_id: "sdk-admission" });
+        harness.query.emit({
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          session_id: "sdk-admission",
+          uuid: "result-second",
+          user_message_uuids: [secondMessage!.uuid],
+          usage: { input_tokens: 50, output_tokens: 10 },
+        } as unknown as SDKMessage);
+        const [event] = yield* Fiber.join(completed);
+        assert.equal(secondFinished, true);
+        assert.equal(event?.type, "turn.completed");
+        if (event?.type === "turn.completed") {
+          assert.equal(event.payload.tokenUsage?.inputTokens, 150);
+          assert.equal(event.payload.tokenUsage?.outputTokens, 30);
+        }
+      }).pipe(Effect.provide(harness.layer));
+    },
+  );
+
+  it.effect("does not treat a local query close as native completion", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      let completed = false;
+      let stopped = false;
+      yield* adapter.sendTurn(
+        { threadId: THREAD_ID, input: "First" },
+        admissionOptions({
+          nativeCompleted: () =>
+            Effect.sync(() => {
+              completed = true;
+            }),
+          nativeStopped: Effect.sync(() => {
+            stopped = true;
+          }),
+        }),
+      );
+      yield* adapter.stopSession(THREAD_ID);
+      assert.equal(completed, false);
+      assert.equal(stopped, false);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("waits for the captured native process exit before completing Stop", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const spawnProcess = harness.getLastCreateQueryInput()?.options.spawnClaudeCodeProcess;
+      assert.isDefined(spawnProcess);
+      // This child is a disposable stdin reader, not a provider session.
+      const child = spawnProcess!({
+        command: process.execPath,
+        args: ["-e", "process.stdin.resume()"],
+        env: {},
+        signal: new AbortController().signal,
+      });
+      try {
+        let nativeStopped = false;
+        yield* adapter.sendTurn(
+          { threadId: THREAD_ID, input: "First" },
+          admissionOptions({
+            nativeStopped: Effect.sync(() => {
+              nativeStopped = true;
+            }),
+          }),
+        );
+        const closeStarted = Promise.withResolvers<void>();
+        vi.spyOn(harness.query, "close").mockImplementation(() => {
+          harness.query.finish();
+          closeStarted.resolve();
+        });
+        const stopFiber = yield* adapter.stopSession(THREAD_ID).pipe(Effect.forkChild);
+        yield* Effect.promise(() => closeStarted.promise);
+        assert.equal(nativeStopped, false);
+        assert.equal(stopFiber.pollUnsafe(), undefined);
+        child.kill("SIGTERM");
+        yield* Fiber.join(stopFiber);
+        assert.equal(nativeStopped, true);
+      } finally {
+        if (child.exitCode === null && child.signalCode == null) child.kill("SIGKILL");
+      }
+    }).pipe(Effect.provide(harness.layer));
   });
 
   it.effect("steers a running turn instead of opening a new one on mid-turn sendTurn", () => {
