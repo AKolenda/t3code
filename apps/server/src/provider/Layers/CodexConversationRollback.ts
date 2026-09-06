@@ -66,8 +66,13 @@ const invalid = (issue: string) =>
     issue,
   });
 
-const requestError = (method: string) => (cause: { readonly message: string }) =>
-  new ProviderAdapterRequestError({ provider: PROVIDER, method, detail: cause.message, cause });
+const requestError = (method: string) => (cause: { readonly _tag: string }) =>
+  new ProviderAdapterRequestError({
+    provider: PROVIDER,
+    method,
+    detail: Schema.isSchemaError(cause) ? "Codex returned an invalid response." : cause._tag,
+    cause,
+  });
 
 // 0.153.0 includes native before-turn forks and durable goal deferral.
 // Older app servers can ignore unknown fields before we validate the result.

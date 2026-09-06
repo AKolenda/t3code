@@ -434,7 +434,9 @@ describe("CheckpointReactor", () => {
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     let reactor = await runtime.runPromise(Effect.service(CheckpointReactor));
     const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
-    const checkpointReverts = await runtime.runPromise(CheckpointRevertRecovery.make);
+    const checkpointReverts = await testRuntime.runPromise(
+      CheckpointRevertRecovery.CheckpointRevertRecovery,
+    );
     const checkpointStore = await runtime.runPromise(
       Effect.service(CheckpointStore.CheckpointStore),
     );

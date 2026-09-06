@@ -443,6 +443,25 @@ it.effect("does not guess that unavailable goal inventory means no goal", () =>
   }),
 );
 
+it.effect("keeps rejected Codex payloads out of rewind error details", () =>
+  Effect.gen(function* () {
+    const { client, request } = makeRollbackClient();
+    request.mockImplementationOnce(() =>
+      Effect.succeed({ thread: "private-conversation-payload" }),
+    );
+    const error = yield* prepareCodexConversationRollback(
+      client,
+      rollbackInput,
+      rollbackInitialize,
+    ).pipe(Effect.flip);
+    NodeAssert.equal(error._tag, "ProviderAdapterRequestError");
+    if (error._tag !== "ProviderAdapterRequestError") return;
+    NodeAssert.equal(error.detail, "Codex returned an invalid response.");
+    NodeAssert.equal(Schema.isSchemaError(error.cause), true);
+    NodeAssert.equal(error.message.includes("private-conversation-payload"), false);
+  }),
+);
+
 it.effect("rewinds a conversation that has no native goal", () =>
   Effect.gen(function* () {
     const { client } = makeRollbackClient(null);

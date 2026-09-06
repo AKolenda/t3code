@@ -6,7 +6,9 @@ import {
   NonNegativeInt,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
@@ -77,6 +79,27 @@ const toPersistenceError = (operation: string) => (cause: unknown) =>
     ? PersistenceDecodeError.fromSchemaError(operation, cause)
     : new PersistenceSqlError({ operation, cause });
 
+export class CheckpointRevertRecovery extends Context.Service<
+  CheckpointRevertRecovery,
+  {
+    readonly get: (
+      threadId: ThreadId,
+    ) => Effect.Effect<Option.Option<RevertAttempt>, PersistenceDecodeError | PersistenceSqlError>;
+    readonly reserve: (
+      attempt: typeof RequestedRevert.Type,
+    ) => Effect.Effect<void, PersistenceDecodeError | PersistenceSqlError>;
+    readonly save: (
+      attempt: PreparedRevert,
+    ) => Effect.Effect<
+      void,
+      PersistenceDecodeError | PersistenceSqlError | CheckpointRevertRecoveryError
+    >;
+    readonly clear: (
+      attempt: Pick<RevertAttempt, "threadId" | "attemptId">,
+    ) => Effect.Effect<void, PersistenceDecodeError | PersistenceSqlError>;
+  }
+>()("t3/checkpointing/CheckpointRevertRecovery") {}
+
 // This record is not a projection. It must survive a restart between Git,
 // provider rollback, and the transaction that saves thread.reverted.
 export const make = Effect.gen(function* () {
@@ -145,5 +168,7 @@ export const make = Effect.gen(function* () {
     `.pipe(Effect.mapError(toPersistenceError("CheckpointRevertRecovery.clear")));
   });
 
-  return { get, reserve, save, clear };
+  return CheckpointRevertRecovery.of({ get, reserve, save, clear });
 });
+
+export const layer = Layer.effect(CheckpointRevertRecovery, make);
