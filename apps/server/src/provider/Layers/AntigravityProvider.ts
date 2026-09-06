@@ -401,13 +401,22 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
   });
 
   // Disk discovery and native callbacks update the same workspace entry.
-  const snapshotForCwd = Effect.fn("AntigravityProvider.snapshotForCwd")(function* (
+  const snapshotForCwd = Effect.fn("AntigravityProvider.snapshotForCwd")(function* <E = never>(
     cwd: string,
-    skills?: ServerProvider["skills"],
+    discoverSkills?: Effect.Effect<ServerProvider["skills"], E>,
   ) {
-    if (skills !== undefined) {
+    const before = yield* SubscriptionRef.get(metadata);
+    if (before.draft.auth.status === "unauthenticated") return yield* getSnapshot;
+    if (discoverSkills !== undefined) {
+      const skills = yield* discoverSkills;
       const checkedAt = DateTime.formatIso(yield* DateTime.now);
       yield* SubscriptionRef.update(metadata, (state) => {
+        if (
+          state.authRevision !== before.authRevision ||
+          state.draft.auth.status === "unauthenticated"
+        ) {
+          return state;
+        }
         const workspaces = state.draft.workspaceSnapshots ?? [];
         const previous = workspaces.find((entry) => entry.cwd === cwd);
         const workspace = {
@@ -443,7 +452,7 @@ export const makeAntigravityProvider = Effect.fn("makeAntigravityProvider")(func
         ...(snapshot.inventory ?? STALE_PROVIDER_INVENTORY),
         slashCommands:
           workspace?.inventory?.slashCommands ?? snapshot.inventory?.slashCommands ?? "stale",
-        skills: workspace?.inventory?.skills ?? "stale",
+        skills: workspace?.inventory?.skills ?? snapshot.inventory?.skills ?? "stale",
       },
     };
   });

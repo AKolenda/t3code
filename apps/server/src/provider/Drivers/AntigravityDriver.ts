@@ -379,20 +379,25 @@ export const AntigravityDriver: ProviderDriver<AntigravitySettings, AntigravityD
         snapshotForCwd: (cwd) =>
           !enabled
             ? provider.snapshot.getSnapshot
-            : discoverAntigravitySkills({ cwd, userHome }).pipe(
-                Effect.provideService(FileSystem.FileSystem, fileSystem),
-                Effect.provideService(Path.Path, path),
-                Effect.flatMap((skills) => provider.snapshotForCwd(cwd, skills)),
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderDriverError({
-                      driver: DRIVER,
-                      instanceId,
-                      detail: "Could not read Antigravity workspace skills.",
-                      cause,
-                    }),
+            : provider
+                .snapshotForCwd(
+                  cwd,
+                  discoverAntigravitySkills({ cwd, userHome }).pipe(
+                    Effect.provideService(FileSystem.FileSystem, fileSystem),
+                    Effect.provideService(Path.Path, path),
+                  ),
+                )
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderDriverError({
+                        driver: DRIVER,
+                        instanceId,
+                        detail: "Could not read Antigravity workspace skills.",
+                        cause,
+                      }),
+                  ),
                 ),
-              ),
         adapter,
         textGeneration,
         auth: authFlow.controller,

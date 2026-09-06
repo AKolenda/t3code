@@ -6,6 +6,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSetupError,
+  type ServerProvider,
 } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -635,7 +636,10 @@ it.layer(testLayer)("Antigravity provider snapshots", (it) => {
         expect(
           hasProviderWorkspaceSkills(yield* harness.provider.snapshot.getSnapshot, "/workspace"),
         ).toBe(false);
-        const discovered = yield* harness.provider.snapshotForCwd("/workspace", skills);
+        const discovered = yield* harness.provider.snapshotForCwd(
+          "/workspace",
+          Effect.succeed(skills),
+        );
         expect(discovered.skills).toEqual(skills);
         yield* harness.provider.snapshot.refresh;
         const afterRefresh = yield* harness.provider.snapshot.getSnapshot;
@@ -653,6 +657,36 @@ it.layer(testLayer)("Antigravity provider snapshots", (it) => {
         const clearedCommands = yield* harness.provider.snapshotForCwd("/workspace");
         expect(clearedCommands.slashCommands).toEqual([]);
         expect(clearedCommands.skills).toEqual(skills);
+      }),
+    ),
+  );
+
+  it.effect("ignores workspace scans from a previous account revision", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        const scanStarted = yield* Deferred.make<void>();
+        const scanResult = yield* Deferred.make<ServerProvider["skills"]>();
+        yield* harness.provider.onSessionStarted(started, "/workspace");
+        const scanning = yield* harness.provider
+          .snapshotForCwd(
+            "/workspace",
+            Effect.gen(function* () {
+              yield* Deferred.succeed(scanStarted, undefined);
+              return yield* Deferred.await(scanResult);
+            }),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(scanStarted);
+        yield* harness.provider.onSignedOut;
+        yield* harness.provider.onSessionStarted(started, "/workspace");
+        yield* Deferred.succeed(scanResult, [
+          { name: "previous-account", path: "/old-account/SKILL.md", enabled: true },
+        ]);
+        expect((yield* Fiber.join(scanning)).skills).toEqual([]);
+        expect(
+          (yield* harness.provider.snapshot.getSnapshot).workspaceSnapshots?.[0]?.skills,
+        ).toEqual([]);
       }),
     ),
   );

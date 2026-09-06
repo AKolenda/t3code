@@ -721,6 +721,15 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
             inventory: AUTHORITATIVE_PROVIDER_INVENTORY,
           };
           const previous = { ...cachedProvider, workspaceSnapshots: [workspace] };
+          for (const unavailable of ["skills", "slashCommands"] as const) {
+            const other = unavailable === "skills" ? "slashCommands" : "skills";
+            const partial = mergeProviderSnapshot(previous, {
+              ...refreshedProvider,
+              inventory: { ...AUTHORITATIVE_PROVIDER_INVENTORY, [unavailable]: "unavailable" },
+            });
+            assert.deepStrictEqual(partial.workspaceSnapshots?.[0]?.[unavailable], []);
+            assert.deepStrictEqual(partial.workspaceSnapshots?.[0]?.[other], workspace[other]);
+          }
           const signedOut = {
             ...failedProvider,
             inventory: UNAVAILABLE_PROVIDER_INVENTORY,

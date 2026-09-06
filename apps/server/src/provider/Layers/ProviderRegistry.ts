@@ -153,17 +153,33 @@ export const mergeProviderSnapshot = (
   )
     return nextProvider;
   const savedAccount = carrySavedAntigravityAccount(previousProvider, nextProvider);
-  // Sign-out and missing installations invalidate workspace discoveries too.
-  // An unavailable workspace must be scanned again when the provider recovers.
-  const savedWorkspaces =
-    nextProvider.inventory?.skills === "unavailable" ||
-    nextProvider.inventory?.slashCommands === "unavailable"
-      ? []
-      : previousProvider.workspaceSnapshots?.filter(
-          (snapshot) =>
-            snapshot.inventory?.skills !== "unavailable" &&
-            snapshot.inventory?.slashCommands !== "unavailable",
-        );
+  // Invalidate each workspace inventory without discarding the other one.
+  const savedWorkspaces = previousProvider.workspaceSnapshots?.flatMap((snapshot) => {
+    const skillsUnavailable = nextProvider.inventory?.skills === "unavailable";
+    const commandsUnavailable = nextProvider.inventory?.slashCommands === "unavailable";
+    if (
+      (skillsUnavailable && commandsUnavailable) ||
+      (snapshot.inventory?.skills === "unavailable" &&
+        snapshot.inventory.slashCommands === "unavailable")
+    )
+      return [];
+    if (!skillsUnavailable && !commandsUnavailable) return [snapshot];
+    return [
+      {
+        ...snapshot,
+        skills: skillsUnavailable ? [] : snapshot.skills,
+        slashCommands: commandsUnavailable ? [] : snapshot.slashCommands,
+        inventory: {
+          skills: skillsUnavailable
+            ? "unavailable"
+            : (snapshot.inventory?.skills ?? "authoritative"),
+          slashCommands: commandsUnavailable
+            ? "unavailable"
+            : (snapshot.inventory?.slashCommands ?? "authoritative"),
+        },
+      } satisfies NonNullable<ServerProvider["workspaceSnapshots"]>[number],
+    ];
+  });
   // A passed health check no longer needs the unchecked-account message.
   const { message: _uncheckedMessage, ...nextWithoutMessage } = nextProvider;
   return {
