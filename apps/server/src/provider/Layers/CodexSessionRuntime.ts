@@ -42,7 +42,15 @@ import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
 import type { ProviderTurnStartOptions } from "../Services/ProviderAdapter.ts";
-const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
+// The correlated acknowledgement supplies identity. Unused snapshot fields
+// must not hide acceptance when a newer Codex version changes their shape.
+const decodeTurnStartAcknowledgement = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    turn: Schema.Struct({
+      id: Schema.String.check(Schema.isNonEmpty(), Schema.isTrimmed()).pipe(Schema.brand("TurnId")),
+    }),
+  }),
+);
 const decodeV2TurnSteerResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnSteerResponse);
 
 const PROVIDER = ProviderDriverKind.make("codex");
@@ -2519,21 +2527,23 @@ export const makeCodexSessionRuntime = (
               })
               .pipe(
                 Effect.map((response) => ({ response })),
-                Effect.catchTag("CodexAppServerRequestError", (error) => {
-                  const rejected =
-                    error.code === -32600 &&
-                    (error.errorMessage === "no active turn to steer" ||
-                      error.errorMessage.startsWith(
-                        `expected active turn id \`${expectedTurnId}\` but found \``,
-                      ) ||
-                      error.errorMessage === "cannot steer a review turn" ||
-                      error.errorMessage === "cannot steer a compact turn");
-                  if (!rejected) return Effect.fail(error);
-                  return Effect.gen(function* () {
-                    yield* turnOptions?.notSubmitted ?? Effect.void;
-                    if (turnOptions) submission.claims.delete(turnOptions);
-                    return undefined;
-                  });
+                Effect.catchTags({
+                  CodexAppServerRequestError: (error) => {
+                    const rejected =
+                      error.code === -32600 &&
+                      (error.errorMessage === "no active turn to steer" ||
+                        error.errorMessage.startsWith(
+                          `expected active turn id \`${expectedTurnId}\` but found \``,
+                        ) ||
+                        error.errorMessage === "cannot steer a review turn" ||
+                        error.errorMessage === "cannot steer a compact turn");
+                    if (!rejected) return Effect.fail(error);
+                    return Effect.gen(function* () {
+                      yield* turnOptions?.notSubmitted ?? Effect.void;
+                      if (turnOptions) submission.claims.delete(turnOptions);
+                      return undefined;
+                    });
+                  },
                 }),
               );
             if (rawResponse !== undefined) {
@@ -2571,7 +2581,7 @@ export const makeCodexSessionRuntime = (
               return yield* Effect.interrupt;
             }
             const rawResponse = yield* client.raw.request("turn/start", params);
-            const response = yield* decodeV2TurnStartResponse(rawResponse).pipe(
+            const response = yield* decodeTurnStartAcknowledgement(rawResponse).pipe(
               Effect.mapError((error) =>
                 CodexErrors.CodexAppServerProtocolParseError.fromSchemaError(
                   "decode-response-payload",
@@ -2580,7 +2590,7 @@ export const makeCodexSessionRuntime = (
                 ),
               ),
             );
-            turnId = TurnId.make(response.turn.id);
+            turnId = response.turn.id;
             submission.turnId = turnId;
             submission.terminalQueued = submission.earlyTerminals.has(turnId);
             submission.earlyTerminals.clear();

@@ -14,13 +14,21 @@ import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
 import { describe } from "vite-plus/test";
-import { DEFAULT_MODEL, ThreadId, TurnId } from "@t3tools/contracts";
+import {
+  DEFAULT_MODEL,
+  EventId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+  TurnId,
+} from "@t3tools/contracts";
 import * as CodexErrors from "effect-codex-app-server/errors";
 import * as CodexRpc from "effect-codex-app-server/rpc";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
 import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
+import * as TurnCheckpointCapture from "../../checkpointing/TurnCheckpointCapture.ts";
 import {
   buildTurnStartParams,
   describeMcpElicitation,
@@ -514,73 +522,188 @@ describe("Codex native turn admission", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
-  it.effect("keeps native callbacks after a bad turn start response", () =>
-    Effect.gen(function* () {
-      const { runtime, respond, nextRequest, complete, nativeExit } = yield* makeAdmissionRuntime();
-      const terminal = yield* Deferred.make<void>();
-      const completed: Array<TurnId> = [];
-      let submitted = false;
-      const send = yield* runtime
-        .sendTurn(
-          { input: "change files" },
-          {
-            beforeSubmit: (turnId) =>
-              Effect.sync(() => {
-                NodeAssert.equal(turnId, undefined);
-                submitted = true;
-              }),
-            notSubmitted: Effect.sync(() => {
-              submitted = false;
-            }),
-            nativeStopped: Effect.void,
-            nativeCompleted: (turnId) =>
-              Effect.gen(function* () {
-                completed.push(turnId);
-                yield* Deferred.succeed(terminal, undefined);
-              }),
-          },
-        )
-        .pipe(Effect.result, Effect.forkChild);
-      yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
-      const request = yield* nextRequest("turn/start");
-      NodeAssert.equal(submitted, true);
-      yield* respond(request, { turn: { id: "native-turn" } });
-      const result = yield* Fiber.join(send);
-      NodeAssert.equal(result._tag, "Failure");
-      NodeAssert.equal(result.failure._tag, "CodexAppServerProtocolParseError");
-      NodeAssert.equal(submitted, true);
-      NodeAssert.deepEqual(completed, []);
-      yield* complete("child-turn", "child-thread");
-      yield* complete("native-turn");
-      yield* Deferred.await(terminal);
-      NodeAssert.deepEqual(completed, ["native-turn"]);
-      yield* nativeExit;
-      yield* runtime.close;
-      NodeAssert.deepEqual(completed, ["native-turn"]);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
+  for (const response of [
+    { turn: { id: "native-turn" } },
+    { turn: { id: "native-turn", status: "future-status", items: "future-shape" } },
+  ]) {
+    it.effect(
+      `accepts a correlated turn id without requiring unused response fields: ${Object.keys(response.turn).join(",")}`,
+      () =>
+        Effect.gen(function* () {
+          const { runtime, respond, nextRequest, complete } = yield* makeAdmissionRuntime();
+          const captures = TurnCheckpointCapture.make();
+          const threadId = ThreadId.make("admission-test");
+          const instanceId = ProviderInstanceId.make("codex-test");
+          const submission = yield* captures.trackSubmission(threadId, instanceId);
+          const terminal = yield* Deferred.make<void>();
+          const send = yield* runtime
+            .sendTurn(
+              { input: "change files" },
+              {
+                ...submission,
+                nativeCompleted: (turnId) =>
+                  submission
+                    .nativeCompleted(turnId)
+                    .pipe(Effect.andThen(Deferred.succeed(terminal, undefined))),
+              },
+            )
+            .pipe(
+              Effect.tap((turn) => submission.accept(turn.turnId)),
+              Effect.forkChild,
+            );
+          yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+          yield* respond(yield* nextRequest("turn/start"), response);
+          NodeAssert.equal((yield* Fiber.join(send)).turnId, "native-turn");
+          NodeAssert.deepStrictEqual(yield* submission.outcome, {
+            _tag: "Accepted",
+            turnId: "native-turn",
+          });
+          yield* complete("native-turn");
+          yield* Deferred.await(terminal);
+          const canonicalTerminal = {
+            type: "turn.completed" as const,
+            eventId: EventId.make("native-terminal"),
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: instanceId,
+            threadId,
+            turnId: TurnId.make("native-turn"),
+            createdAt: "2026-01-01T00:00:00.000Z",
+            payload: { state: "completed" as const },
+          };
+          yield* captures.observe(canonicalTerminal);
+          NodeAssert.equal(yield* captures.nativeCaptureReady(canonicalTerminal), true);
+          const nextSubmission = yield* captures.trackSubmission(threadId, instanceId);
+          const next = yield* runtime
+            .sendTurn({ input: "next turn" }, nextSubmission)
+            .pipe(Effect.forkChild);
+          yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+          yield* captures.complete(canonicalTerminal, "captured");
+          yield* respond(yield* nextRequest("turn/start"), { turn: { id: "next-turn" } });
+          NodeAssert.equal((yield* Fiber.join(next)).turnId, "next-turn");
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
+  for (const invalidId of [undefined, "", " ", " native-turn ", 42]) {
+    it.effect(
+      `keeps unknown identity until native stop after invalid acknowledgement id: ${String(invalidId)}`,
+      () =>
+        Effect.gen(function* () {
+          const { runtime, respond, nextRequest, complete, nativeExit } =
+            yield* makeAdmissionRuntime();
+          const captures = TurnCheckpointCapture.make();
+          const threadId = ThreadId.make("admission-test");
+          const instanceId = ProviderInstanceId.make("codex-test");
+          const submission = yield* captures.trackSubmission(threadId, instanceId);
+          const terminal = yield* Deferred.make<void>();
+          const completed: Array<TurnId> = [];
+          const send = yield* runtime
+            .sendTurn(
+              { input: "change files" },
+              {
+                ...submission,
+                nativeCompleted: (turnId) =>
+                  Effect.gen(function* () {
+                    completed.push(turnId);
+                    yield* submission.nativeCompleted(turnId);
+                    yield* Deferred.succeed(terminal, undefined);
+                  }),
+              },
+            )
+            .pipe(Effect.result, Effect.forkChild);
+          yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+          yield* respond(yield* nextRequest("turn/start"), { turn: { id: invalidId } });
+          const result = yield* Fiber.join(send);
+          NodeAssert.equal(result._tag, "Failure");
+          NodeAssert.equal(result.failure._tag, "CodexAppServerProtocolParseError");
+          NodeAssert.deepStrictEqual(yield* submission.outcome, {
+            _tag: "UnknownSubmission",
+            turnId: undefined,
+          });
+          yield* complete("child-turn", "child-thread");
+          yield* complete("native-turn");
+          yield* Deferred.await(terminal);
+          NodeAssert.deepStrictEqual(completed, ["native-turn"]);
+          const canonicalTerminal = {
+            type: "turn.completed" as const,
+            eventId: EventId.make("unknown-native-terminal"),
+            provider: ProviderDriverKind.make("codex"),
+            providerInstanceId: instanceId,
+            threadId,
+            turnId: TurnId.make("native-turn"),
+            createdAt: "2026-01-01T00:00:00.000Z",
+            payload: { state: "completed" as const },
+          };
+          yield* captures.observe(canonicalTerminal);
+          yield* captures.complete(canonicalTerminal, "captured");
+          const released = yield* Deferred.make<void>();
+          const wait = yield* captures
+            .awaitNativeCapture(threadId)
+            .pipe(
+              Effect.andThen(Deferred.succeed(released, undefined)),
+              Effect.forkChild({ startImmediately: true }),
+            );
+          NodeAssert.equal(yield* Deferred.isDone(released), false);
+          yield* nativeExit;
+          yield* runtime.close;
+          yield* Fiber.join(wait);
+          NodeAssert.equal(yield* Deferred.isDone(released), true);
+        }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
 
   it.effect("can cancel a parked send even when its caller is uninterruptible", () =>
     Effect.gen(function* () {
       const { runtime, observed, respond, nextRequest } = yield* makeAdmissionRuntime();
+      const captures = TurnCheckpointCapture.make();
+      const threadId = ThreadId.make("admission-test");
+      const instanceId = ProviderInstanceId.make("codex-test");
+      const oldTerminal = {
+        type: "turn.completed" as const,
+        eventId: EventId.make("old-terminal"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId: instanceId,
+        threadId,
+        turnId: TurnId.make("old-turn"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        payload: { state: "completed" as const },
+      };
+      yield* captures.observe(oldTerminal);
+      const submission = yield* captures.trackSubmission(threadId, instanceId);
       const parked = yield* Deferred.make<void>();
       const send = yield* runtime
         .sendTurn(
           { input: "do not submit" },
           {
-            beforeSubmit: () =>
-              Deferred.succeed(parked, undefined).pipe(Effect.andThen(Effect.never)),
-            notSubmitted: Effect.void,
-            nativeStopped: Effect.void,
-            nativeCompleted: () => Effect.die("no native work exists"),
+            ...submission,
+            beforeSubmit: (turnId) =>
+              Deferred.succeed(parked, undefined).pipe(
+                Effect.andThen(submission.beforeSubmit(turnId)),
+              ),
           },
         )
         .pipe(Effect.uninterruptible, Effect.forkChild);
       yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
       yield* Deferred.await(parked);
+      NodeAssert.deepStrictEqual(yield* submission.outcome, { _tag: "NotSubmitted" });
       yield* Fiber.interrupt(send);
       NodeAssert.equal(Exit.hasInterrupts(yield* Fiber.await(send)), true);
       NodeAssert.equal(observed.includes("turn/start"), false);
+      NodeAssert.deepStrictEqual(yield* submission.outcome, { _tag: "NotSubmitted" });
+      yield* captures.complete(oldTerminal, "captured");
+      const nextSubmission = yield* captures.trackSubmission(threadId, instanceId);
+      const next = yield* runtime
+        .sendTurn({ input: "submit after capture" }, nextSubmission)
+        .pipe(Effect.forkChild);
+      yield* respond(yield* nextRequest("config/mcpServer/reload"), {});
+      yield* respond(yield* nextRequest("turn/start"), {
+        turn: { id: "new-turn", status: "inProgress", items: [] },
+      });
+      yield* nextSubmission.accept((yield* Fiber.join(next)).turnId);
+      NodeAssert.deepStrictEqual(yield* nextSubmission.outcome, {
+        _tag: "Accepted",
+        turnId: "new-turn",
+      });
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
