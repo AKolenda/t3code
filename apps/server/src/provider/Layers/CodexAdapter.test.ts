@@ -12,6 +12,7 @@ import {
   ProviderItemId,
   type ProviderApprovalDecision,
   type ProviderEvent,
+  type ProviderRuntimeEvent,
   type ProviderSession,
   type ProviderTurnStartResult,
   type ProviderUserInputAnswers,
@@ -3091,6 +3092,68 @@ it.effect("drains terminal events after the native runtime scope closes", () =>
     const event = Option.getOrThrow(yield* Stream.runHead(adapter.streamEvents));
     NodeAssert.equal(event.type, "turn.aborted");
     NodeAssert.equal(event.turnId, "accepted-turn");
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("retains stop terminals for a busy consumer when the instance scope closes", () =>
+  Effect.gen(function* () {
+    const threadId = asThreadId("instance-stop-drain");
+    const instanceScope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
+      Scope.close(scope, Exit.void),
+    );
+    const consumerBusy = yield* Deferred.make<void>();
+    const releaseConsumer = yield* Deferred.make<void>();
+    const runtime = new FakeCodexRuntime({
+      threadId,
+      binaryPath: "codex",
+      cwd: process.cwd(),
+      runtimeMode: "full-access",
+    });
+    const close = runtime.close;
+    runtime.close = runtime
+      .emit({
+        id: asEventId("instance-stop-terminal"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        turnId: asTurnId("accepted-turn"),
+        createdAt: "2026-01-01T00:00:00.000Z",
+        kind: "notification",
+        method: "turn/aborted",
+      })
+      .pipe(Effect.andThen(close));
+    const adapter = yield* makeCodexAdapter(decodeCodexSettings({}), {
+      makeRuntime: () => Effect.succeed(runtime),
+    }).pipe(
+      Effect.provideService(Scope.Scope, instanceScope),
+      Effect.provide(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    );
+    yield* adapter.startSession({ threadId, runtimeMode: "full-access" });
+    const events: Array<ProviderRuntimeEvent> = [];
+    const consumer = yield* adapter.streamEvents.pipe(
+      Stream.runForEach((event) =>
+        Effect.gen(function* () {
+          events.push(event);
+          if (event.type === "turn.started") {
+            yield* Deferred.succeed(consumerBusy, undefined);
+            yield* Deferred.await(releaseConsumer);
+          }
+        }),
+      ),
+      Effect.forkChild,
+    );
+    yield* runtime.emit({ ...codexTurnEvent("turn/started", "accepted-turn"), threadId });
+    yield* Deferred.await(consumerBusy);
+    yield* Scope.close(instanceScope, Exit.void);
+    yield* Deferred.succeed(releaseConsumer, undefined);
+    const consumerExit = yield* Fiber.await(consumer);
+    NodeAssert.deepStrictEqual(
+      events.map((event) => [event.type, event.turnId]),
+      [
+        ["turn.started", "accepted-turn"],
+        ["turn.aborted", "accepted-turn"],
+      ],
+    );
+    NodeAssert.equal(Exit.isSuccess(consumerExit), true);
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 
