@@ -41,6 +41,7 @@ import { deriveServerPaths, ServerConfig } from "../../config.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 import {
   ProviderAdapterRequestError,
+  ProviderAdapterRequestNotFoundError,
   ProviderWorkspaceMissingError,
   type ProviderServiceError,
 } from "../../provider/Errors.ts";
@@ -3695,11 +3696,10 @@ describe("ProviderCommandReactor", () => {
     const now = "2026-01-01T00:00:00.000Z";
     harness.respondToRequest.mockImplementation(() =>
       Effect.fail(
-        new ProviderAdapterRequestError({
+        new ProviderAdapterRequestNotFoundError({
           provider: ProviderDriverKind.make("codex"),
           method: "item/requestApproval/decision",
-          detail: "The callback has ended.",
-          reason: "request-not-found",
+          requestId: "missing-request",
         }),
       ),
     );
@@ -3785,11 +3785,10 @@ describe("ProviderCommandReactor", () => {
     const now = "2026-01-01T00:00:00.000Z";
     harness.respondToUserInput.mockImplementation(() =>
       Effect.fail(
-        new ProviderAdapterRequestError({
+        new ProviderAdapterRequestNotFoundError({
           provider: ProviderDriverKind.make("claudeAgent"),
           method: "item/tool/respondToUserInput",
-          detail: "The callback has ended.",
-          reason: "request-not-found",
+          requestId: "missing-request",
         }),
       ),
     );

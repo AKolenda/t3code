@@ -38,6 +38,7 @@ import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogg
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
+  ProviderAdapterRequestNotFoundError,
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
@@ -3614,17 +3615,17 @@ export function makeOpenCodeAdapter(
       const request = context.pendingPermissions.get(requestId);
       if (!request) {
         if (context.emittedTerminalRequestIds.has(requestId)) return;
-        return yield* new ProviderAdapterRequestError({
+        if (context.pendingRequestRecovery || context.requestRelationRetries.has(requestId)) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "permission.reply",
+            detail: "OpenCode is still loading this permission request. Try again.",
+          });
+        }
+        return yield* new ProviderAdapterRequestNotFoundError({
           provider: PROVIDER,
           method: "permission.reply",
-          detail:
-            context.pendingRequestRecovery || context.requestRelationRetries.has(requestId)
-              ? "OpenCode is still loading this permission request. Try again."
-              : `Unknown pending permission request: ${requestId}`,
-          reason:
-            context.pendingRequestRecovery || context.requestRelationRetries.has(requestId)
-              ? "provider-error"
-              : "request-not-found",
+          requestId,
         });
       }
 
@@ -3670,17 +3671,17 @@ export function makeOpenCodeAdapter(
       const request = context.pendingQuestions.get(requestId);
       if (!request) {
         if (context.emittedTerminalRequestIds.has(requestId)) return;
-        return yield* new ProviderAdapterRequestError({
+        if (context.pendingRequestRecovery || context.requestRelationRetries.has(requestId)) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "question.reply",
+            detail: "OpenCode is still loading this question. Try again.",
+          });
+        }
+        return yield* new ProviderAdapterRequestNotFoundError({
           provider: PROVIDER,
           method: "question.reply",
-          detail:
-            context.pendingRequestRecovery || context.requestRelationRetries.has(requestId)
-              ? "OpenCode is still loading this question. Try again."
-              : `Unknown pending user-input request: ${requestId}`,
-          reason:
-            context.pendingRequestRecovery || context.requestRelationRetries.has(requestId)
-              ? "provider-error"
-              : "request-not-found",
+          requestId,
         });
       }
 

@@ -351,8 +351,8 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
             ? adapter.respondToRequest(threadId, requestId, "accept")
             : adapter.respondToUserInput(threadId, requestId, { choice: "yes" })
         ).pipe(Effect.flip);
-        NodeAssert.equal(error._tag, "ProviderAdapterRequestError");
-        NodeAssert.equal(error.reason, "request-not-found");
+        NodeAssert.equal(error._tag, "ProviderAdapterRequestNotFoundError");
+        NodeAssert.equal(error.requestId, requestId);
       }),
   );
 

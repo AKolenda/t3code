@@ -41,6 +41,7 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import type { AntigravityAuth } from "../AntigravityAuth.ts";
 import {
   ProviderAdapterRequestError,
+  ProviderAdapterRequestNotFoundError,
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
@@ -1177,11 +1178,10 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
       const context = yield* requireSession(threadId);
       const pending = context.approvals.get(requestId);
       if (!pending) {
-        return yield* new ProviderAdapterRequestError({
+        return yield* new ProviderAdapterRequestNotFoundError({
           provider: PROVIDER,
           method: "session/request_permission",
-          detail: "This approval request is no longer pending.",
-          reason: "request-not-found",
+          requestId,
         });
       }
       const optionId =
@@ -1210,11 +1210,10 @@ export const makeAntigravityAdapter = Effect.fn("makeAntigravityAdapter")(functi
       const context = yield* requireSession(threadId);
       const pending = context.questions.get(requestId);
       if (!pending) {
-        return yield* new ProviderAdapterRequestError({
+        return yield* new ProviderAdapterRequestNotFoundError({
           provider: PROVIDER,
           method: "session/request_permission",
-          detail: "This question is no longer pending.",
-          reason: "request-not-found",
+          requestId,
         });
       }
       const result = makeAntigravityUserInputResponse(pending.request, answers);

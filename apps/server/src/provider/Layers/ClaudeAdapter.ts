@@ -102,6 +102,7 @@ import {
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
+  ProviderAdapterRequestNotFoundError,
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
@@ -5032,11 +5033,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const context = yield* requireSession(threadId);
       const pending = context.pendingApprovals.get(requestId);
       if (!pending) {
-        return yield* new ProviderAdapterRequestError({
+        return yield* new ProviderAdapterRequestNotFoundError({
           provider: PROVIDER,
           method: "item/requestApproval/decision",
-          detail: `Unknown pending approval request: ${requestId}`,
-          reason: "request-not-found",
+          requestId,
         });
       }
 
@@ -5051,11 +5051,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const context = yield* requireSession(threadId);
     const pending = context.pendingUserInputs.get(requestId);
     if (!pending) {
-      return yield* new ProviderAdapterRequestError({
+      return yield* new ProviderAdapterRequestNotFoundError({
         provider: PROVIDER,
         method: "item/tool/respondToUserInput",
-        detail: `Unknown pending user-input request: ${requestId}`,
-        reason: "request-not-found",
+        requestId,
       });
     }
 

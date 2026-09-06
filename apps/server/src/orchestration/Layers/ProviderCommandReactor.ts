@@ -39,7 +39,6 @@ import {
   ProviderAdapterValidationError,
   ProviderWorkspaceMissingError,
 } from "../../provider/Errors.ts";
-import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderAuthService } from "../../provider/Services/ProviderAuthService.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -244,15 +243,6 @@ export function providerErrorLabelFromInstanceHint(input: {
   return providerErrorLabel(
     input.instanceId ?? input.modelSelectionInstanceId ?? input.sessionProvider,
   );
-}
-
-function requestFailureReason(
-  cause: Cause.Cause<ProviderServiceError>,
-): ProviderRequestFailureReason {
-  const failure = cause.reasons.find(Cause.isFailReason);
-  return isProviderAdapterRequestError(failure?.error)
-    ? (failure.error.reason ?? "provider-error")
-    : "provider-error";
 }
 
 function stalePendingRequestDetail(
@@ -1553,22 +1543,31 @@ const make = Effect.gen(function* () {
         decision: event.payload.decision,
       })
       .pipe(
-        Effect.catchCause((cause) => {
-          const reason = requestFailureReason(cause);
-          return appendProviderFailureActivity({
+        Effect.catchTags({
+          ProviderAdapterRequestNotFoundError: () =>
+            appendProviderFailureActivity({
+              threadId: event.payload.threadId,
+              kind: "provider.approval.respond.failed",
+              summary: "Provider approval response failed",
+              reason: "request-not-found",
+              detail: stalePendingRequestDetail("approval", event.payload.requestId),
+              turnId: null,
+              createdAt: event.payload.createdAt,
+              requestId: event.payload.requestId,
+            }),
+        }),
+        Effect.catchCause((cause) =>
+          appendProviderFailureActivity({
             threadId: event.payload.threadId,
             kind: "provider.approval.respond.failed",
             summary: "Provider approval response failed",
-            reason,
-            detail:
-              reason === "request-not-found"
-                ? stalePendingRequestDetail("approval", event.payload.requestId)
-                : Cause.pretty(cause),
+            reason: "provider-error",
+            detail: Cause.pretty(cause),
             turnId: null,
             createdAt: event.payload.createdAt,
             requestId: event.payload.requestId,
-          });
-        }),
+          }),
+        ),
       );
   });
 
@@ -1601,22 +1600,31 @@ const make = Effect.gen(function* () {
           answers: event.payload.answers,
         })
         .pipe(
-          Effect.catchCause((cause) => {
-            const reason = requestFailureReason(cause);
-            return appendProviderFailureActivity({
+          Effect.catchTags({
+            ProviderAdapterRequestNotFoundError: () =>
+              appendProviderFailureActivity({
+                threadId: event.payload.threadId,
+                kind: "provider.user-input.respond.failed",
+                summary: "Provider user input response failed",
+                reason: "request-not-found",
+                detail: stalePendingRequestDetail("user-input", event.payload.requestId),
+                turnId: null,
+                createdAt: event.payload.createdAt,
+                requestId: event.payload.requestId,
+              }),
+          }),
+          Effect.catchCause((cause) =>
+            appendProviderFailureActivity({
               threadId: event.payload.threadId,
               kind: "provider.user-input.respond.failed",
               summary: "Provider user input response failed",
-              reason,
-              detail:
-                reason === "request-not-found"
-                  ? stalePendingRequestDetail("user-input", event.payload.requestId)
-                  : Cause.pretty(cause),
+              reason: "provider-error",
+              detail: Cause.pretty(cause),
               turnId: null,
               createdAt: event.payload.createdAt,
               requestId: event.payload.requestId,
-            });
-          }),
+            }),
+          ),
         );
     },
   );

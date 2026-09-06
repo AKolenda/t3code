@@ -47,6 +47,7 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
+  ProviderAdapterRequestNotFoundError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
@@ -1128,11 +1129,10 @@ export function makeCursorAdapter(
         const ctx = yield* requireSession(threadId);
         const pending = ctx.pendingApprovals.get(requestId);
         if (!pending) {
-          return yield* new ProviderAdapterRequestError({
+          return yield* new ProviderAdapterRequestNotFoundError({
             provider: PROVIDER,
             method: "session/request_permission",
-            detail: `Unknown pending approval request: ${requestId}`,
-            reason: "request-not-found",
+            requestId,
           });
         }
         yield* Deferred.succeed(pending.decision, decision);
@@ -1147,11 +1147,10 @@ export function makeCursorAdapter(
         const ctx = yield* requireSession(threadId);
         const pending = ctx.pendingUserInputs.get(requestId);
         if (!pending) {
-          return yield* new ProviderAdapterRequestError({
+          return yield* new ProviderAdapterRequestNotFoundError({
             provider: PROVIDER,
             method: "cursor/ask_question",
-            detail: `Unknown pending user-input request: ${requestId}`,
-            reason: "request-not-found",
+            requestId,
           });
         }
         yield* Deferred.succeed(pending.answers, answers);

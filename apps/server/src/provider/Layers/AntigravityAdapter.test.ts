@@ -314,12 +314,12 @@ it.layer(layer)("AntigravityAdapter", (it) => {
         .respondToUserInput(threadId, requestId, { choice: "yes" })
         .pipe(Effect.flip);
       expect(permission).toMatchObject({
-        _tag: "ProviderAdapterRequestError",
-        reason: "request-not-found",
+        _tag: "ProviderAdapterRequestNotFoundError",
+        requestId,
       });
       expect(question).toMatchObject({
-        _tag: "ProviderAdapterRequestError",
-        reason: "request-not-found",
+        _tag: "ProviderAdapterRequestNotFoundError",
+        requestId,
       });
     }),
   );

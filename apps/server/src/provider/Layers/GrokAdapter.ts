@@ -45,6 +45,7 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
+  ProviderAdapterRequestNotFoundError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
@@ -2045,11 +2046,10 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         const ctx = yield* requireSession(threadId);
         const pending = ctx.pendingApprovals.get(requestId);
         if (!pending) {
-          return yield* new ProviderAdapterRequestError({
+          return yield* new ProviderAdapterRequestNotFoundError({
             provider: PROVIDER,
             method: "session/request_permission",
-            detail: `Unknown pending approval request: ${requestId}`,
-            reason: "request-not-found",
+            requestId,
           });
         }
         yield* Deferred.succeed(pending.decision, decision);
@@ -2064,11 +2064,10 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         const ctx = yield* requireSession(threadId);
         const pending = ctx.pendingUserInputs.get(requestId);
         if (!pending) {
-          return yield* new ProviderAdapterRequestError({
+          return yield* new ProviderAdapterRequestNotFoundError({
             provider: PROVIDER,
             method: "_x.ai/ask_user_question",
-            detail: `Unknown pending user-input request: ${requestId}`,
-            reason: "request-not-found",
+            requestId,
           });
         }
         yield* Deferred.succeed(pending.resolution, { _tag: "answered", answers });

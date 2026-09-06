@@ -51,6 +51,7 @@ import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 
 import {
   ProviderAdapterRequestError,
+  ProviderAdapterRequestNotFoundError,
   ProviderAdapterProcessError,
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
@@ -149,15 +150,22 @@ function mapCodexRuntimeError(
     });
   }
 
+  if (
+    error._tag === "CodexSessionRuntimePendingApprovalNotFoundError" ||
+    error._tag === "CodexSessionRuntimePendingUserInputNotFoundError"
+  ) {
+    return new ProviderAdapterRequestNotFoundError({
+      provider: PROVIDER,
+      method,
+      requestId: error.requestId,
+      cause: error,
+    });
+  }
+
   return new ProviderAdapterRequestError({
     provider: PROVIDER,
     method,
     detail: error.message,
-    reason:
-      error._tag === "CodexSessionRuntimePendingApprovalNotFoundError" ||
-      error._tag === "CodexSessionRuntimePendingUserInputNotFoundError"
-        ? "request-not-found"
-        : "provider-error",
     cause: error,
   });
 }

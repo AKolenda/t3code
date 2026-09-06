@@ -1,4 +1,3 @@
-import { ProviderRequestFailureReason } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
 import type { CheckpointServiceError } from "../checkpointing/Errors.ts";
@@ -61,12 +60,26 @@ export class ProviderAdapterRequestError extends Schema.TaggedErrorClass<Provide
     provider: Schema.String,
     method: Schema.String,
     detail: Schema.String,
-    reason: Schema.optional(ProviderRequestFailureReason),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {
   override get message(): string {
     return `Provider adapter request failed (${this.provider}) for ${this.method}: ${this.detail}`;
+  }
+}
+
+/** The provider no longer has this approval or question callback. */
+export class ProviderAdapterRequestNotFoundError extends Schema.TaggedErrorClass<ProviderAdapterRequestNotFoundError>()(
+  "ProviderAdapterRequestNotFoundError",
+  {
+    provider: Schema.String,
+    method: Schema.String,
+    requestId: Schema.String,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Unknown pending request (${this.provider}) for ${this.method}: ${this.requestId}`;
   }
 }
 
@@ -210,6 +223,7 @@ export type ProviderAdapterError =
   | ProviderAdapterSessionNotFoundError
   | ProviderAdapterSessionClosedError
   | ProviderAdapterRequestError
+  | ProviderAdapterRequestNotFoundError
   | ProviderAdapterProcessError;
 
 export type ProviderServiceError =
