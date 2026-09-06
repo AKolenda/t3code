@@ -2827,6 +2827,8 @@ export function makeOpenCodeAdapter(
       );
 
       if (!context.server.external && context.server.exitCode !== null) {
+        // This is the launcher exit, not proof that its native descendants stopped.
+        // Keep unconfirmed prompts reserved until their exact native receipts arrive.
         yield* context.server.exitCode.pipe(
           Effect.flatMap((code) =>
             Effect.gen(function* () {

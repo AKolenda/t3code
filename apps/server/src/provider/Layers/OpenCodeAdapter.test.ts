@@ -1625,70 +1625,104 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
     }),
   );
 
-  it.effect("keeps observing unknown external work after Stop", () =>
-    Effect.gen(function* () {
-      const adapter = yield* OpenCodeAdapter;
-      const threadId = asThreadId("thread-native-unknown-stop");
-      const terminal = promiseWithResolvers<unknown>();
-      const idle = promiseWithResolvers<unknown>();
-      runtimeMock.state.autoPromptEcho = false;
-      runtimeMock.state.subscribedEvents = [terminal.promise, idle.promise];
-      yield* adapter.startSession({
-        provider: ProviderDriverKind.make("opencode"),
-        threadId,
-        runtimeMode: "full-access",
-      });
-      const completed = yield* Deferred.make<void>();
-      let completions = 0;
-      let rejected = false;
-      runtimeMock.state.promptAsyncError = new Error("Response lost after native submission");
-      yield* adapter
-        .sendTurn(
-          {
-            threadId,
-            input: "First",
-            modelSelection: createModelSelection(
-              ProviderInstanceId.make("opencode"),
-              "openai/gpt-5",
-            ),
-          },
-          admissionOptions({
-            notSubmitted: Effect.sync(() => {
-              rejected = true;
-            }),
-            nativeCompleted: () =>
-              Effect.gen(function* () {
-                completions += 1;
-                yield* Deferred.succeed(completed, undefined);
+  for (const stopKind of ["external Stop", "local launcher exit"] as const) {
+    it.effect(`keeps observing unknown native work after ${stopKind}`, () =>
+      Effect.gen(function* () {
+        const launcherExit = yield* Deferred.make<number>();
+        const adapter =
+          stopKind === "external Stop"
+            ? yield* OpenCodeAdapter
+            : yield* makeOpenCodeAdapter(
+                Schema.decodeSync(OpenCodeSettings)({ binaryPath: "fake-opencode" }),
+              ).pipe(
+                Effect.provideService(OpenCodeRuntime, {
+                  ...OpenCodeRuntimeTestDouble,
+                  connectToOpenCodeServer: (input) =>
+                    OpenCodeRuntimeTestDouble.connectToOpenCodeServer(input).pipe(
+                      Effect.map((server) => ({
+                        ...server,
+                        exitCode: Deferred.await(launcherExit),
+                      })),
+                    ),
+                }),
+              );
+        const threadId = asThreadId("thread-native-unknown-stop");
+        const terminal = promiseWithResolvers<unknown>();
+        const idle = promiseWithResolvers<unknown>();
+        runtimeMock.state.autoPromptEcho = false;
+        runtimeMock.state.subscribedEvents = [terminal.promise, idle.promise];
+        yield* adapter.startSession({
+          provider: ProviderDriverKind.make("opencode"),
+          threadId,
+          runtimeMode: "full-access",
+        });
+        const completed = yield* Deferred.make<void>();
+        let completions = 0;
+        let nativeStops = 0;
+        let rejected = false;
+        runtimeMock.state.promptAsyncError = new Error("Response lost after native submission");
+        yield* adapter
+          .sendTurn(
+            {
+              threadId,
+              input: "First",
+              modelSelection: createModelSelection(
+                ProviderInstanceId.make("opencode"),
+                "openai/gpt-5",
+              ),
+            },
+            admissionOptions({
+              nativeStopped: Effect.sync(() => {
+                nativeStops += 1;
               }),
-          }),
-        )
-        .pipe(Effect.flip);
-      yield* adapter.stopSession(threadId);
-      NodeAssert.equal(completions, 0);
-      NodeAssert.equal(rejected, false);
-      const prompt = runtimeMock.state.promptCalls[0] as { messageID: string };
-      terminal.resolve({
-        type: "message.updated",
-        properties: {
-          sessionID: "http://127.0.0.1:9999/session",
-          info: {
-            id: "assistant-after-stop",
-            role: "assistant",
-            parentID: prompt.messageID,
-            time: { created: 1, completed: 2 },
-            finish: "stop",
+              notSubmitted: Effect.sync(() => {
+                rejected = true;
+              }),
+              nativeCompleted: () =>
+                Effect.gen(function* () {
+                  completions += 1;
+                  yield* Deferred.succeed(completed, undefined);
+                }),
+            }),
+          )
+          .pipe(Effect.flip);
+        if (stopKind === "external Stop") {
+          yield* adapter.stopSession(threadId);
+        } else {
+          const exited = yield* adapter.streamEvents.pipe(
+            Stream.filter((event) => event.type === "session.exited"),
+            Stream.runHead,
+            Effect.forkChild,
+          );
+          yield* Deferred.succeed(launcherExit, 0);
+          yield* Fiber.join(exited);
+        }
+        NodeAssert.equal(completions, 0);
+        NodeAssert.equal(nativeStops, 0);
+        NodeAssert.equal(rejected, false);
+        const prompt = runtimeMock.state.promptCalls[0] as { messageID: string; sessionID: string };
+        terminal.resolve({
+          type: "message.updated",
+          properties: {
+            sessionID: prompt.sessionID,
+            info: {
+              id: "assistant-after-stop",
+              role: "assistant",
+              parentID: prompt.messageID,
+              time: { created: 1, completed: 2 },
+              finish: "stop",
+            },
           },
-        },
-      });
-      idle.resolve({
-        type: "session.status",
-        properties: { sessionID: "http://127.0.0.1:9999/session", status: { type: "idle" } },
-      });
-      yield* Deferred.await(completed);
-      NodeAssert.equal(completions, 1);
-    }),
-  );
+        });
+        idle.resolve({
+          type: "session.status",
+          properties: { sessionID: prompt.sessionID, status: { type: "idle" } },
+        });
+        yield* Deferred.await(completed);
+        NodeAssert.equal(completions, 1);
+      }),
+    );
+  }
 
   it.effect("rolls back session state when sendTurn fails before OpenCode accepts the prompt", () =>
     Effect.gen(function* () {
