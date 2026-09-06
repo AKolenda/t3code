@@ -981,6 +981,4 @@ const make = Effect.gen(function* () {
   } satisfies CheckpointReactorShape;
 });
 
-export const CheckpointReactorLive = Layer.effect(CheckpointReactor, make).pipe(
-  Layer.provide(TurnCheckpointCapture.layer),
-);
+export const CheckpointReactorLive = Layer.effect(CheckpointReactor, make);

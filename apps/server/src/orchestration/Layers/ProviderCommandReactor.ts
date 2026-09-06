@@ -1908,6 +1908,4 @@ const make = Effect.gen(function* () {
   } satisfies ProviderCommandReactorShape;
 });
 
-export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
-  Layer.provide(TurnCheckpointCapture.layer),
-);
+export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make);

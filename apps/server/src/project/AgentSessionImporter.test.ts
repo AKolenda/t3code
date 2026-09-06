@@ -43,6 +43,7 @@ import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSn
 import { ProviderCommandReactor } from "../orchestration/Services/ProviderCommandReactor.ts";
 import { ProviderSessionDirectoryLive } from "../provider/Layers/ProviderSessionDirectory.ts";
 import { makeProviderServiceLive } from "../provider/Layers/ProviderService.ts";
+import * as TurnCheckpointCapture from "../checkpointing/TurnCheckpointCapture.ts";
 import {
   NoOpProviderEventLoggers,
   ProviderEventLoggers,
@@ -905,6 +906,7 @@ it.layer(integrationLayer)("AgentSessionImporter integration", (it) => {
         );
         const reactorLayer = ProviderCommandReactorLive.pipe(
           Layer.provideMerge(providerLayer),
+          Layer.provide(TurnCheckpointCapture.layer),
           Layer.provide(
             Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
               ...snapshots,

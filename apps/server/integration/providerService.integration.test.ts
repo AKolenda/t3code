@@ -19,6 +19,7 @@ import {
   ProviderEventLoggers,
 } from "../src/provider/Layers/ProviderEventLoggers.ts";
 import { makeProviderServiceLive } from "../src/provider/Layers/ProviderService.ts";
+import * as TurnCheckpointCapture from "../src/checkpointing/TurnCheckpointCapture.ts";
 import {
   ProviderService,
   type ProviderServiceShape,
@@ -101,6 +102,7 @@ const makeIntegrationFixture = (options?: { readonly analytics?: Layer.Layer<Ana
     ).pipe(Layer.provide(SqlitePersistenceMemory));
 
     const layer = makeProviderServiceLive().pipe(
+      Layer.provide(TurnCheckpointCapture.layer),
       Layer.provide(NodeServices.layer),
       Layer.provide(shared),
     );

@@ -120,6 +120,7 @@ describe("ProviderCommandReactor", () => {
   let runtime: ManagedRuntime.ManagedRuntime<
     | OrchestrationEngineService
     | ProviderCommandReactor
+    | TurnCheckpointCapture.TurnCheckpointCapture
     | ProjectionSnapshotQuery
     | SqlClient.SqlClient,
     unknown

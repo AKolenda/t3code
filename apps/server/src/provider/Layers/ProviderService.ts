@@ -2099,10 +2099,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 export const ProviderServiceLive = Layer.effect(
   ProviderService.ProviderService,
   makeProviderService(),
-).pipe(Layer.provide(TurnCheckpointCapture.layer));
+);
 
 export function makeProviderServiceLive(options?: ProviderServiceLiveOptions) {
-  return Layer.effect(ProviderService.ProviderService, makeProviderService(options)).pipe(
-    Layer.provide(TurnCheckpointCapture.layer),
-  );
+  return Layer.effect(ProviderService.ProviderService, makeProviderService(options));
 }
