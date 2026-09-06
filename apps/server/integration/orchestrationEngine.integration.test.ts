@@ -168,13 +168,14 @@ const startTurn = (input: {
   readonly commandId: string;
   readonly messageId: string;
   readonly text: string;
+  readonly threadId?: ThreadId;
   readonly modelSelection?: ModelSelection;
   readonly createdAt?: string;
 }) =>
   input.harness.engine.dispatch({
     type: "thread.turn.start",
     commandId: CommandId.make(input.commandId),
-    threadId: THREAD_ID,
+    threadId: input.threadId ?? THREAD_ID,
     message: {
       messageId: asMessageId(input.messageId),
       role: "user",
@@ -697,6 +698,114 @@ it.live("cancels a message waiting for capture when the user stops again", () =>
               )
             : Effect.void,
         onInterrupt: () => Deferred.succeed(stopped, undefined).pipe(Effect.asVoid),
+      },
+    );
+  }),
+);
+
+it.live("cancels a released capture waiter before its queued message is claimed", () =>
+  Effect.gen(function* () {
+    const captureStarted = yield* Deferred.make<void>();
+    const finishCapture = yield* Deferred.make<void>();
+    const workerBlocked = yield* Deferred.make<void>();
+    const releaseWorker = yield* Deferred.make<void>();
+    const otherSessionStarted = yield* Deferred.make<void>();
+    const stopped = yield* Deferred.make<void>();
+    const secondTurnStarted = yield* Deferred.make<void>();
+    const otherThreadId = ThreadId.make("capture-cancellation-other-thread");
+    yield* withHarness(
+      (harness) =>
+        Effect.gen(function* () {
+          yield* seedProjectAndThread(harness);
+          yield* harness.engine.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("capture-cancellation-other-thread-create"),
+            threadId: otherThreadId,
+            projectId: PROJECT_ID,
+            title: "Other thread",
+            modelSelection: {
+              instanceId: defaultInstanceIdForDriver(CODEX_PROVIDER),
+              model: DEFAULT_MODEL,
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            branch: null,
+            worktreePath: harness.workspaceDir,
+            createdAt: nowIso(),
+          });
+          yield* harness.adapterHarness!.queueTurnResponseForNextSession({
+            events: [],
+            emitCompletion: false,
+            mutateWorkspace: () =>
+              Deferred.succeed(otherSessionStarted, undefined).pipe(Effect.asVoid),
+          });
+          yield* startTurn({
+            harness,
+            threadId: otherThreadId,
+            commandId: "capture-cancellation-other-turn",
+            messageId: "capture-cancellation-other-message",
+            text: "Keep the other session open",
+          });
+          yield* Deferred.await(otherSessionStarted);
+          yield* harness.adapterHarness!.queueTurnResponseForNextSession({ events: [] });
+          yield* startTurn({
+            harness,
+            commandId: "released-capture-first",
+            messageId: "released-capture-first-message",
+            text: "Start work",
+          });
+          yield* Deferred.await(captureStarted);
+          yield* harness.adapterHarness!.queueTurnResponse(THREAD_ID, {
+            events: [],
+            mutateWorkspace: () =>
+              Deferred.succeed(secondTurnStarted, undefined).pipe(Effect.asVoid),
+          });
+          yield* startTurn({
+            harness,
+            commandId: "released-capture-second",
+            messageId: "released-capture-second-message",
+            text: "Start more work",
+          });
+          yield* harness.drainProviderCommands;
+          yield* harness.engine.dispatch({
+            type: "thread.turn.interrupt",
+            commandId: CommandId.make("capture-cancellation-block-worker"),
+            threadId: otherThreadId,
+            createdAt: nowIso(),
+          });
+          yield* Deferred.await(workerBlocked);
+          yield* harness.engine.dispatch({
+            type: "thread.turn.interrupt",
+            commandId: CommandId.make("released-capture-stop"),
+            threadId: THREAD_ID,
+            createdAt: nowIso(),
+          });
+          yield* Deferred.succeed(finishCapture, undefined);
+          yield* harness.drainCheckpointReactor;
+          // Let the released waiter queue its message behind the stop.
+          yield* Effect.yieldNow;
+          yield* Deferred.succeed(releaseWorker, undefined);
+          yield* Deferred.await(stopped);
+          yield* harness.drainProviderCommands;
+          assert.isFalse(Deferred.isDoneUnsafe(secondTurnStarted));
+        }).pipe(
+          Effect.ensuring(Deferred.succeed(finishCapture, undefined)),
+          Effect.ensuring(Deferred.succeed(releaseWorker, undefined)),
+        ),
+      CODEX_PROVIDER,
+      {
+        beforeCapture: ({ checkpointRef }) =>
+          checkpointRef === checkpointRefForThreadTurn(THREAD_ID, 1)
+            ? Deferred.succeed(captureStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(finishCapture)),
+              )
+            : Effect.void,
+        onInterrupt: (threadId) =>
+          threadId === otherThreadId
+            ? Deferred.succeed(workerBlocked, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseWorker)),
+              )
+            : Deferred.succeed(stopped, undefined).pipe(Effect.asVoid),
       },
     );
   }),

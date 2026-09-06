@@ -12,6 +12,7 @@ interface PendingCapture {
   readonly threadId: ThreadId;
   readonly turnId: TurnId | undefined;
   readonly events: Set<EventId>;
+  readonly reservations: Set<symbol>;
   readonly outcome: Deferred.Deferred<CaptureOutcome>;
 }
 
@@ -58,6 +59,7 @@ export const layer = Layer.effect(
         threadId,
         turnId,
         events: new Set(),
+        reservations: new Set(),
         outcome: Deferred.makeUnsafe(),
       };
       state.pending.add(capture);
@@ -115,9 +117,14 @@ export const layer = Layer.effect(
           const turnId = threads.get(threadId)?.activeTurnId;
           if (turnId === undefined) return Effect.void;
           const capture = prepare(threadId, turnId);
+          const reservation = Symbol();
+          capture.reservations.add(reservation);
           return Effect.sync(() => {
-            // A failed interrupt can cancel its expectation, but not observed capture work.
-            if (capture.events.size === 0) complete(capture, "skipped");
+            capture.reservations.delete(reservation);
+            // A failed call cannot release another interrupt or observed capture work.
+            if (capture.reservations.size === 0 && capture.events.size === 0) {
+              complete(capture, "skipped");
+            }
           });
         }),
       pendingCapture: (threadId) =>

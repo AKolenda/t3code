@@ -78,6 +78,18 @@ type ProviderIntentEvent = Extract<
   }
 >;
 
+type TurnStartRequestedEvent = Extract<
+  ProviderIntentEvent,
+  { type: "thread.turn-start-requested" }
+>;
+type ProviderCommandInput =
+  | ProviderIntentEvent
+  | {
+      readonly type: "checkpoint.capture-ready";
+      readonly event: TurnStartRequestedEvent;
+      readonly requests: Set<TurnStartRequestedEvent>;
+    };
+
 function toNonEmptyProviderInput(value: string | undefined): string | undefined {
   const normalized = value?.trim();
   return normalized && normalized.length > 0 ? normalized : undefined;
@@ -308,10 +320,7 @@ const make = Effect.gen(function* () {
   const threadModelSelections = new Map<string, ModelSelection>();
   const compactingThreadIds = new Set<ThreadId>();
   const stoppingThreadIds = new Set<ThreadId>();
-  const delayedTurnStarts = new Map<
-    ThreadId,
-    Array<Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>>
-  >();
+  const delayedTurnStarts = new Map<ThreadId, Set<TurnStartRequestedEvent>>();
 
   const appendProviderFailureActivity = (
     input: {
@@ -1167,24 +1176,15 @@ const make = Effect.gen(function* () {
   ) {
     const waitForCapture = yield* checkpointCapture.pendingCapture(event.payload.threadId);
     if (waitForCapture !== undefined) {
-      const delayed = delayedTurnStarts.get(event.payload.threadId);
-      if (delayed) {
-        delayed.push(event);
-      } else {
-        const requests = [event];
-        delayedTurnStarts.set(event.payload.threadId, requests);
-        // Keep other threads and stop requests moving while this thread waits.
-        yield* waitForCapture.pipe(
-          Effect.andThen(
-            Effect.gen(function* () {
-              if (delayedTurnStarts.get(event.payload.threadId) !== requests) return;
-              delayedTurnStarts.delete(event.payload.threadId);
-              yield* Effect.forEach(requests, worker.enqueue, { discard: true });
-            }),
-          ),
-          Effect.forkScoped,
-        );
-      }
+      const requests =
+        delayedTurnStarts.get(event.payload.threadId) ?? new Set<TurnStartRequestedEvent>();
+      delayedTurnStarts.set(event.payload.threadId, requests);
+      requests.add(event);
+      // Keep cancellation ownership until the command worker claims this request.
+      yield* waitForCapture.pipe(
+        Effect.andThen(worker.enqueue({ type: "checkpoint.capture-ready", event, requests })),
+        Effect.forkScoped,
+      );
       return;
     }
 
@@ -1821,8 +1821,16 @@ const make = Effect.gen(function* () {
       }),
     );
 
-  const worker: DrainableWorker<ProviderIntentEvent> =
-    yield* makeDrainableWorker(processDomainEventSafely);
+  const worker: DrainableWorker<ProviderCommandInput> = yield* makeDrainableWorker(
+    Effect.fn("processProviderCommandInput")(function* (input: ProviderCommandInput) {
+      if (input.type !== "checkpoint.capture-ready") return yield* processDomainEventSafely(input);
+      const { event, requests } = input;
+      const threadId = event.payload.threadId;
+      if (delayedTurnStarts.get(threadId) !== requests || !requests.delete(event)) return;
+      if (requests.size === 0) delayedTurnStarts.delete(threadId);
+      yield* processDomainEventSafely(event);
+    }),
+  );
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
     const interruptedTitleRegenerations = yield* findInterruptedThreadTitleRegenerations().pipe(

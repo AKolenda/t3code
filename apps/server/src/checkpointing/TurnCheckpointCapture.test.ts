@@ -88,7 +88,7 @@ it.layer(layer)("TurnCheckpointCapture", (it) => {
       Effect.gen(function* () {
         const captures = yield* TurnCheckpointCapture;
         yield* captures.observe(started);
-        yield* captures.expectInterrupt(threadId);
+        const cancelExpectation = yield* captures.expectInterrupt(threadId);
         const waiting = yield* captures.awaitCapture(threadId).pipe(Effect.forkChild);
         yield* captures.observe({
           ...started,
@@ -97,6 +97,7 @@ it.layer(layer)("TurnCheckpointCapture", (it) => {
           payload: {},
         });
         yield* Fiber.join(waiting);
+        yield* cancelExpectation;
         assert.equal(yield* captures.pendingCapture(threadId), undefined);
       }),
   );
@@ -117,6 +118,24 @@ it.layer(layer)("TurnCheckpointCapture", (it) => {
       assert.equal(waiting.pollUnsafe(), undefined);
       yield* captures.complete(newerTerminal, "captured");
       yield* Fiber.join(waiting);
+    }),
+  );
+
+  it.effect("keeps the first interrupt reservation when a repeated interrupt fails", () =>
+    Effect.gen(function* () {
+      const captures = yield* TurnCheckpointCapture;
+      yield* captures.observe(started);
+      const cancelFirst = yield* captures.expectInterrupt(threadId);
+      const cancelRetry = yield* captures.expectInterrupt(threadId);
+      yield* cancelRetry;
+      yield* cancelRetry;
+      const waiting = yield* captures.awaitCapture(threadId).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      assert.equal(waiting.pollUnsafe(), undefined);
+      yield* captures.observe(completed);
+      yield* captures.complete(completed, "captured");
+      yield* Fiber.join(waiting);
+      yield* cancelFirst;
     }),
   );
 
