@@ -1324,6 +1324,15 @@ const make = Effect.gen(function* () {
     if (authCommandHandled) {
       return;
     }
+    if (
+      thread.pendingOperation?.kind === "compact" &&
+      thread.pendingOperation.requestId !== event.payload.messageId
+    ) {
+      return yield* appendTurnStartFailure(
+        "Provider turn start failed",
+        "Wait for context compaction to finish before sending another message.",
+      );
+    }
 
     yield* ensureThreadWorktree(thread);
 

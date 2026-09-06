@@ -63,7 +63,7 @@ describe("resolveAutoSettlementAt", () => {
           latestUserMessageAt: NOW,
           pendingOperation: null,
         }),
-        { state: "closed", updatedAt: NOW },
+        { state: "closed", closedAt: NOW },
       ),
     ).toBe(true);
   });

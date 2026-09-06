@@ -1318,6 +1318,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
                 : "running";
             yield* projectionTurnRepository.upsertByTurnId({
               ...existingTurn.value,
+              ...(Option.isSome(pendingTurnStart)
+                ? { operation: (yield* resolvePendingOperation(pendingTurnStart.value)).kind }
+                : {}),
               state: nextState,
               pendingMessageId:
                 existingTurn.value.pendingMessageId ??
@@ -1347,6 +1350,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             yield* projectionTurnRepository.upsertByTurnId({
               turnId,
               threadId: event.payload.threadId,
+              operation: Option.isSome(pendingTurnStart)
+                ? (yield* resolvePendingOperation(pendingTurnStart.value)).kind
+                : "turn",
               pendingMessageId: Option.isSome(pendingTurnStart)
                 ? pendingTurnStart.value.messageId
                 : null,

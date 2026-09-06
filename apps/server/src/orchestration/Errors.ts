@@ -56,7 +56,7 @@ export class OrchestrationOperationSupersededError extends Schema.TaggedErrorCla
   "OrchestrationOperationSupersededError",
   {
     requestId: MessageId,
-    currentRequestId: MessageId,
+    currentRequestId: Schema.NullOr(MessageId),
   },
 ) {
   override get message(): string {

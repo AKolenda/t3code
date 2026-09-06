@@ -1213,9 +1213,9 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
-  effectIt.effect(
-    "rejects a compaction that did not get a pending record before the prior one finished",
-    () =>
+  effectIt.effect.each(["/COMPACT", "queued message"])(
+    "rejects %s without a pending record when the prior compaction finishes",
+    (secondMessage) =>
       Effect.gen(function* () {
         const initialSent = yield* Deferred.make<void>();
         const firstCompactStarted = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
@@ -1230,7 +1230,7 @@ describe("ProviderCommandReactor", () => {
                 yield* Deferred.await(finishFirst);
               }),
             tryHandlePromptCommandEffect: ({ text }) =>
-              text === "/COMPACT"
+              text === secondMessage
                 ? Deferred.succeed(secondPaused, undefined).pipe(
                     Effect.andThen(Deferred.await(releaseSecond)),
                     Effect.as(false),
@@ -1248,19 +1248,86 @@ describe("ProviderCommandReactor", () => {
         yield* readyAfterTestTurn(harness.engine, "before-admission-race");
         yield* dispatchTestTurn(harness.engine, "first-compact", "/compact");
         const firstFiber = yield* Deferred.await(firstCompactStarted);
-        yield* dispatchTestTurn(harness.engine, "second-compact", "/COMPACT");
+        yield* dispatchTestTurn(harness.engine, "second-compact", secondMessage);
         yield* Deferred.await(secondPaused);
         yield* Deferred.succeed(finishFirst, undefined);
         yield* Fiber.await(firstFiber);
         yield* Deferred.succeed(releaseSecond, undefined);
         yield* Effect.promise(() => harness.drain());
         expect(harness.compactThread).toHaveBeenCalledTimes(1);
+        expect(harness.sendTurn).toHaveBeenCalledTimes(1);
         const thread = (yield* Effect.promise(() => harness.readModel())).threads[0];
         expect(thread?.pendingOperation).toBeNull();
         expect(
           thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed")
             ?.payload,
         ).toMatchObject({ requestId: "second-compact" });
+      }),
+  );
+
+  effectIt.effect.each(["stopped", "interrupted", "error"] as const)(
+    "keeps %s when a compaction restore was already queued",
+    (terminalStatus) =>
+      Effect.gen(function* () {
+        const initialSent = yield* Deferred.make<void>();
+        const restoreStarted = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+        const releaseRestore = yield* Deferred.make<void>();
+        let blockRestore = false;
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            beforeReadySessionDispatch: () =>
+              blockRestore
+                ? Effect.gen(function* () {
+                    yield* Deferred.succeed(restoreStarted, yield* Effect.fiber);
+                    yield* Deferred.await(releaseRestore);
+                  })
+                : Effect.void,
+          }),
+        );
+        harness.sendTurn.mockImplementation(() =>
+          Deferred.succeed(initialSent, undefined).pipe(
+            Effect.as({ threadId: ThreadId.make("thread-1"), turnId: TurnId.make("initial") }),
+          ),
+        );
+        yield* dispatchTestTurn(harness.engine, "before-queued-restore", "hello");
+        yield* Deferred.await(initialSent);
+        yield* readyAfterTestTurn(harness.engine, "before-queued-restore");
+        blockRestore = true;
+        yield* dispatchTestTurn(harness.engine, "queued-restore", "/compact");
+        const restoreFiber = yield* Deferred.await(restoreStarted);
+        if (terminalStatus === "stopped") {
+          yield* harness.engine.dispatch({
+            type: "thread.session.stop",
+            commandId: CommandId.make("stop-before-queued-restore"),
+            threadId: ThreadId.make("thread-1"),
+            createdAt: "2026-01-01T00:00:01.000Z",
+          });
+        } else {
+          yield* harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make("terminal-before-queued-restore"),
+            threadId: ThreadId.make("thread-1"),
+            session: {
+              threadId: ThreadId.make("thread-1"),
+              status: terminalStatus,
+              providerName: "codex",
+              providerInstanceId: ProviderInstanceId.make("codex"),
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: terminalStatus === "error" ? "Provider failed" : null,
+              updatedAt: "2026-01-01T00:00:01.000Z",
+            },
+            createdAt: "2026-01-01T00:00:01.000Z",
+          });
+        }
+        yield* Effect.promise(() => harness.drain());
+        const stopped = (yield* Effect.promise(() => harness.readModel())).threads[0];
+        expect(stopped?.session?.status).toBe(terminalStatus);
+        yield* Deferred.succeed(releaseRestore, undefined);
+        yield* Fiber.await(restoreFiber);
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads[0];
+        expect(thread?.session?.status).toBe(terminalStatus);
+        expect(thread?.pendingOperation).toBeNull();
       }),
   );
 

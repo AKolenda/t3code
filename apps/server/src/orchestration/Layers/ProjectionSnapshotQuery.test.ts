@@ -2288,6 +2288,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
     const sql = yield* SqlClient.SqlClient;
 
     // Tests in this block share one in-memory database; reset before seeding.
+    yield* sql`DELETE FROM projection_thread_sessions`;
     yield* sql`DELETE FROM projection_projects`;
     yield* sql`DELETE FROM projection_threads`;
     yield* sql`DELETE FROM projection_turns`;
@@ -2674,6 +2675,55 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
       assert.equal(new Set(seenActivities).size, seenActivities.length);
       assert.equal(seenMessages.length, 9);
       assert.equal(seenActivities.length, 6);
+    }),
+  );
+
+  it.effect("recovers only an active unfinished legacy compaction from its adopted turn", () =>
+    Effect.gen(function* () {
+      yield* seedFanOutThread();
+      const snapshotQuery = yield* ProjectionSnapshotQuery;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        UPDATE projection_thread_messages SET text = '	 /CoMpAcT
+'
+        WHERE message_id = 'user-msg-5'
+      `;
+      yield* sql`
+        UPDATE projection_turns SET state = 'running', completed_at = NULL
+        WHERE turn_id = 'turn-5'
+      `;
+      yield* sql`
+        INSERT OR REPLACE INTO projection_thread_sessions (
+          thread_id, status, provider_name, runtime_mode, active_turn_id, updated_at
+        ) VALUES ('thread-w', 'running', 'codex', 'full-access', 'turn-5', '2026-03-01T00:04:00.000Z')
+      `;
+      assert.deepEqual((yield* snapshotQuery.getShellSnapshot()).threads[0]?.pendingOperation, {
+        kind: "compact",
+        requestId: "user-msg-5",
+      });
+      yield* sql`
+        INSERT INTO projection_thread_activities (
+          activity_id, thread_id, turn_id, tone, kind, summary, payload_json, created_at
+        ) VALUES ('legacy-compact-done', 'thread-w', 'turn-5', 'info', 'context-compaction',
+          'Compacted', '{"requestId":"user-msg-5"}', '2026-03-01T00:04:01.000Z')
+      `;
+      assert.equal((yield* snapshotQuery.getShellSnapshot()).threads[0]?.pendingOperation, null);
+      yield* sql`DELETE FROM projection_thread_activities WHERE activity_id = 'legacy-compact-done'`;
+      yield* sql`UPDATE projection_turns SET operation_kind = 'compact' WHERE turn_id = 'turn-5'`;
+      assert.equal((yield* snapshotQuery.getShellSnapshot()).threads[0]?.pendingOperation, null);
+      yield* sql`UPDATE projection_turns SET operation_kind = NULL WHERE turn_id = 'turn-5'`;
+      yield* sql`UPDATE projection_thread_sessions SET active_turn_id = NULL WHERE thread_id = 'thread-w'`;
+      assert.equal((yield* snapshotQuery.getShellSnapshot()).threads[0]?.pendingOperation, null);
+      yield* sql`UPDATE projection_thread_sessions SET active_turn_id = 'turn-5' WHERE thread_id = 'thread-w'`;
+      yield* sql`
+        INSERT INTO projection_turns (
+          thread_id, pending_message_id, operation_kind, state, requested_at, checkpoint_files_json
+        ) VALUES ('thread-w', 'next-request', 'turn', 'pending', '2026-03-01T00:04:02.000Z', '[]')
+      `;
+      assert.deepEqual((yield* snapshotQuery.getShellSnapshot()).threads[0]?.pendingOperation, {
+        kind: "turn",
+        requestId: "next-request",
+      });
     }),
   );
 

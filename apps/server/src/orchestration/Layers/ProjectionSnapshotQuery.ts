@@ -130,6 +130,7 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
         OrchestrationPendingOperation.mapFields(
           Struct.assign({
             kind: Schema.NullOr(OrchestrationOperationKind),
+            legacyActive: Schema.optional(Schema.Boolean),
             legacyMessage: Schema.NullOr(
               Schema.Struct({
                 role: Schema.String,
@@ -385,14 +386,13 @@ function mapPendingOperation(row: Schema.Schema.Type<typeof ProjectionThreadDbRo
   if (pending === null) return null;
   // An older server can write an untyped row after this migration has run.
   // Resolve it here so lightweight snapshots do not need message history.
-  return {
-    kind:
-      pending.kind ??
-      (pending.legacyMessage !== null && isContextCompactionMessage(pending.legacyMessage)
-        ? "compact"
-        : "turn"),
-    requestId: pending.requestId,
-  };
+  const kind =
+    pending.kind ??
+    (pending.legacyMessage !== null && isContextCompactionMessage(pending.legacyMessage)
+      ? "compact"
+      : "turn");
+  if (pending.legacyActive && kind !== "compact") return null;
+  return { kind, requestId: pending.requestId };
 }
 
 function mapSessionRow(
@@ -528,7 +528,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
   });
 
   const pendingOperationSql = sql`
-    (
+    COALESCE((
       SELECT json_object(
         'kind', pending.operation_kind,
         'requestId', pending.pending_message_id,
@@ -551,7 +551,33 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         AND pending.checkpoint_turn_count IS NULL
       ORDER BY pending.requested_at DESC
       LIMIT 1
-    )
+    ), (
+      SELECT json_object(
+        'kind', NULL,
+        'requestId', active.pending_message_id,
+        'legacyActive', json('true'),
+        'legacyMessage', json_object(
+          'role', messages.role, 'text', messages.text,
+          'attachments', json(COALESCE(messages.attachments_json, '[]'))
+        )
+      )
+      FROM projection_thread_sessions session
+      JOIN projection_turns active
+        ON active.thread_id = session.thread_id AND active.turn_id = session.active_turn_id
+      JOIN projection_thread_messages messages
+        ON messages.thread_id = active.thread_id AND messages.message_id = active.pending_message_id
+      WHERE session.thread_id = projection_threads.thread_id
+        AND session.status IN ('starting', 'running')
+        AND active.operation_kind IS NULL
+        AND active.state = 'running'
+        AND NOT EXISTS (
+          SELECT 1 FROM projection_thread_activities activity
+          WHERE activity.thread_id = active.thread_id
+            AND activity.kind IN ('context-compaction', 'provider.turn.start.failed')
+            AND json_extract(activity.payload_json, '$.requestId') = active.pending_message_id
+        )
+      LIMIT 1
+    ))
   `;
 
   const listThreadRows = SqlSchema.findAll({

@@ -4322,6 +4322,14 @@ engineLayer("pending operation facts", (it) => {
         session,
         createdAt: now,
       });
+      yield* engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("native-compact-turn-started"),
+        threadId,
+        session: { ...session, status: "running", activeTurnId: TurnId.make("compact-turn") },
+        createdAt: now,
+      });
+      yield* check(pending);
       yield* start("rejected-during-compact", "another message");
       yield* engine.dispatch({
         type: "thread.activity.append",
@@ -4343,6 +4351,23 @@ engineLayer("pending operation facts", (it) => {
         createdAt: now,
       });
       yield* check(pending);
+      yield* engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("compact-result-before-session-restore"),
+        threadId,
+        operationResult: { requestId: pending.requestId, outcome: "completed" },
+        activity: {
+          id: EventId.make("compact-result-before-session-restore"),
+          kind: "context-compaction",
+          tone: "info",
+          summary: "Context compacted",
+          payload: {},
+          turnId: TurnId.make("compact-turn"),
+          createdAt: now,
+        },
+        createdAt: now,
+      });
+      yield* check(null);
       yield* engine.dispatch({
         type: "thread.session.set",
         commandId: CommandId.make("operation-finished-without-magic-prefix"),

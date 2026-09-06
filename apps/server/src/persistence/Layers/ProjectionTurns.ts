@@ -51,6 +51,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           thread_id,
           turn_id,
           pending_message_id,
+          operation_kind,
           source_proposed_plan_thread_id,
           source_proposed_plan_id,
           assistant_message_id,
@@ -67,6 +68,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           ${row.threadId},
           ${row.turnId},
           ${row.pendingMessageId},
+          ${row.operation ?? "turn"},
           ${row.sourceProposedPlanThreadId},
           ${row.sourceProposedPlanId},
           ${row.assistantMessageId},
@@ -82,6 +84,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
         ON CONFLICT (thread_id, turn_id)
         DO UPDATE SET
           pending_message_id = excluded.pending_message_id,
+          operation_kind = COALESCE(${row.operation ?? null}, projection_turns.operation_kind),
           source_proposed_plan_thread_id = excluded.source_proposed_plan_thread_id,
           source_proposed_plan_id = excluded.source_proposed_plan_id,
           assistant_message_id = excluded.assistant_message_id,

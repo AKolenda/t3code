@@ -1235,10 +1235,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           thread.latestTurn?.turnId === thread.session.activeTurnId
             ? thread.latestTurn.requestId
             : undefined);
-        if (currentRequestId !== undefined && currentRequestId !== result.requestId) {
+        if (
+          (currentRequestId !== undefined && currentRequestId !== result.requestId) ||
+          (currentRequestId === undefined &&
+            (thread.session?.status === "stopped" ||
+              thread.session?.status === "interrupted" ||
+              thread.session?.status === "error"))
+        ) {
           return yield* new OrchestrationOperationSupersededError({
             requestId: result.requestId,
-            currentRequestId,
+            currentRequestId: currentRequestId ?? null,
           });
         }
       }

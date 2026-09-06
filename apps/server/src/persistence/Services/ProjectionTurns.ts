@@ -56,6 +56,7 @@ export const ProjectionTurnById = Schema.Struct({
   threadId: ThreadId,
   turnId: TurnId,
   pendingMessageId: Schema.NullOr(MessageId),
+  operation: Schema.optional(OrchestrationOperationKind),
   sourceProposedPlanThreadId: Schema.NullOr(ThreadId),
   sourceProposedPlanId: Schema.NullOr(OrchestrationProposedPlanId),
   assistantMessageId: Schema.NullOr(MessageId),
