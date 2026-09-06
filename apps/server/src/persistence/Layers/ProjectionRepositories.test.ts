@@ -18,6 +18,8 @@ import * as Statement from "effect/unstable/sql/Statement";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
 import { ProjectionProjectRepositoryLive } from "./ProjectionProjects.ts";
 import { ProjectionThreadRepositoryLive } from "./ProjectionThreads.ts";
+import { ProjectionTurnRepositoryLive } from "./ProjectionTurns.ts";
+import { ProjectionTurnRepository } from "../Services/ProjectionTurns.ts";
 import { ProjectionThreadActivityRepositoryLive } from "./ProjectionThreadActivities.ts";
 import { ProjectionThreadProposedPlanRepositoryLive } from "./ProjectionThreadProposedPlans.ts";
 import { ProjectionProjectRepository } from "../Services/ProjectionProjects.ts";
@@ -29,6 +31,7 @@ const projectionRepositoriesLayer = it.layer(
   Layer.mergeAll(
     ProjectionProjectRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     ProjectionThreadRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+    ProjectionTurnRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     ProjectionThreadActivityRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     ProjectionThreadProposedPlanRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     SqlitePersistenceMemory,
@@ -451,6 +454,40 @@ projectionRepositoriesLayer("Projection repositories", (it) => {
           }),
         ),
       );
+    }),
+  );
+
+  it.effect("reads concrete turn operation kinds and legacy nulls", () =>
+    Effect.gen(function* () {
+      const turns = yield* ProjectionTurnRepository;
+      const sql = yield* SqlClient.SqlClient;
+      const threadId = ThreadId.make("operation-roundtrip");
+      for (const operation of [undefined, "turn", "compact"] as const) {
+        const turnId = TurnId.make(`operation-${operation ?? "legacy"}`);
+        yield* turns.upsertByTurnId({
+          threadId,
+          turnId,
+          ...(operation ? { operation } : {}),
+          pendingMessageId: null,
+          sourceProposedPlanThreadId: null,
+          sourceProposedPlanId: null,
+          assistantMessageId: null,
+          state: "completed",
+          requestedAt: "2026-04-01T00:00:00.000Z",
+          startedAt: null,
+          completedAt: "2026-04-01T00:00:01.000Z",
+          checkpointTurnCount: null,
+          checkpointRef: null,
+          checkpointStatus: null,
+          checkpointFiles: [],
+        });
+        if (operation === undefined) {
+          // Rows written before migration 48 can have no operation kind.
+          yield* sql`UPDATE projection_turns SET operation_kind = NULL WHERE thread_id = ${threadId} AND turn_id = ${turnId}`;
+        }
+        const persisted = Option.getOrThrow(yield* turns.getByTurnId({ threadId, turnId }));
+        assert.equal(persisted.operation, operation ?? null);
+      }
     }),
   );
 

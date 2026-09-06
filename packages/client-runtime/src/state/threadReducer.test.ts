@@ -47,6 +47,70 @@ const baseThread: OrchestrationThread = {
 };
 
 describe("applyThreadDetailEvent", () => {
+  it.each([
+    {
+      messageAt: "2026-04-01T02:00:00+02:00",
+      turnAt: "2026-04-01T00:00:00Z",
+      state: "completed",
+      pending: false,
+    },
+    {
+      messageAt: "2026-04-01T03:00:00+04:00",
+      turnAt: "2026-04-01T00:00:00Z",
+      state: "completed",
+      pending: false,
+    },
+    {
+      messageAt: "2026-04-01T00:00:00Z",
+      turnAt: "2026-04-01T01:00:00+02:00",
+      state: "completed",
+      pending: true,
+    },
+    {
+      messageAt: "2026-04-01T02:00:00+02:00",
+      turnAt: "2026-04-01T00:00:00Z",
+      state: "running",
+      pending: true,
+    },
+  ] as const)(
+    "compares legacy compaction timestamps as instants: %j",
+    ({ messageAt, turnAt, state, pending }) => {
+      const requestId = MessageId.make("legacy-compact");
+      const operation = getThreadPendingOperation({
+        ...baseThread,
+        messages: [
+          {
+            id: requestId,
+            role: "user",
+            text: "/compact",
+            createdAt: messageAt,
+            updatedAt: messageAt,
+            turnId: null,
+            streaming: false,
+          },
+        ],
+        latestTurn: {
+          turnId: TurnId.make("prior-turn"),
+          state,
+          requestedAt: turnAt,
+          startedAt: turnAt,
+          completedAt: state === "completed" ? turnAt : null,
+          assistantMessageId: null,
+        },
+        session: {
+          threadId: baseThread.id,
+          status: "starting",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: turnAt,
+        },
+      });
+      expect(operation).toEqual(pending ? { kind: "compact", requestId } : null);
+    },
+  );
+
   it.each([true, false])(
     "keeps request bindings when acceptance precedes start: %s",
     (beforeStart) => {

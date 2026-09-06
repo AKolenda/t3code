@@ -169,12 +169,13 @@ export function getThreadPendingOperation(
     return null;
   }
   const message = thread.messages?.findLast(isContextCompactionMessage);
+  if (!message) return null;
+  const messageCreatedAt = Date.parse(message.createdAt);
+  const turnRequestedAt = Date.parse(thread.latestTurn?.requestedAt ?? message.createdAt);
   if (
-    !message ||
     !(
-      message.createdAt > (thread.latestTurn?.requestedAt ?? message.createdAt) ||
-      (thread.latestTurn?.state === "running" &&
-        message.createdAt === thread.latestTurn.requestedAt)
+      messageCreatedAt > turnRequestedAt ||
+      (thread.latestTurn?.state === "running" && messageCreatedAt === turnRequestedAt)
     )
   ) {
     return null;

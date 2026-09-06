@@ -217,6 +217,7 @@ const makeProjectionTurnRepository = Effect.gen(function* () {
           thread_id AS "threadId",
           turn_id AS "turnId",
           pending_message_id AS "pendingMessageId",
+          operation_kind AS "operation",
           source_proposed_plan_thread_id AS "sourceProposedPlanThreadId",
           source_proposed_plan_id AS "sourceProposedPlanId",
           assistant_message_id AS "assistantMessageId",
