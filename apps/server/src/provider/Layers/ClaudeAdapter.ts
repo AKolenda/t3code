@@ -300,6 +300,7 @@ interface ClaudePromptSubmission {
   initialBatch: boolean;
   nativeFinished: boolean;
   resultObserved: boolean;
+  completionUnconfirmed: boolean;
   terminalState?: "cancelled" | "discarded" | "refused";
 }
 
@@ -325,7 +326,6 @@ interface ClaudeSessionContext {
   readonly submissionSemaphore: Semaphore.Semaphore;
   readonly submittedPrompts: Map<string, ClaudePromptSubmission>;
   pendingResult: ClaudePendingResult | undefined;
-  recoveryRequired: boolean;
   nativeInitSequence: number;
   nativeInitSessionId: string | undefined;
   lastResultUuid: string | undefined;
@@ -3393,7 +3393,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const completion = Deferred.makeUnsafe<void>();
     context.turnCompletion = completion;
     context.pendingResult = undefined;
-    context.recoveryRequired = false;
     context.submittedPrompts.clear();
     yield* completeTurn(context, status, errorMessage, pending?.message).pipe(
       Effect.ensuring(
@@ -3416,7 +3415,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const submitted = context.submittedPrompts.get(receipt.command_uuid);
     if (!submitted) return;
     if (receipt.state === "queued") return;
-    context.recoveryRequired = false;
+    submitted.completionUnconfirmed = false;
     if (receipt.state === "started") {
       submitted.started = true;
       if (context.nativeInitSessionId !== undefined) {
@@ -3467,7 +3466,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     for (const [messageId, submitted] of context.submittedPrompts) {
       const matches = completedMessageIds.has(messageId);
       if (matches) {
-        context.recoveryRequired = false;
+        submitted.completionUnconfirmed = false;
         exactMatch = true;
         if (!submitted.nativeFinished) {
           submitted.nativeFinished = true;
@@ -3496,13 +3495,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       preservePendingClaudeUsage(context);
       context.pendingResult = { message, submissions: observedSubmissions, exactMatch };
       yield* finishPendingClaudeTurn(context);
-    } else if (
-      completedMessageIds.size === 0 &&
-      ![...context.submittedPrompts.values()].some(
-        (submitted) => submitted.started && !submitted.nativeFinished,
-      )
-    ) {
-      context.recoveryRequired = true;
+    } else if (completedMessageIds.size === 0) {
+      for (const submitted of context.submittedPrompts.values()) {
+        if (!submitted.nativeFinished) submitted.completionUnconfirmed = true;
+      }
     }
   });
 
@@ -5060,7 +5056,6 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         submissionSemaphore: Semaphore.makeUnsafe(1),
         submittedPrompts: new Map(),
         pendingResult: undefined,
-        recoveryRequired: false,
         nativeInitSequence: 0,
         nativeInitSessionId: undefined,
         lastResultUuid: undefined,
@@ -5167,8 +5162,18 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     },
   );
 
+  const requiresClaudeRecovery = (context: ClaudeSessionContext) => {
+    let unconfirmed = false;
+    for (const submitted of context.submittedPrompts.values()) {
+      // Known active work permits steering but does not confirm other inputs.
+      if (submitted.started && !submitted.nativeFinished) return false;
+      unconfirmed ||= submitted.completionUnconfirmed;
+    }
+    return unconfirmed;
+  };
+
   const requireClaudeCompletionEvidence = (context: ClaudeSessionContext) => {
-    if (!context.recoveryRequired) return Effect.void;
+    if (!requiresClaudeRecovery(context)) return Effect.void;
     return new ProviderAdapterRequestError({
       provider: PROVIDER,
       method: "turn/start",
@@ -5277,7 +5282,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
               const turnId = steeringTurnState?.turnId ?? TurnId.make(yield* randomUUIDv4);
               const stamp = yield* makeEventStamp();
               if (turnOptions) yield* turnOptions.beforeSubmit(turnId);
-              if (context.recoveryRequired) {
+              if (requiresClaudeRecovery(context)) {
                 if (turnOptions) yield* turnOptions.notSubmitted;
                 yield* requireClaudeCompletionEvidence(context);
               }
@@ -5321,6 +5326,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
                   initialBatch: false,
                   nativeFinished: false,
                   resultObserved: false,
+                  completionUnconfirmed: false,
                 });
               // No async work may separate admission from this queue write.
               const offered = Queue.offerUnsafe(context.promptQueue, { type: "message", message });

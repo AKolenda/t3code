@@ -1948,9 +1948,9 @@ describe("ClaudeAdapterLive", () => {
     }).pipe(Effect.provide(harness.layer));
   });
 
-  it.effect(
-    "rejects input before preparation after an unknown result and recovers on exact receipts",
-    () => {
+  it.effect.each([false, true])(
+    "keeps unknown input blocked after another command finishes: %s",
+    (withSecondCommand) => {
       const harness = makeHarness();
       return Effect.gen(function* () {
         const adapter = yield* ClaudeAdapter;
@@ -1966,6 +1966,17 @@ describe("ClaudeAdapterLive", () => {
         const [prompt] = yield* Effect.promise(() =>
           readPromptMessages(harness.getLastCreateQueryInput(), 1),
         );
+        const secondPrompt = withSecondCommand
+          ? yield* Effect.gen(function* () {
+              yield* adapter.sendTurn(
+                { threadId: THREAD_ID, input: "Already queued" },
+                admissionOptions(),
+              );
+              return yield* Effect.promise(() =>
+                readFirstPromptMessage(harness.getLastCreateQueryInput()),
+              );
+            })
+          : undefined;
         const processed = yield* adapter.streamEvents.pipe(
           Stream.takeUntil((event) => event.type === "session.configured"),
           Stream.runCollect,
@@ -1990,21 +2001,72 @@ describe("ClaudeAdapterLive", () => {
           events.some((event) => event.type === "runtime.warning"),
           false,
         );
+        const blockedInput = {
+          threadId: THREAD_ID,
+          input: "Blocked",
+          modelSelection: createModelSelection(
+            ProviderInstanceId.make("claudeAgent"),
+            SYNTHETIC_CLAUDE_STANDARD_MODEL,
+          ),
+        };
         const rejected = yield* adapter
-          .sendTurn(
-            {
-              threadId: THREAD_ID,
-              input: "Blocked",
-              modelSelection: createModelSelection(
-                ProviderInstanceId.make("claudeAgent"),
-                SYNTHETIC_CLAUDE_STANDARD_MODEL,
-              ),
-            },
-            admissionOptions(),
-          )
+          .sendTurn(blockedInput, admissionOptions())
           .pipe(Effect.flip);
         assert.equal(rejected._tag, "ProviderAdapterRequestError");
         assert.equal(harness.query.setModelCalls.length, 0);
+        if (secondPrompt) {
+          const secondProcessed = yield* adapter.streamEvents.pipe(
+            Stream.takeUntil((event) => event.type === "runtime.warning"),
+            Stream.runCollect,
+            Effect.forkChild,
+          );
+          harness.query.emit({
+            type: "command_lifecycle",
+            command_uuid: secondPrompt.uuid,
+            state: "started",
+            session_id: "sdk-unknown",
+            uuid: "second-started",
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            type: "system",
+            subtype: "init",
+            session_id: "sdk-unknown",
+            uuid: "second-init",
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            session_id: "sdk-unknown",
+            uuid: "second-result",
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            type: "command_lifecycle",
+            command_uuid: secondPrompt.uuid,
+            state: "completed",
+            session_id: "sdk-unknown",
+            uuid: "second-completed",
+          } as unknown as SDKMessage);
+          harness.query.emit({
+            type: "system",
+            subtype: "notification",
+            key: "second-command-processed",
+            text: "Second command processed",
+            priority: "high",
+            session_id: "sdk-unknown",
+            uuid: "second-command-processed",
+          } as unknown as SDKMessage);
+          const secondEvents = yield* Fiber.join(secondProcessed);
+          assert.equal(
+            secondEvents.some((event) => event.type === "turn.completed"),
+            false,
+          );
+          const stillRejected = yield* adapter
+            .sendTurn(blockedInput, admissionOptions())
+            .pipe(Effect.result);
+          assert.equal(stillRejected._tag, "Failure");
+          assert.equal(harness.query.setModelCalls.length, 0);
+        }
         const completed = yield* adapter.streamEvents.pipe(
           Stream.filter((event) => event.type === "turn.completed"),
           Stream.take(1),
