@@ -3,7 +3,28 @@ import {
   AuthOrchestrationOperateScope,
   type AuthSessionState,
   type EnvironmentId,
+  type ProviderInstanceConfig,
 } from "@t3tools/contracts";
+import * as Equal from "effect/Equal";
+
+/** Omitted config fields use defaults. Keep unknown keys and invalid values visible to Reset. */
+export function isDefaultProviderInstanceDirty(
+  instance: ProviderInstanceConfig,
+  defaults: {
+    readonly driver: ProviderInstanceConfig["driver"];
+    readonly enabled: boolean | undefined;
+    readonly config: Readonly<Record<string, unknown>>;
+  },
+): boolean {
+  const config = instance.config;
+  if (
+    config !== undefined &&
+    (config === null || typeof config !== "object" || Array.isArray(config))
+  ) {
+    return true;
+  }
+  return !Equal.equals({ ...instance, config: { ...defaults.config, ...config } }, defaults);
+}
 
 export interface ProviderEnvironmentOptionLike {
   readonly environmentId: EnvironmentId;

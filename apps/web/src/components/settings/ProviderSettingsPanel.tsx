@@ -22,7 +22,6 @@ import {
 } from "@t3tools/shared/backgroundActivitySettings";
 import * as Arr from "effect/Array";
 import * as Duration from "effect/Duration";
-import * as Equal from "effect/Equal";
 import * as Result from "effect/Result";
 import { PlusIcon, RefreshCwIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -99,6 +98,7 @@ import {
 import {
   buildProviderEnvironmentOptions,
   classifyProviderEnvironmentAccess,
+  isDefaultProviderInstanceDirty,
   isProviderSettingsEnvironmentAvailable,
   type ProviderEnvironmentAccess,
   type ProviderOperateAccess,
@@ -743,7 +743,7 @@ export function EnvironmentProviderSettings({
     // the driver must still render even when the slot has nothing to show.
     if (effectiveInstance !== undefined) {
       const { enabled: defaultEnabled, ...defaultConfig } = defaultLegacyConfig ?? {};
-      const isDirty = !Equal.equals(effectiveInstance, {
+      const isDirty = isDefaultProviderInstanceDirty(effectiveInstance, {
         driver,
         enabled: defaultEnabled,
         config: defaultConfig,

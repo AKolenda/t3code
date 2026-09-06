@@ -1,14 +1,62 @@
-import { AuthOrchestrationOperateScope, EnvironmentId } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
+  ProviderDriverKind,
+  type ProviderInstanceConfig,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildProviderEnvironmentOptions,
   classifyProviderEnvironmentAccess,
+  isDefaultProviderInstanceDirty,
   isProviderSettingsEnvironmentAvailable,
   resolvePrimaryOperateAccess,
   resolveRemoteOperateAccess,
   resolveSelectedProviderEnvironmentId,
 } from "./ProviderSettingsPanel.logic";
+
+describe("default provider Reset", () => {
+  const { enabled, ...config } = DEFAULT_SERVER_SETTINGS.providers.codex;
+  const defaults = { driver: ProviderDriverKind.make("codex"), enabled, config };
+
+  it.each([undefined, {}, { binaryPath: "codex" }, config])(
+    "keeps default config %j unchanged",
+    (config) => {
+      expect(isDefaultProviderInstanceDirty({ ...defaults, config }, defaults)).toBe(false);
+    },
+  );
+
+  it("keeps an omitted config unchanged for a disabled default provider", () => {
+    const { enabled, ...config } = DEFAULT_SERVER_SETTINGS.providers.cursor;
+    const defaults = { driver: ProviderDriverKind.make("cursor"), enabled, config };
+    expect(isDefaultProviderInstanceDirty({ driver: defaults.driver, enabled }, defaults)).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    { enabled: false },
+    { displayName: "Work" },
+    { accentColor: "#ffffff" },
+    { environment: [{ name: "PROJECT_MODE", value: "work", sensitive: false }] },
+    { config: { binaryPath: "custom-codex" } },
+    { config: { futureSetting: true } },
+  ] satisfies ReadonlyArray<Partial<ProviderInstanceConfig>>)(
+    "keeps the override %j available to Reset",
+    (override) => {
+      expect(isDefaultProviderInstanceDirty({ ...defaults, ...override }, defaults)).toBe(true);
+    },
+  );
+
+  it.each([null, [], "codex", false, 7, { binaryPath: 7 }, { binaryPath: null }])(
+    "keeps invalid config %j available to Reset",
+    (config) => {
+      expect(isDefaultProviderInstanceDirty({ ...defaults, config }, defaults)).toBe(true);
+    },
+  );
+});
 
 const primaryId = EnvironmentId.make("primary");
 const relayId = EnvironmentId.make("relay");
