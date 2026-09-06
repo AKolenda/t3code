@@ -327,14 +327,19 @@ export function mergeProviderModels(
   const previousBySlug = new Map(previousBuiltIns.map((model) => [model.slug, model]));
   const models = next.map((model) => {
     const previousModel = previousBySlug.get(model.slug);
-    if (
-      model.isCustom ||
-      !previousModel ||
-      (model.capabilities?.optionDescriptors?.length ?? 0) > 0 ||
-      (previousModel.capabilities?.optionDescriptors?.length ?? 0) === 0
-    )
-      return model;
-    return { ...model, capabilities: previousModel.capabilities };
+    if (model.isCustom || !previousModel?.capabilities) return model;
+    if (!model.capabilities) return { ...model, capabilities: previousModel.capabilities };
+    return {
+      ...model,
+      capabilities: {
+        ...model.capabilities,
+        optionDescriptors: retainMissingItems(
+          previousModel.capabilities.optionDescriptors ?? [],
+          model.capabilities.optionDescriptors ?? [],
+          (option) => option.id,
+        ),
+      },
+    };
   });
   return retainMissingItems(previousBuiltIns, models, (model) => model.slug);
 }

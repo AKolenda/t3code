@@ -712,6 +712,40 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           ]);
         });
 
+        it("drops saved workspace inventories when discovery becomes unavailable", () => {
+          const workspace = {
+            cwd: "/workspace",
+            checkedAt: cachedProvider.checkedAt,
+            slashCommands: cachedProvider.slashCommands,
+            skills: cachedProvider.skills,
+            inventory: AUTHORITATIVE_PROVIDER_INVENTORY,
+          };
+          const previous = { ...cachedProvider, workspaceSnapshots: [workspace] };
+          const signedOut = {
+            ...failedProvider,
+            inventory: UNAVAILABLE_PROVIDER_INVENTORY,
+          };
+          const cleared = mergeProviderSnapshot(previous, signedOut);
+          assert.deepStrictEqual(cleared.workspaceSnapshots, []);
+          assert.deepStrictEqual(
+            mergeProviderSnapshot(cleared, refreshedProvider).workspaceSnapshots,
+            [],
+          );
+          const unavailableWorkspace = {
+            ...workspace,
+            inventory: UNAVAILABLE_PROVIDER_INVENTORY,
+            slashCommands: [],
+            skills: [],
+          };
+          assert.deepStrictEqual(
+            mergeProviderSnapshot(
+              { ...signedOut, workspaceSnapshots: [unavailableWorkspace] },
+              refreshedProvider,
+            ).workspaceSnapshots,
+            [],
+          );
+        });
+
         it("retains old capabilities only for stale discovered rows", () => {
           const current = cachedProvider.models[0]!;
           const nextModel = { ...current, capabilities: null };
@@ -958,7 +992,6 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
         });
       });
 
-
       it.effect("does not run provider probes during layer construction", () =>
         Effect.gen(function* () {
           const codexDriver = ProviderDriverKind.make("codex");
@@ -1073,10 +1106,11 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           } as const satisfies ServerProvider;
           const pendingScopedProvider = {
             ...scopedProvider,
-            inventory: STALE_PROVIDER_INVENTORY,
+            inventory: { ...STALE_PROVIDER_INVENTORY, slashCommands: "authoritative" },
             status: "error",
             installed: false,
-            slashCommands: [],
+            slashCommands: [{ name: "native" }],
+            skills: [],
           } as const satisfies ServerProvider;
           const snapshotCalls = yield* Ref.make(0);
           const returnPendingSnapshot = yield* Ref.make(true);
@@ -1165,10 +1199,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
           yield* Effect.gen(function* () {
             const registry = yield* ProviderRegistry.ProviderRegistry;
             yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/workspace" });
-            assert.deepStrictEqual(
-              (yield* registry.getProviders)[0]?.workspaceSnapshots,
-              machineProvider.workspaceSnapshots,
-            );
+            const partialWorkspace = (yield* registry.getProviders)[0]?.workspaceSnapshots?.[0];
+            assert.deepStrictEqual(partialWorkspace?.slashCommands, [{ name: "native" }]);
+            assert.deepStrictEqual(partialWorkspace?.skills, []);
+            assert.strictEqual(partialWorkspace?.inventory?.skills, "stale");
             yield* Ref.set(returnPendingSnapshot, false);
             const workspaceUpdate = yield* registry.streamChanges.pipe(
               Stream.runHead,

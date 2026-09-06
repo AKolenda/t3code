@@ -289,6 +289,24 @@ describe("workspace provider snapshots", () => {
     expect(hasProviderWorkspaceSkills(pending, "/workspace/project-a")).toBe(true);
   });
 
+  it("keeps the previous workspace commands after a failed refresh", () => {
+    const stale = {
+      ...provider,
+      workspaceSnapshots: [
+        {
+          ...provider.workspaceSnapshots[0]!,
+          inventory: { slashCommands: "stale", skills: "stale" },
+        },
+      ],
+    } satisfies ServerProvider;
+    expect(resolveProviderSlashCommandsForCwd(stale, "/workspace/project-a")).toEqual([
+      { name: "project" },
+    ]);
+    expect(resolveProviderSkillsForCwd(stale, "/workspace/project-a")).toEqual(
+      provider.workspaceSnapshots[0]!.skills,
+    );
+  });
+
   it("uses the cwd snapshot after a provider session has populated it", () => {
     expect(hasProviderWorkspaceSkills(provider, "/workspace/project-a")).toBe(true);
     expect(resolveProviderSkillsForCwd(provider, "/workspace/project-a")).toEqual([

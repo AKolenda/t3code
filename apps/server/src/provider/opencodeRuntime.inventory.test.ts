@@ -81,7 +81,7 @@ it.layer(testLayer)("OpenCodeRuntime inventory", (it) => {
       const inventory = yield* runtime.loadOpenCodeInventory(client);
 
       NodeAssert.deepEqual(inventory.providerList.connected, ["openai"]);
-      NodeAssert.deepEqual(inventory.agents, []);
+      NodeAssert.equal(inventory.agents, undefined);
       NodeAssert.deepEqual(inventory.skills, []);
     }),
   );

@@ -245,7 +245,7 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
 
   it.effect("emits OpenCode variant defaults so trait picker can resolve a visible selection", () =>
     Effect.gen(function* () {
-      runtimeMock.state.inventory = {
+      const inventory = {
         providerList: {
           connected: ["openai"],
           all: [
@@ -275,6 +275,7 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
         ],
       };
 
+      runtimeMock.state.inventory = inventory;
       const snapshot = yield* checkProvider(makeOpenCodeSettings());
       const model = snapshot.models.find((entry) => entry.slug === "openai/gpt-5.4");
 
@@ -294,6 +295,29 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
       NodeAssert.equal(
         agentDescriptor.options.find((option) => option.isDefault === true)?.id,
         "build",
+      );
+      const previous = {
+        ...snapshot,
+        driver: ProviderDriverKind.make("opencode"),
+        instanceId: ProviderInstanceId.make("opencode-work"),
+      };
+      runtimeMock.state.inventory = { ...inventory, agents: undefined };
+      const partial = mergeProviderSnapshot(previous, {
+        ...previous,
+        ...(yield* checkProvider(makeOpenCodeSettings())),
+      });
+      NodeAssert.equal(partial.inventory?.models, "stale");
+      NodeAssert.deepEqual(partial.models, previous.models);
+
+      runtimeMock.state.inventory = { ...inventory, agents: [] };
+      const complete = mergeProviderSnapshot(partial, {
+        ...partial,
+        ...(yield* checkProvider(makeOpenCodeSettings())),
+      });
+      NodeAssert.equal(complete.inventory?.models, "authoritative");
+      NodeAssert.deepEqual(
+        complete.models[0]?.capabilities?.optionDescriptors?.map((option) => option.id),
+        ["variant"],
       );
     }),
   );

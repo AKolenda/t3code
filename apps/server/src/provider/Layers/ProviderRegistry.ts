@@ -150,8 +150,20 @@ export const mergeProviderSnapshot = (
     !previousProvider ||
     previousProvider.instanceId !== nextProvider.instanceId ||
     previousProvider.driver !== nextProvider.driver
-  ) return nextProvider;
+  )
+    return nextProvider;
   const savedAccount = carrySavedAntigravityAccount(previousProvider, nextProvider);
+  // Sign-out and missing installations invalidate workspace discoveries too.
+  // An unavailable workspace must be scanned again when the provider recovers.
+  const savedWorkspaces =
+    nextProvider.inventory?.skills === "unavailable" ||
+    nextProvider.inventory?.slashCommands === "unavailable"
+      ? []
+      : previousProvider.workspaceSnapshots?.filter(
+          (snapshot) =>
+            snapshot.inventory?.skills !== "unavailable" &&
+            snapshot.inventory?.slashCommands !== "unavailable",
+        );
   // A passed health check no longer needs the unchecked-account message.
   const { message: _uncheckedMessage, ...nextWithoutMessage } = nextProvider;
   return {
@@ -175,8 +187,8 @@ export const mergeProviderSnapshot = (
             ),
           })),
         }
-      : previousProvider.workspaceSnapshots !== undefined
-        ? { workspaceSnapshots: previousProvider.workspaceSnapshots }
+      : savedWorkspaces !== undefined
+        ? { workspaceSnapshots: savedWorkspaces }
         : {}),
   };
 };
@@ -779,7 +791,7 @@ export const ProviderRegistryLive = Layer.effect(
       if (!claimed) return yield* Ref.get(providersRef);
       return yield* instance.snapshotForCwd(input.cwd).pipe(
         Effect.flatMap((scopedSnapshot) =>
-          scopedSnapshot.inventory?.skills === "stale"
+          scopedSnapshot.inventory === undefined && scopedSnapshot.status === "error"
             ? Ref.get(providersRef)
             : instanceRegistry.getInstance(input.instanceId).pipe(
                 Effect.flatMap((currentInstance) => {

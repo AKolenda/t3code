@@ -28,6 +28,7 @@ describe("parseModelsCliOutput", () => {
     ].join("\n");
 
     const result = parseModelsCliOutput(stdout);
+    NodeAssert.ok(result);
     NodeAssert.equal(result.providers.size, 1);
     NodeAssert.equal(result.connected.length, 1);
     NodeAssert.equal(result.connected[0], "anthropic");
@@ -56,6 +57,7 @@ describe("parseModelsCliOutput", () => {
     ].join("\n");
 
     const result = parseModelsCliOutput(stdout);
+    NodeAssert.ok(result);
     NodeAssert.equal(result.providers.size, 2);
     NodeAssert.equal(result.connected.length, 2);
     NodeAssert.equal([...result.connected].sort().join(","), "anthropic,openai");
@@ -65,23 +67,19 @@ describe("parseModelsCliOutput", () => {
 
   it("handles empty input", () => {
     const result = parseModelsCliOutput("");
+    NodeAssert.ok(result);
     NodeAssert.equal(result.providers.size, 0);
     NodeAssert.equal(result.connected.length, 0);
   });
 
-  it("skips unparseable JSON blocks", () => {
-    const stdout = [
-      "anthropic/claude-sonnet-4-5",
-      "this is not valid json {{{",
-      "anthropic/claude-haiku-4-5",
-      JSON.stringify({ id: "claude-haiku-4-5", providerID: "anthropic", name: "Haiku 4.5" }),
-    ].join("\n");
-
-    const result = parseModelsCliOutput(stdout);
-    NodeAssert.equal(result.providers.size, 1);
-    const provider = result.providers.get("anthropic")!;
-    NodeAssert.equal(Object.keys(provider.models).length, 1);
-    NodeAssert.ok(provider.models["claude-haiku-4-5"]);
+  it("rejects malformed or incomplete model output", () => {
+    for (const stdout of [
+      'openai/gpt-test\n{broken\nopenai/gpt-other\n{"name":"Other"}',
+      "openai/gpt-test",
+      "not a model inventory",
+    ]) {
+      NodeAssert.equal(parseModelsCliOutput(stdout), undefined);
+    }
   });
 
   it("handles Windows-style CRLF line endings", () => {
@@ -91,6 +89,7 @@ describe("parseModelsCliOutput", () => {
       "\r\n";
 
     const result = parseModelsCliOutput(stdout);
+    NodeAssert.ok(result);
     NodeAssert.equal(result.providers.size, 1);
     NodeAssert.ok(result.providers.get("anthropic")!.models["claude-sonnet-4-5"]);
   });
@@ -123,6 +122,7 @@ describe("parseModelsCliOutput", () => {
     ].join("\n");
 
     const result = parseModelsCliOutput(stdout);
+    NodeAssert.ok(result);
     const model = result.providers.get("opencode")!.models["gpt-5.4"]!;
     NodeAssert.ok(model);
     NodeAssert.ok(model.capabilities);
@@ -146,6 +146,7 @@ describe("parseModelsCliOutput", () => {
     ].join("\n");
 
     const result = parseModelsCliOutput(stdout);
+    NodeAssert.ok(result);
     NodeAssert.equal(result.providers.size, 1);
     NodeAssert.deepEqual([...result.connected], ["openrouter"]);
     const provider = result.providers.get("openrouter")!;
@@ -165,6 +166,7 @@ describe("parseAgentListCliOutput", () => {
     ].join("\n");
 
     const result = parseAgentListCliOutput(stdout);
+    NodeAssert.ok(result);
     NodeAssert.equal(result.length, 1);
     NodeAssert.equal(result[0]!.name, "build");
     NodeAssert.equal(result[0]!.mode, "primary");
@@ -182,6 +184,7 @@ describe("parseAgentListCliOutput", () => {
     ].join("\n");
 
     const result = parseAgentListCliOutput(stdout);
+    NodeAssert.ok(result);
     NodeAssert.equal(result.length, 3);
     NodeAssert.equal(result[0]!.name, "build");
     NodeAssert.equal(result[0]!.mode, "primary");
@@ -193,20 +196,17 @@ describe("parseAgentListCliOutput", () => {
 
   it("handles empty input", () => {
     const result = parseAgentListCliOutput("");
-    NodeAssert.equal(result.length, 0);
+    NodeAssert.deepEqual(result, []);
   });
 
-  it("skips agents with unparseable permission JSON", () => {
-    const stdout = [
+  it("rejects malformed or incomplete agent output", () => {
+    for (const stdout of [
+      "build (primary)\n  not valid json {\nexplore (subagent)\n[]",
       "build (primary)",
-      "  not valid json {",
-      "explore (subagent)",
-      "  " + JSON.stringify([{ permission: "read", action: "allow", pattern: "*" }]),
-    ].join("\n");
-
-    const result = parseAgentListCliOutput(stdout);
-    NodeAssert.equal(result.length, 1);
-    NodeAssert.equal(result[0]!.name, "explore");
+      "not an agent inventory",
+    ]) {
+      NodeAssert.equal(parseAgentListCliOutput(stdout), undefined);
+    }
   });
 
   it("handles real-world permission blocks with nested paths", () => {
@@ -222,6 +222,7 @@ describe("parseAgentListCliOutput", () => {
     const stdout = ["build (primary)", "  " + JSON.stringify(permissions)].join("\n");
 
     const result = parseAgentListCliOutput(stdout);
+    NodeAssert.ok(result);
     NodeAssert.equal(result.length, 1);
     NodeAssert.equal(result[0]!.permission.length, 3);
     NodeAssert.equal(result[0]!.permission[0]!.action, "allow");
@@ -237,6 +238,7 @@ describe("parseAgentListCliOutput", () => {
     ].join("\n");
 
     const result = parseAgentListCliOutput(stdout);
+    NodeAssert.ok(result);
     NodeAssert.equal(result.length, 2);
     NodeAssert.equal(result[0]!.name, "code reviewer");
     NodeAssert.equal(result[0]!.mode, "subagent");
@@ -253,6 +255,7 @@ describe("parseAgentListCliOutput", () => {
     ].join("\n");
 
     const result = parseAgentListCliOutput(stdout);
+    NodeAssert.ok(result);
     NodeAssert.equal(result[0]!.hidden, true);
     NodeAssert.equal(result[1]!.hidden, false);
   });

@@ -185,7 +185,7 @@ export interface OpenCodeCommandResult {
 
 export interface OpenCodeInventory {
   readonly providerList: ProviderListResponse;
-  readonly agents: ReadonlyArray<Agent>;
+  readonly agents: ReadonlyArray<Agent> | undefined;
   readonly skills: ReadonlyArray<OpenCodeSkill> | undefined;
 }
 
@@ -290,23 +290,26 @@ const AGENT_HEADER_RE = /^(.+)\s+\((\S+)\)\s*$/;
 const KNOWN_HIDDEN_AGENTS = new Set(["compaction", "summary", "title"]);
 
 /** @internal */
-export function parseModelsCliOutput(stdout: string): {
-  readonly providers: ReadonlyMap<
-    string,
-    { readonly id: string; readonly name: string; readonly models: { [key: string]: Model } }
-  >;
-  readonly connected: ReadonlyArray<string>;
-} {
+export function parseModelsCliOutput(stdout: string):
+  | {
+      readonly providers: ReadonlyMap<
+        string,
+        { readonly id: string; readonly name: string; readonly models: { [key: string]: Model } }
+      >;
+      readonly connected: ReadonlyArray<string>;
+    }
+  | undefined {
   const providers = new Map<
     string,
     { id: string; name: string; models: { [key: string]: Model } }
   >();
+  let complete = true;
   const lines = stdout.split("\n");
   let currentSlug: string | null = null;
   const jsonLines: Array<string> = [];
 
   const flushModel = () => {
-    if (currentSlug !== null && jsonLines.length > 0) {
+    if (currentSlug !== null) {
       const jsonStr = jsonLines.join("\n").trim();
       if (jsonStr.length > 0) {
         try {
@@ -323,8 +326,10 @@ export function parseModelsCliOutput(stdout: string): {
             provider.models[modelID] = model;
           }
         } catch {
-          // Skip unparseable model JSON
+          complete = false;
         }
+      } else {
+        complete = false;
       }
     }
     currentSlug = null;
@@ -344,16 +349,19 @@ export function parseModelsCliOutput(stdout: string): {
       currentSlug = slugMatch[1]!;
     } else if (currentSlug !== null) {
       jsonLines.push(line);
+    } else if (line.trim().length > 0) {
+      complete = false;
     }
   }
   flushModel();
 
-  return { providers, connected: [...providers.keys()] };
+  return complete ? { providers, connected: [...providers.keys()] } : undefined;
 }
 
 /** @internal */
-export function parseAgentListCliOutput(stdout: string): ReadonlyArray<Agent> {
+export function parseAgentListCliOutput(stdout: string): ReadonlyArray<Agent> | undefined {
   const agents: Array<Agent> = [];
+  let complete = true;
   const lines = stdout.split("\n");
   let currentHeader: { name: string; mode: string } | null = null;
   const blockLines: Array<string> = [];
@@ -372,8 +380,10 @@ export function parseAgentListCliOutput(stdout: string): ReadonlyArray<Agent> {
             options: {},
           });
         } catch {
-          // Skip unparseable agent
+          complete = false;
         }
+      } else {
+        complete = false;
       }
     }
     currentHeader = null;
@@ -387,11 +397,13 @@ export function parseAgentListCliOutput(stdout: string): ReadonlyArray<Agent> {
       currentHeader = { name: match[1]!, mode: match[2]! };
     } else if (currentHeader !== null) {
       blockLines.push(line);
+    } else if (line.trim().length > 0) {
+      complete = false;
     }
   }
   flushAgent();
 
-  return agents;
+  return complete ? agents : undefined;
 }
 
 /** @internal */
@@ -898,8 +910,8 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
 
   const loadAgents = (client: OpencodeClient) =>
     runOpenCodeSdk("app.agents", (signal) => client.app.agents(undefined, { signal })).pipe(
-      Effect.map((result) => result.data ?? []),
-      Effect.orElseSucceed((): ReadonlyArray<Agent> => []),
+      Effect.map((result) => result.data),
+      Effect.orElseSucceed(() => undefined),
     );
 
   const loadOpenCodeSkills: OpenCodeRuntimeShape["loadOpenCodeSkills"] = (client) =>
@@ -998,6 +1010,12 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
       }
 
       const parsed = parseModelsCliOutput(modelsResult.value.stdout);
+      if (parsed === undefined) {
+        return yield* new OpenCodeRuntimeError({
+          operation: "loadInventoryFromCli",
+          detail: "OpenCode did not return a complete model inventory.",
+        });
+      }
       const connected = [...parsed.connected];
       const allProviders: ProviderListResponse["all"] = [...parsed.providers.values()].map(
         (provider) => ({
@@ -1010,9 +1028,8 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
         }),
       );
 
-      // Agent and skill metadata enrich the provider snapshot but are not required
-      // for an authoritative model inventory, so either may degrade to an empty list.
-      let agents: ReadonlyArray<Agent> = [];
+      // Keep failed metadata distinct from a successful empty inventory.
+      let agents: ReadonlyArray<Agent> | undefined;
       if (agentsResult._tag === "Success" && agentsResult.value.code === 0) {
         agents = parseAgentListCliOutput(agentsResult.value.stdout);
       }
