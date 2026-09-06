@@ -528,6 +528,7 @@ describe("buildCursorProviderSnapshot", () => {
     ).toMatchObject({
       status: "error",
       message: `Cursor Agent is not authenticated. Run \`agent login\` and try again. ${cursorAcpDiscoveryFailedMessage}`,
+      inventory: { models: "unavailable", slashCommands: "unavailable", skills: "unavailable" },
       models: [
         {
           slug: "claude-sonnet-4-6",

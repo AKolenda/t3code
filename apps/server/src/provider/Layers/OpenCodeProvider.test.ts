@@ -300,14 +300,16 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
         ...snapshot,
         driver: ProviderDriverKind.make("opencode"),
         instanceId: ProviderInstanceId.make("opencode-work"),
+        models: [...snapshot.models, { ...model, slug: "retired-model" }],
       };
       runtimeMock.state.inventory = { ...inventory, agents: undefined };
       const partial = mergeProviderSnapshot(previous, {
         ...previous,
         ...(yield* checkProvider(makeOpenCodeSettings())),
       });
-      NodeAssert.equal(partial.inventory?.models, "stale");
-      NodeAssert.deepEqual(partial.models, previous.models);
+      NodeAssert.equal(partial.inventory?.models, "authoritative");
+      NodeAssert.equal(partial.inventory?.modelOptions, "stale");
+      NodeAssert.deepEqual(partial.models, snapshot.models);
 
       runtimeMock.state.inventory = { ...inventory, agents: [] };
       const complete = mergeProviderSnapshot(partial, {

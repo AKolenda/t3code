@@ -409,6 +409,7 @@ it.layer(NodeServices.layer)("checkGrokProviderStatus", (it) => {
 
       expect(snapshot.status).toBe("error");
       expect(snapshot.auth.status).toBe("unauthenticated");
+      expect(snapshot.inventory?.models).toBe("unavailable");
       expect(snapshot.message).toContain("grok login");
       expect(snapshot.models.map((model) => model.slug)).toEqual(["grok-4.6", "grok-mock-alt"]);
     }),

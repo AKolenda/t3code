@@ -74,6 +74,7 @@ export const hydrateCachedProvider = (input: {
       input.cachedProvider.models,
       input.fallbackProvider.models,
       input.fallbackProvider.inventory?.models ?? "stale",
+      input.fallbackProvider.inventory?.modelOptions,
     ),
     installed: input.cachedProvider.installed,
     version: input.cachedProvider.version,

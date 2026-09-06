@@ -173,6 +173,7 @@ export const mergeProviderSnapshot = (
       previousProvider.models,
       nextProvider.models,
       nextProvider.inventory?.models ?? "stale",
+      nextProvider.inventory?.modelOptions,
     ),
     ...mergeProviderWorkspaceInventories(previousProvider, nextProvider),
     ...(nextProvider.workspaceSnapshots !== undefined

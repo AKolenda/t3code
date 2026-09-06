@@ -538,7 +538,8 @@ export const checkOpenCodeProviderStatus = Effect.fn("checkOpenCodeProviderStatu
     probe: {
       inventory: {
         ...AUTHORITATIVE_PROVIDER_INVENTORY,
-        models: inventoryExit.value.inventory.agents === undefined ? "stale" : "authoritative",
+        modelOptions:
+          inventoryExit.value.inventory.agents === undefined ? "stale" : "authoritative",
         skills: inventoryExit.value.inventory.skills === undefined ? "stale" : "authoritative",
       },
       installed: true,

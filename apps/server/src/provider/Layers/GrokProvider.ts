@@ -504,7 +504,7 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
       models,
       skills: skills ?? [],
       probe: {
-        inventory: { ...inventory, slashCommands: "unavailable" },
+        inventory: { ...inventory, models: "unavailable", slashCommands: "unavailable" },
         installed: true,
         version,
         status: "error",

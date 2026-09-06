@@ -131,6 +131,8 @@ export type ProviderWorkspaceInventory = typeof ProviderWorkspaceInventory.Type;
 
 export const ProviderInventory = Schema.Struct({
   models: ProviderInventoryState,
+  // A model list can complete while its option metadata fails to load.
+  modelOptions: Schema.optionalKey(ProviderInventoryState),
   ...ProviderWorkspaceInventory.fields,
 });
 export type ProviderInventory = typeof ProviderInventory.Type;

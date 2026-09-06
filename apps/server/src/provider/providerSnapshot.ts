@@ -320,14 +320,15 @@ export function mergeProviderModels(
   previous: ReadonlyArray<ServerProviderModel>,
   next: ReadonlyArray<ServerProviderModel>,
   state: ProviderInventoryState,
+  optionState: ProviderInventoryState = state,
 ): ReadonlyArray<ServerProviderModel> {
-  if (state !== "stale") return next;
+  if (state !== "stale" && optionState !== "stale") return next;
 
   const previousBuiltIns = previous.filter((model) => !model.isCustom);
   const previousBySlug = new Map(previousBuiltIns.map((model) => [model.slug, model]));
   const models = next.map((model) => {
     const previousModel = previousBySlug.get(model.slug);
-    if (model.isCustom || !previousModel?.capabilities) return model;
+    if (optionState !== "stale" || model.isCustom || !previousModel?.capabilities) return model;
     if (!model.capabilities) return { ...model, capabilities: previousModel.capabilities };
     return {
       ...model,
@@ -341,7 +342,9 @@ export function mergeProviderModels(
       },
     };
   });
-  return retainMissingItems(previousBuiltIns, models, (model) => model.slug);
+  return state === "stale"
+    ? retainMissingItems(previousBuiltIns, models, (model) => model.slug)
+    : models;
 }
 
 export function mergeProviderWorkspaceInventories(

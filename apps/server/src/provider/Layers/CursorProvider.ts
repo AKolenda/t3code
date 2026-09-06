@@ -666,11 +666,14 @@ export function buildCursorProviderSnapshot(input: {
     ),
     compaction: CURSOR_COMPACTION,
     probe: {
-      inventory: {
-        ...AUTHORITATIVE_PROVIDER_INVENTORY,
-        models: input.discoveredModels === undefined ? "stale" : "authoritative",
-        skills: "stale",
-      },
+      inventory:
+        input.parsed.auth.status === "unauthenticated"
+          ? UNAVAILABLE_PROVIDER_INVENTORY
+          : {
+              ...AUTHORITATIVE_PROVIDER_INVENTORY,
+              models: input.discoveredModels === undefined ? "stale" : "authoritative",
+              skills: "stale",
+            },
       installed: true,
       version: input.parsed.version,
       status:
