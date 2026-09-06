@@ -460,14 +460,21 @@ export const makeXAiPromptCompletionRuntime = Effect.fn("makeXAiPromptCompletion
             sessionId,
             promptId,
           );
-          const requestPayload = {
-            ...payload,
-            _meta: {
-              ...payload._meta,
-              promptId: fallback.promptId,
-              requestId: fallback.promptId,
-            },
-          } satisfies Omit<EffectAcpSchema.PromptRequest, "sessionId">;
+          const requestPayload = (
+            Effect.isEffect(payload) ? payload : Effect.succeed(payload)
+          ).pipe(
+            Effect.map(
+              (prepared) =>
+                ({
+                  ...prepared,
+                  _meta: {
+                    ...prepared._meta,
+                    promptId: fallback.promptId,
+                    requestId: fallback.promptId,
+                  },
+                }) satisfies Omit<EffectAcpSchema.PromptRequest, "sessionId">,
+            ),
+          );
 
           return yield* Effect.raceFirst(
             runtime.prompt(requestPayload, promptOptions),

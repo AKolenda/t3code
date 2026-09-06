@@ -79,7 +79,7 @@ const makeFixture = Effect.fn("makeAntigravityTextGenerationFixture")(function* 
   const state = {
     workspaces: [] as Array<string>,
     closed: [] as Array<string>,
-    prompts: [] as Array<Parameters<TextRuntime["prompt"]>[0]>,
+    prompts: [] as Array<Omit<AcpSchema.PromptRequest, "sessionId">>,
     selectedModels: [] as Array<string>,
     selectedModes: [] as Array<string>,
     nativeFilesAtClose: [] as Array<boolean>,
@@ -172,7 +172,7 @@ const makeFixture = Effect.fn("makeAntigravityTextGenerationFixture")(function* 
           }),
         prompt: (request) =>
           Effect.gen(function* () {
-            state.prompts.push(request);
+            state.prompts.push(Effect.isEffect(request) ? yield* request : request);
             yield* Deferred.succeed(enteredPrompt, undefined);
             const emit: PromptContext["emit"] = (update, sessionId = nativeSessionId) =>
               sessionUpdate({ sessionId, update });

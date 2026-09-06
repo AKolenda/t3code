@@ -235,10 +235,13 @@ export class AcpSessionRuntime extends Context.Service<
      * Sends a prompt turn to the active session. `options.dispatched` settles once the
      * `session/prompt` RPC is registered as the active prompt, so a caller that forks this
      * effect knows when a later `cancel` will target this prompt.
+     * An Effect payload prepares configuration and content inside the prompt queue.
      * @see https://agentclientprotocol.com/protocol/schema#session/prompt
      */
-    readonly prompt: (
-      payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">,
+    readonly prompt: <E = never>(
+      payload:
+        | Omit<EffectAcpSchema.PromptRequest, "sessionId">
+        | Effect.Effect<Omit<EffectAcpSchema.PromptRequest, "sessionId">, E>,
       options?: {
         readonly dispatched?: Deferred.Deferred<void>;
         readonly beforeSubmit?: Effect.Effect<void, EffectAcpErrors.AcpError>;
@@ -246,7 +249,7 @@ export class AcpSessionRuntime extends Context.Service<
         readonly nativeStopped?: Effect.Effect<void>;
         readonly notSubmitted?: Effect.Effect<void>;
       },
-    ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
+    ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError | E>;
     /**
      * Sends a real ACP `session/cancel` notification for the active session.
      * @see https://agentclientprotocol.com/protocol/schema#session/cancel
@@ -1011,10 +1014,16 @@ export const make = (
             promptDispatchSemaphore.withPermit(
               Effect.gen(function* () {
                 const started = yield* getStartedState;
+                const prepared = yield* (
+                  Effect.isEffect(payload) ? payload : Effect.succeed(payload)
+                ).pipe(
+                  Effect.interruptible,
+                  Effect.onError(() => promptOptions?.notSubmitted ?? Effect.void),
+                );
                 yield* closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef });
                 const requestPayload = {
                   sessionId: started.sessionId,
-                  ...payload,
+                  ...prepared,
                 } satisfies EffectAcpSchema.PromptRequest;
                 const completed = yield* Deferred.make<void>();
                 const cancelled = yield* Deferred.make<void>();
@@ -1032,6 +1041,9 @@ export const make = (
                 ).pipe(Effect.onError(() => promptOptions?.notSubmitted ?? Effect.void));
                 const claim = { stopped: promptOptions?.nativeStopped ?? Effect.void };
                 nativeClaims.add(claim);
+                // Child exit can precede protocol EOF while admission is parked.
+                // Recheck after registration so an earlier watcher cannot miss this claim.
+                yield* confirmNativeStopped;
                 const fiber = yield* observeRequest(
                   "session/prompt",
                   requestPayload,

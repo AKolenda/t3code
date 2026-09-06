@@ -189,7 +189,7 @@ const makeHarness = Effect.fn("makeAntigravityAdapterHarness")(function* (option
         );
         const prompt: NativePrompt = {
           index: ++promptIndex,
-          content: payload.prompt,
+          content: (Effect.isEffect(payload) ? yield* payload : payload).prompt,
           result: yield* Deferred.make<AcpSchema.PromptResponse, AcpErrors.AcpError>(),
         };
         active = prompt;

@@ -34,6 +34,58 @@ const mockRuntimeOptions = {
 } satisfies AcpSessionRuntime.AcpSessionRuntimeOptions;
 
 describe("AcpSessionRuntime", () => {
+  it.effect("confirms exit when admission resumes after the native exit watcher drained", () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const admission = yield* Deferred.make<void>();
+      const stdoutEnd = yield* Deferred.make<void>();
+      const dispatched = yield* Deferred.make<void>();
+      const nativeStopped = yield* Deferred.make<void>();
+      const exitWatcher = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const runtime = yield* AcpSessionRuntime.make({
+        ...mockRuntimeOptions,
+        transformStdout: (stdout) =>
+          Stream.concat(stdout, Stream.fromEffect(Deferred.await(stdoutEnd)).pipe(Stream.drain)),
+      }).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, {
+          ...spawner,
+          spawn: (command) =>
+            spawner.spawn(command).pipe(
+              Effect.map((child) => ({
+                ...child,
+                exitCode: Effect.withFiber((fiber) =>
+                  Deferred.succeed(exitWatcher, fiber).pipe(Effect.andThen(child.exitCode)),
+                ),
+              })),
+            ),
+        }),
+      );
+      yield* Effect.addFinalizer(() => Deferred.succeed(stdoutEnd, undefined));
+      yield* runtime.start();
+      const prompt = yield* runtime
+        .prompt(
+          { prompt: [{ type: "text", text: "must retain exit proof" }] },
+          {
+            dispatched,
+            beforeSubmit: Deferred.succeed(entered, undefined).pipe(
+              Effect.andThen(Deferred.await(admission)),
+            ),
+            nativeStopped: Deferred.succeed(nativeStopped, undefined).pipe(Effect.asVoid),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* runtime.notify("_test/exit", {});
+      yield* Fiber.await(yield* Deferred.await(exitWatcher));
+      yield* Deferred.succeed(admission, undefined);
+      yield* Deferred.await(dispatched);
+      expect(yield* Deferred.isDone(nativeStopped)).toBe(true);
+      yield* Deferred.succeed(stdoutEnd, undefined);
+      expect(Exit.isFailure(yield* Fiber.await(prompt))).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   for (const cancelBehavior of ["interrupt", "wait-for-prompt"] as const) {
     it.effect(`cancels a parked admission before native ${cancelBehavior} cancellation`, () =>
       Effect.gen(function* () {
