@@ -199,6 +199,11 @@ export function createPullRequestState(
       return undefined;
     }
   };
+  // Query atoms can keep the same answer across refreshes and remounts. Each answer
+  // can update a PR once per observation kind, even when its timestamp is unchanged.
+  const observations = Atom.make(() => new WeakMap<PullRequestSummary, Set<string>>()).pipe(
+    Atom.keepAlive,
+  );
   const snapshots = Atom.family((key: string) =>
     Atom.writable(
       (): PullRequestSnapshot => {
@@ -246,6 +251,15 @@ export function createPullRequestState(
     if (!matchesPullRequest(target.input, value)) return;
     const atom = snapshot(target);
     const previous = registry.get(atom);
+    const seen = registry.get(observations);
+    const sourceKey = JSON.stringify([pullRequestKey(target), detail !== null]);
+    const accepted = seen.get(value);
+    if (previous.summary !== null && accepted?.has(sourceKey)) {
+      registerReference(target, value);
+      return;
+    }
+    if (accepted === undefined) seen.set(value, new Set([sourceKey]));
+    else accepted.add(sourceKey);
     const next = resolvePullRequestSnapshot(previous, value, detail);
     if (next !== previous) {
       registry.set(atom, next);
@@ -595,7 +609,7 @@ function createMergedEnvironmentQuery<Input, A>(
 
 const usePullRequestListsQuery = createMergedEnvironmentQuery(
   "web-pull-requests:list",
-  pullRequestEnvironment.list,
+  (target: EnvironmentQueryTarget<PullRequestListInput>) => pullRequestEnvironment.list(target),
 );
 
 const usePullRequestStatsQuery = createMergedEnvironmentQuery(
@@ -636,17 +650,22 @@ export function usePullRequestList(
   const query = usePullRequestListsQuery(targets);
   const data = useMemo(() => mergePullRequestLists(query.values), [query.values]);
   useLayoutEffect(() => {
-    if (data === null) return;
-    for (const entry of data.entries) {
-      pullRequestState.observeSummary(
-        {
-          environmentId: entry.environmentId,
-          input: { projectId: entry.projectId, repository: entry.repository, number: entry.number },
-        },
-        entry,
-      );
+    for (const [environmentId, result] of query.values) {
+      for (const entry of result.entries) {
+        pullRequestState.observeSummary(
+          {
+            environmentId,
+            input: {
+              projectId: entry.projectId,
+              repository: entry.repository,
+              number: entry.number,
+            },
+          },
+          entry,
+        );
+      }
     }
-  }, [data]);
+  }, [query.values]);
   return { data, error: query.error, isPending: query.isPending, refresh: query.refresh };
 }
 

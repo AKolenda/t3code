@@ -2,6 +2,7 @@ import {
   EnvironmentId,
   ProjectId,
   type PullRequestDetail,
+  type PullRequestListResult,
   type PullRequestSummary,
   type VcsStatusResult,
 } from "@t3tools/contracts";
@@ -30,6 +31,7 @@ import {
   resolveSharedThreadPullRequest,
   useObservedPullRequestEntries,
   usePullRequestDetail,
+  usePullRequestList,
   useRetainedPullRequestList,
   useSharedPullRequestSummary,
   useSharedThreadPullRequest,
@@ -164,6 +166,13 @@ describe("scoped pull request state", () => {
     expect(revised).not.toHaveBeenCalled();
   });
 
+  it("can hydrate detail from an object already observed as a summary", () => {
+    const current = detail();
+    state.observeSummary(target, current);
+    state.observeDetail(target, current);
+    expect(registry.get(state.snapshot(target)).detail).toBe(current);
+  });
+
   it("stores summary fields without copying detail permissions or content", () => {
     const current = detail();
     state.observeDetail(target, current);
@@ -243,15 +252,20 @@ describe("scoped pull request state", () => {
     expect(registry.get(state.snapshot(target)).detail?.viewerPermissions.actions).toEqual([]);
   });
 
-  it("retains a known draft value when an older server omits it and accepts a ready update", () => {
-    state.observeDetail(target, detail({ isDraft: true }));
+  it("retains optional summary fields from older servers and accepts explicit reopen values", () => {
+    const closedAt = "2026-09-02T00:00:00.000Z";
+    state.observeDetail(target, detail({ state: "closed", isDraft: true, closedAt }));
     state.observeSummary(target, {
-      ...detail({ updatedAt: "2026-09-03T00:00:00.000Z" }),
+      ...detail({ state: "closed", updatedAt: "2026-09-03T00:00:00.000Z" }),
       isDraft: undefined,
+      closedAt: undefined,
+      mergedAt: undefined,
     });
     expect(registry.get(state.snapshot(target)).summary?.isDraft).toBe(true);
+    expect(registry.get(state.snapshot(target)).summary?.closedAt).toBe(closedAt);
     state.observeSummary(target, detail({ isDraft: false, updatedAt: "2026-09-04T00:00:00.000Z" }));
     expect(registry.get(state.snapshot(target)).summary?.isDraft).toBe(false);
+    expect(registry.get(state.snapshot(target)).summary?.closedAt).toBeNull();
   });
 
   it("shares a merge with a detected PR but not another environment, project, or host", () => {
@@ -332,7 +346,9 @@ describe("pull request readers", () => {
   let detected: VcsStatusResult["pr"];
   let paints: Array<{ environmentId: EnvironmentId; title: string | null }>;
   let queries = Atom.family((_key: string) =>
-    Atom.make<AsyncResult.AsyncResult<PullRequestDetail>>(AsyncResult.initial()),
+    Atom.make<AsyncResult.AsyncResult<PullRequestDetail>>(AsyncResult.initial()).pipe(
+      Atom.keepAlive,
+    ),
   );
 
   function Probe({ selected }: { selected: EnvironmentId }) {
@@ -372,7 +388,9 @@ describe("pull request readers", () => {
     paints = [];
     linkedQuery = null;
     queries = Atom.family((_key: string) =>
-      Atom.make<AsyncResult.AsyncResult<PullRequestDetail>>(AsyncResult.initial()),
+      Atom.make<AsyncResult.AsyncResult<PullRequestDetail>>(AsyncResult.initial()).pipe(
+        Atom.keepAlive,
+      ),
     );
     vi.spyOn(pullRequestEnvironment, "detail").mockImplementation(({ environmentId }) =>
       queries(environmentId),
@@ -446,6 +464,11 @@ describe("pull request readers", () => {
     expect(latest.data?.isDraft).toBe(false);
     expect(linked?.isDraft).toBe(false);
     expect(appAtomRegistry.get(pullRequestState.snapshot(target)).summary?.isDraft).toBe(false);
+    await act(() => renderer?.unmount());
+    await act(() => {
+      renderer = create(render(environmentId));
+    });
+    expect(linked?.isDraft).toBe(false);
   });
 
   it("does not let held detail undo a same-timestamp summary update", async () => {
@@ -458,6 +481,11 @@ describe("pull request readers", () => {
     await act(() => pullRequestState.observeSummary(target, detail({ isDraft: false })));
     expect(latest.data?.isDraft).toBe(false);
     expect(linked?.isDraft).toBe(false);
+    await act(() => renderer?.unmount());
+    await act(() => {
+      renderer = create(render(environmentId));
+    });
+    expect(latest.data?.isDraft).toBe(false);
   });
 
   it("does not let a mounted old-host linked summary replace current detail", async () => {
@@ -528,6 +556,57 @@ describe("pull request readers", () => {
     expect(
       narrowPullRequestsToFilters(shown, { state: "open", projectId: undefined, host: undefined }),
     ).toEqual([rows[1]]);
+  });
+
+  it("does not replay a held list answer when another environment answers or refresh starts", async () => {
+    const lists = Atom.family((_key: string) =>
+      Atom.make<AsyncResult.AsyncResult<PullRequestListResult>>(AsyncResult.initial()),
+    );
+    vi.spyOn(pullRequestEnvironment, "list").mockImplementation(({ environmentId }) =>
+      lists(environmentId),
+    );
+    const first: PullRequestListResult = {
+      entries: [listEntry({ state: "closed", isDraft: true })],
+      viewers: {},
+      providers: [],
+      errors: [],
+      truncated: false,
+      nextCursors: {},
+    };
+    function ListProbe() {
+      usePullRequestList([
+        { environmentId, input: { state: "all" } },
+        { environmentId: otherEnvironmentId, input: { state: "all" } },
+      ]);
+      return <Probe selected={environmentId} />;
+    }
+    await act(() => {
+      appAtomRegistry.set(lists(environmentId), AsyncResult.success(first));
+      renderer = create(
+        <AppAtomRegistryProvider>
+          <ListProbe />
+        </AppAtomRegistryProvider>,
+      );
+    });
+    await act(() =>
+      appAtomRegistry.set(
+        queries(environmentId),
+        AsyncResult.success(detail({ state: "open", isDraft: false })),
+      ),
+    );
+    await act(() =>
+      appAtomRegistry.set(
+        lists(otherEnvironmentId),
+        AsyncResult.success({ ...first, entries: [] }),
+      ),
+    );
+    expect(latest.data?.state).toBe("open");
+    expect(latest.data?.isDraft).toBe(false);
+    await act(() =>
+      appAtomRegistry.set(lists(environmentId), AsyncResult.success(first, { waiting: true })),
+    );
+    expect(latest.data?.state).toBe("open");
+    expect(latest.data?.isDraft).toBe(false);
   });
 
   it("hydrates only the selected environment's list and does not persist search results", async () => {
