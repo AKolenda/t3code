@@ -50,7 +50,8 @@ export interface ProviderThreadSnapshot {
 }
 
 export interface ProviderTurnStartOptions {
-  /** Call after preparation, directly before native prompt submission. */
+  /** Call after preparation, directly before native prompt submission.
+      Reuse an active turn ID only if native submission cannot start a different turn. */
   readonly beforeSubmit: (turnId?: TurnId) => Effect.Effect<void>;
   /** Release only this send when the adapter proves native submission never occurred. */
   readonly notSubmitted: Effect.Effect<void>;
