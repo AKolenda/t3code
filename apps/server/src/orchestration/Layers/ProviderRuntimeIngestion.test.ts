@@ -823,6 +823,61 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBeNull();
   });
 
+  it.each(
+    (["turn", "compact"] as const).flatMap((kind) =>
+      [undefined, "older-request", "current-request"].map((errorRequestId) => ({
+        kind,
+        errorRequestId,
+      })),
+    ),
+  )(
+    "preserves pending $kind state unless a session error names it: $errorRequestId",
+    async ({ kind, errorRequestId }) => {
+      const harness = await createHarness();
+      const threadId = asThreadId("thread-1");
+      const requestId = asMessageId("current-request");
+      const createdAt = "2026-01-01T00:00:01.000Z";
+      await harness.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("session-error-pending-start"),
+        threadId,
+        message: {
+          messageId: requestId,
+          role: "user",
+          text: kind === "compact" ? "/compact" : "Start the current request.",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt,
+      });
+      const sessionBeforeError = (await harness.readModel()).threads[0]?.session;
+      await harness.emitAndDrain([
+        {
+          type: "session.state.changed",
+          eventId: asEventId("session-error-after-pending-start"),
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          ...(errorRequestId !== undefined ? { requestId: errorRequestId } : {}),
+          createdAt: "2026-01-01T00:00:02.000Z",
+          payload: { state: "error", reason: "Provider session error" },
+        },
+      ]);
+
+      const expectedPending = errorRequestId === requestId ? null : { kind, requestId };
+      const thread = (await harness.readModel()).threads[0];
+      const shell = await harness.readThreadShell();
+      expect(thread?.pendingOperation).toEqual(expectedPending);
+      expect(shell.pendingOperation).toEqual(expectedPending);
+      if (errorRequestId !== requestId) {
+        expect(thread?.session).toEqual(sessionBeforeError);
+        expect(shell.session).toEqual(sessionBeforeError);
+      } else {
+        expect(thread?.session?.status).toBe("error");
+      }
+    },
+  );
+
   it("clears active turn when provider session becomes ready", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

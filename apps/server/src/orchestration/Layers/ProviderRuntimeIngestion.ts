@@ -20,7 +20,6 @@ import {
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
-import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -1424,6 +1423,13 @@ const make = Effect.gen(function* () {
           : Option.none();
       const hasPendingTurnStart =
         Option.isSome(pendingTurnStart) && thread.session?.status === "starting";
+      const failedPendingRequestId =
+        event.type === "session.state.changed" &&
+        event.payload.state === "error" &&
+        Option.isSome(pendingTurnStart) &&
+        sameId(event.requestId, pendingTurnStart.value.messageId)
+          ? pendingTurnStart.value.messageId
+          : undefined;
 
       const conflictsWithActiveTurn =
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
@@ -1460,6 +1466,14 @@ const make = Effect.gen(function* () {
           return true;
         }
         switch (event.type) {
+          case "session.state.changed":
+            // The command reactor settles pending work from its own send result.
+            // An unrelated session error must not block that request's recovery.
+            return (
+              event.payload.state !== "error" ||
+              Option.isNone(pendingTurnStart) ||
+              failedPendingRequestId !== undefined
+            );
           case "session.exited":
             return true;
           case "session.started":
@@ -1542,11 +1556,12 @@ const make = Effect.gen(function* () {
             type: "thread.session.set",
             commandId: yield* providerCommandId(event, "thread-session-set"),
             threadId: thread.id,
+            ...(failedPendingRequestId !== undefined
+              ? { expectedPendingRequestId: failedPendingRequestId }
+              : {}),
             operationResult:
-              event.type === "session.state.changed" &&
-              event.payload.state === "error" &&
-              Option.isSome(pendingTurnStart)
-                ? { requestId: pendingTurnStart.value.messageId, outcome: "failed" }
+              failedPendingRequestId !== undefined
+                ? { requestId: failedPendingRequestId, outcome: "failed" }
                 : null,
             session: {
               threadId: thread.id,
