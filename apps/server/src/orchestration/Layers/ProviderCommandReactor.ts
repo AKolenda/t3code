@@ -1750,7 +1750,17 @@ const make = Effect.gen(function* () {
               turnId: null,
               requestId: request.payload.messageId,
               createdAt: event.occurredAt,
-            }),
+            }).pipe(
+              Effect.catchCause((cause) =>
+                Cause.hasInterruptsOnly(cause)
+                  ? Effect.failCause(cause)
+                  : Effect.logWarning("failed to record queued message cancellation", {
+                      threadId: event.payload.threadId,
+                      requestId: request.payload.messageId,
+                      cause: Cause.pretty(cause),
+                    }),
+              ),
+            ),
           { discard: true },
         );
       }

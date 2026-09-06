@@ -38,6 +38,7 @@ import { it as effectIt } from "@effect/vitest";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { deriveServerPaths, ServerConfig } from "../../config.ts";
+import * as TurnCheckpointCapture from "../../checkpointing/TurnCheckpointCapture.ts";
 import { TextGenerationError } from "@t3tools/contracts";
 import {
   ProviderAdapterRequestError,
@@ -173,6 +174,7 @@ describe("ProviderCommandReactor", () => {
     readonly requiresNewThreadForModelChange?: boolean;
     readonly unreadableHistory?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
+    readonly failCancellationActivity?: boolean;
     readonly titleRegenerationBeforeStart?: "one" | "two";
     readonly serverActivation?: Effect.Effect<void>;
     readonly beforeReadySessionDispatch?: () => Effect.Effect<void>;
@@ -423,6 +425,13 @@ describe("ProviderCommandReactor", () => {
           readThreadEvents: engine.readThreadEvents,
           getThreadReplayStats: engine.getThreadReplayStats,
           dispatch: (command) => {
+            if (
+              input?.failCancellationActivity &&
+              command.type === "thread.activity.append" &&
+              command.activity.summary === "Queued message cancelled"
+            ) {
+              return Effect.die(new Error("Injected cancellation activity failure"));
+            }
             if (command.type === "thread.title.regeneration.complete") {
               titleRegenerationCompletionDispatchAttempts += 1;
               if (
@@ -447,6 +456,7 @@ describe("ProviderCommandReactor", () => {
       }),
     ).pipe(Layer.provide(orchestrationLayer));
     const layer = ProviderCommandReactorLive.pipe(
+      Layer.provideMerge(TurnCheckpointCapture.layer),
       Layer.provideMerge(reactorOrchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
@@ -486,6 +496,9 @@ describe("ProviderCommandReactor", () => {
     const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
     const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
     const reactor = await runtime.runPromise(Effect.service(ProviderCommandReactor));
+    const checkpointCapture = await runtime.runPromise(
+      Effect.service(TurnCheckpointCapture.TurnCheckpointCapture),
+    );
     const runEffect = <A, E>(effect: Effect.Effect<A, E>) => runtime!.runPromise(effect);
 
     await Effect.runPromise(
@@ -579,6 +592,7 @@ describe("ProviderCommandReactor", () => {
     const drain = () => Effect.runPromise(reactor.drain);
 
     return {
+      checkpointCapture,
       engine,
       snapshotQuery,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
@@ -616,6 +630,70 @@ describe("ProviderCommandReactor", () => {
       },
     };
   }
+
+  effectIt.effect.each(["thread.turn.interrupt", "thread.session.stop"] as const)(
+    "still dispatches %s when a queued cancellation activity cannot be saved",
+    (type) =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() =>
+          createHarness({ failCancellationActivity: true }),
+        );
+        const threadId = ThreadId.make("thread-1");
+        const createdAt = "2026-01-01T00:00:00.000Z";
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("cancellation-failure-session"),
+          threadId,
+          session: {
+            threadId,
+            status: "running",
+            providerName: "codex",
+            runtimeMode: "approval-required",
+            activeTurnId: asTurnId("turn-1"),
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        });
+        const terminal = {
+          type: "turn.completed" as const,
+          eventId: EventId.make("cancellation-failure-terminal"),
+          provider: ProviderDriverKind.make("codex"),
+          threadId,
+          turnId: asTurnId("turn-1"),
+          createdAt,
+          payload: { state: "completed" as const },
+        };
+        yield* harness.checkpointCapture.observe(terminal);
+        yield* harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("cancellation-failure-queued-message"),
+          threadId,
+          message: {
+            messageId: MessageId.make("cancellation-failure-message"),
+            role: "user",
+            text: "Queued message",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt,
+        });
+        yield* Effect.promise(harness.drain);
+        yield* harness.engine.dispatch({
+          type,
+          commandId: CommandId.make("cancellation-failure-stop"),
+          threadId,
+          createdAt,
+        });
+        yield* Effect.promise(harness.drain);
+        expect(
+          type === "thread.turn.interrupt" ? harness.interruptTurn : harness.stopSession,
+        ).toHaveBeenCalledOnce();
+        expect(harness.sendTurn).not.toHaveBeenCalled();
+        yield* harness.checkpointCapture.complete(terminal, "captured");
+      }),
+  );
 
   effectIt.effect.each(["new", "ready", "stopped"] as const)(
     "handles sign-out for a %s thread before worktree repair, text helpers, or startup",

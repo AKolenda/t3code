@@ -65,6 +65,7 @@ import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
 import { makeProviderServiceLive } from "./ProviderService.ts";
+import * as TurnCheckpointCapture from "../../checkpointing/TurnCheckpointCapture.ts";
 import * as ProviderEventLoggers from "./ProviderEventLoggers.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -1157,62 +1158,90 @@ it.effect(
     }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.effect("ProviderServiceLive writes canonical events to the emitting thread segment", () =>
-  Effect.gen(function* () {
-    const codex = makeFakeCodexAdapter();
-    const canonicalEvents: ProviderRuntimeEvent[] = [];
-    const canonicalThreadIds: Array<string | null> = [];
-    const registry = makeAdapterRegistryMock({
-      [ProviderDriverKind.make("codex")]: codex.adapter,
-    });
-    const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
-      Layer.provide(SqlitePersistenceMemory),
-    );
-    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
-    const providerLayer = makeProviderServiceLive({
-      canonicalEventLogger: {
-        filePath: "memory://provider-canonical-events",
-        write: (event, threadId) => {
-          canonicalEvents.push(event as ProviderRuntimeEvent);
-          canonicalThreadIds.push(threadId ?? null);
-          return Effect.void;
-        },
-        close: () => Effect.void,
-      },
-    }).pipe(
-      Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
-      Layer.provide(directoryLayer),
-      Layer.provide(defaultServerSettingsLayer),
-      Layer.provide(serverConfigTestLayer),
-      Layer.provide(AnalyticsService.layerTest),
-      Layer.provide(
-        Layer.succeed(
-          ProviderEventLoggers.ProviderEventLoggers,
-          ProviderEventLoggers.NoOpProviderEventLoggers,
-        ),
-      ),
-    );
-
-    yield* Effect.gen(function* () {
-      yield* ProviderService.ProviderService;
-      yield* advanceTestClock(10);
-      codex.emit({
-        eventId: asEventId("evt-canonical-thread-segment"),
-        provider: ProviderDriverKind.make("codex"),
-        threadId: asThreadId("thread-canonical-thread-segment"),
-        createdAt: "2026-01-01T00:00:00.000Z",
-        type: "turn.completed",
-        payload: {
-          state: "completed",
+it.effect(
+  "ProviderServiceLive reserves terminal capture before writing the canonical event segment",
+  () =>
+    Effect.gen(function* () {
+      const codex = makeFakeCodexAdapter();
+      const subscribed = yield* Deferred.make<void>();
+      const events = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+      const loggerStarted = yield* Deferred.make<void>();
+      const finishLogging = yield* Deferred.make<void>();
+      const canonicalEvents: ProviderRuntimeEvent[] = [];
+      const canonicalThreadIds: Array<string | null> = [];
+      const registry = makeAdapterRegistryMock({
+        [ProviderDriverKind.make("codex")]: {
+          ...codex.adapter,
+          streamEvents: Stream.unwrap(
+            Effect.gen(function* () {
+              const subscription = yield* PubSub.subscribe(events);
+              yield* Deferred.succeed(subscribed, undefined);
+              return Stream.fromSubscription(subscription);
+            }),
+          ),
         },
       });
-      yield* advanceTestClock(20);
-    }).pipe(Effect.provide(providerLayer));
+      const runtimeRepositoryLayer = ProviderSessionRuntime.layer.pipe(
+        Layer.provide(SqlitePersistenceMemory),
+      );
+      const directoryLayer = ProviderSessionDirectoryLive.pipe(
+        Layer.provide(runtimeRepositoryLayer),
+      );
+      const providerLayer = makeProviderServiceLive({
+        canonicalEventLogger: {
+          filePath: "memory://provider-canonical-events",
+          write: (event, threadId) => {
+            canonicalEvents.push(event as ProviderRuntimeEvent);
+            canonicalThreadIds.push(threadId ?? null);
+            return Deferred.succeed(loggerStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(finishLogging)),
+            );
+          },
+          close: () => Effect.void,
+        },
+      }).pipe(
+        Layer.provideMerge(TurnCheckpointCapture.layer),
+        Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+        ),
+      );
 
-    assert.equal(canonicalEvents.length, 1);
-    assert.equal(canonicalEvents[0]?.threadId, "thread-canonical-thread-segment");
-    assert.deepEqual(canonicalThreadIds, ["thread-canonical-thread-segment"]);
-  }).pipe(Effect.provide(NodeServices.layer)),
+      yield* Effect.gen(function* () {
+        yield* ProviderService.ProviderService;
+        const captures = yield* TurnCheckpointCapture.TurnCheckpointCapture;
+        yield* Deferred.await(subscribed);
+        const terminal = {
+          eventId: asEventId("evt-canonical-thread-segment"),
+          provider: ProviderDriverKind.make("codex"),
+          threadId: asThreadId("thread-canonical-thread-segment"),
+          turnId: asTurnId("turn-canonical-thread-segment"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          type: "turn.completed" as const,
+          payload: { state: "completed" as const },
+        };
+        yield* PubSub.publish(events, terminal);
+        yield* Deferred.await(loggerStarted);
+        assert.notEqual(yield* captures.pendingCapture(terminal.threadId), undefined);
+        yield* Deferred.succeed(finishLogging, undefined);
+        yield* captures.complete(terminal, "captured");
+      }).pipe(
+        Effect.ensuring(Deferred.succeed(finishLogging, undefined)),
+        Effect.scoped,
+        Effect.provide(providerLayer),
+      );
+
+      assert.equal(canonicalEvents.length, 1);
+      assert.equal(canonicalEvents[0]?.threadId, "thread-canonical-thread-segment");
+      assert.deepEqual(canonicalThreadIds, ["thread-canonical-thread-segment"]);
+    }).pipe(Effect.provide(NodeServices.layer)),
 );
 
 it.effect("ProviderServiceLive keeps persisted resumable sessions on startup", () =>
