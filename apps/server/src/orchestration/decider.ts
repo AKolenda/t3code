@@ -3,6 +3,7 @@ import {
   EventId,
   MessageId,
   UserInputRequestedPayload,
+  isContextCompactionMessage,
   isImportedAgentSessionMessageId,
   type OrchestrationCommand,
   type OrchestrationEvent,
@@ -21,6 +22,7 @@ import type * as PlatformError from "effect/PlatformError";
 
 import {
   OrchestrationCommandInvariantError,
+  OrchestrationOperationSupersededError,
   OrchestrationThreadSettleBlockedError,
   type OrchestrationCommandRejection,
 } from "./Errors.ts";
@@ -72,9 +74,10 @@ function hasOpenBlockingRequest(thread: {
 
 /** Apply the shared shell-level rule to the detailed command read model. */
 function hasQueuedTurnStartForThread(
-  thread: Pick<OrchestrationThread, "messages" | "latestTurn" | "session">,
+  thread: Pick<OrchestrationThread, "pendingOperation" | "messages" | "latestTurn" | "session">,
   now: string,
 ): boolean {
+  if (thread.pendingOperation !== undefined) return thread.pendingOperation !== null;
   let latestUserMessageAt: string | null = null;
   let latestUserMessageAtMs = Number.NEGATIVE_INFINITY;
   for (const message of thread.messages) {
@@ -953,6 +956,8 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.message.messageId,
+          operation:
+            command.operation ?? (isContextCompactionMessage(command.message) ? "compact" : "turn"),
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),
@@ -1222,6 +1227,21 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      const result = command.operationResult;
+      if (result != null) {
+        const currentRequestId =
+          thread.pendingOperation?.requestId ??
+          (thread.session?.activeTurnId != null &&
+          thread.latestTurn?.turnId === thread.session.activeTurnId
+            ? thread.latestTurn.requestId
+            : undefined);
+        if (currentRequestId !== undefined && currentRequestId !== result.requestId) {
+          return yield* new OrchestrationOperationSupersededError({
+            requestId: result.requestId,
+            currentRequestId,
+          });
+        }
+      }
       const sessionSetEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -1234,6 +1254,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           session: command.session,
+          operationResult: command.operationResult ?? null,
         },
       };
       // Only a session coming alive is activity worth waking a settled thread
@@ -1501,6 +1522,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           activity: command.activity,
+          operationResult: command.operationResult ?? null,
         },
       };
       // An approval or user-input request is blocked-on-you work — it must

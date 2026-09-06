@@ -56,6 +56,7 @@ function threadDetailToShell(
     worktreePath: thread.worktreePath,
     linkedPullRequest: thread.linkedPullRequest ?? null,
     latestTurn: thread.latestTurn,
+    pendingOperation: thread.pendingOperation,
     createdAt: thread.createdAt,
     updatedAt: thread.updatedAt,
     archivedAt: thread.archivedAt,

@@ -1,6 +1,7 @@
 import {
   CommandId,
   DEFAULT_MODEL,
+  EventId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_SERVER_SETTINGS,
   type ModelSelection,
@@ -521,6 +522,47 @@ export const reconcileProviderSessions = Effect.gen(function* () {
       )
       .map((binding) => binding.threadId),
   );
+  // Pending operations are not resumed by the reactor's live event subscription.
+  // Close even requests that persisted before a provider session was started.
+  for (const thread of threads) {
+    const pending = thread.pendingOperation;
+    if (!pending || liveThreadIds.has(thread.id)) continue;
+    const completedAt = DateTime.formatIso(yield* DateTime.now);
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make(yield* crypto.randomUUIDv4),
+        threadId: thread.id,
+        operationResult: { requestId: pending.requestId, outcome: "interrupted" },
+        activity: {
+          id: EventId.make(yield* crypto.randomUUIDv4),
+          kind: "provider.turn.start.failed",
+          tone: "error",
+          summary:
+            pending.kind === "compact"
+              ? "Context compaction interrupted"
+              : "Provider turn start interrupted",
+          payload: {
+            requestId: pending.requestId,
+            detail: "The server restarted before this operation finished. Send the request again.",
+          },
+          turnId: null,
+          createdAt: completedAt,
+        },
+        createdAt: completedAt,
+      })
+      .pipe(
+        Effect.retry({ times: 1 }),
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("failed to settle orphaned pending operation", {
+                threadId: thread.id,
+                cause,
+              }),
+        ),
+      );
+  }
   const orphanedThreads = threads.filter(
     (thread) =>
       thread.session !== null &&
@@ -634,6 +676,7 @@ export const reconcileProviderSessions = Effect.gen(function* () {
 
     if (
       Option.isSome(binding) &&
+      thread.pendingOperation?.kind !== "compact" &&
       (continuationMarked || interruptedByRestart) &&
       (session.status === "running" || session.status === "starting" || preparedWhileReady) &&
       binding.value.resumeCursor != null &&

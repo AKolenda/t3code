@@ -1,4 +1,4 @@
-import { ThreadId } from "@t3tools/contracts";
+import { MessageId, ThreadId } from "@t3tools/contracts";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as Schema from "effect/Schema";
 
@@ -52,9 +52,22 @@ export class OrchestrationThreadSettleBlockedError extends Schema.TaggedErrorCla
   }
 }
 
+export class OrchestrationOperationSupersededError extends Schema.TaggedErrorClass<OrchestrationOperationSupersededError>()(
+  "OrchestrationOperationSupersededError",
+  {
+    requestId: MessageId,
+    currentRequestId: MessageId,
+  },
+) {
+  override get message(): string {
+    return "The operation result belongs to an older request.";
+  }
+}
+
 export const OrchestrationCommandRejection = Schema.Union([
   OrchestrationCommandInvariantError,
   OrchestrationThreadSettleBlockedError,
+  OrchestrationOperationSupersededError,
 ]);
 export type OrchestrationCommandRejection = typeof OrchestrationCommandRejection.Type;
 export const isOrchestrationCommandRejection = Schema.is(OrchestrationCommandRejection);

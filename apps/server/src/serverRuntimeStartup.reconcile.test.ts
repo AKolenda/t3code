@@ -1,6 +1,8 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   type OrchestrationCommand,
+  type OrchestrationPendingOperation,
+  MessageId,
   type OrchestrationSessionStatus,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -72,14 +74,19 @@ const makeProviderService = (liveThreadIds: ReadonlyArray<ThreadId> = []) =>
     streamEvents: Stream.empty,
   }) satisfies ProviderService.ProviderService["Service"];
 
-const queryWithThreads = (threads: ReadonlyArray<ReturnType<typeof makeThread>>) =>
+type ReconciliationThread = Omit<ReturnType<typeof makeThread>, "session"> & {
+  readonly session: ReturnType<typeof makeThread>["session"] | null;
+  readonly pendingOperation?: OrchestrationPendingOperation;
+};
+
+const queryWithThreads = (threads: ReadonlyArray<ReconciliationThread>) =>
   ({
     getUserInputActivity: () => Effect.die("unused"),
     getCommandReadModel: () => Effect.succeed({ threads } as never),
   }) as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
 
 const runReconciliation = (input: {
-  readonly threads: ReadonlyArray<ReturnType<typeof makeThread>>;
+  readonly threads: ReadonlyArray<ReconciliationThread>;
   readonly continueAfterRestart?: boolean;
   readonly liveThreadIds?: ReadonlyArray<ThreadId>;
   readonly providerService?: ProviderService.ProviderService["Service"];
@@ -986,3 +993,54 @@ it.effect("settles failed opt-in recovery without retrying the provider turn", (
     });
   }),
 );
+
+it.effect("interrupts orphaned pending operations even before a provider session starts", () => {
+  const pending = {
+    kind: "compact",
+    requestId: MessageId.make("unstarted-compact"),
+  } as const;
+  const ready = { ...makeThread("pending-ready", "ready"), pendingOperation: pending };
+  const unstarted = {
+    ...makeThread("pending-without-session", "ready"),
+    session: null,
+    pendingOperation: pending,
+  };
+  const live = { ...makeThread("pending-live", "starting"), pendingOperation: pending };
+  const commands: OrchestrationCommand[] = [];
+  return runReconciliation({
+    threads: [ready, unstarted, live],
+    liveThreadIds: [live.id],
+    directory: {
+      getBinding: () => Effect.die("Idle pending work has no provider binding to reconcile"),
+      upsert: () => Effect.die("unused"),
+      recordImportedTranscript: () => Effect.die("unused"),
+      getProvider: () => Effect.die("unused"),
+      listThreadIds: () => Effect.die("unused"),
+      listBindings: () => Effect.succeed([]),
+    },
+    dispatch: (command) =>
+      Effect.sync(() => {
+        commands.push(command);
+        return { sequence: commands.length };
+      }),
+  }).pipe(
+    Effect.tap(() =>
+      Effect.sync(() => {
+        assert.deepEqual(
+          commands.map((command) =>
+            command.type === "thread.activity.append"
+              ? {
+                  threadId: command.threadId,
+                  result: command.operationResult,
+                }
+              : null,
+          ),
+          [ready, unstarted].map((thread) => ({
+            threadId: thread.id,
+            result: { requestId: pending.requestId, outcome: "interrupted" as const },
+          })),
+        );
+      }),
+    ),
+  );
+});

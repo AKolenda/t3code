@@ -14,6 +14,7 @@ import {
   OrchestrationProposedPlanId,
   OrchestrationCheckpointFile,
   OrchestrationCheckpointStatus,
+  OrchestrationOperationKind,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -72,6 +73,7 @@ export type ProjectionTurnById = typeof ProjectionTurnById.Type;
 export const ProjectionPendingTurnStart = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
+  operation: Schema.optional(Schema.NullOr(OrchestrationOperationKind)),
   sourceProposedPlanThreadId: Schema.NullOr(ThreadId),
   sourceProposedPlanId: Schema.NullOr(OrchestrationProposedPlanId),
   requestedAt: IsoDateTime,

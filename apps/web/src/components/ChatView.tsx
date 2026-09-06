@@ -12,6 +12,8 @@ import {
   type ApprovalRequestId,
   type ChatFileAttachment,
   DEFAULT_MODEL,
+  getThreadPendingOperation,
+  isContextCompactionMessage,
   type EnvironmentId,
   type MessageId,
   type ModelSelection,
@@ -643,11 +645,6 @@ function formatOutgoingPrompt(params: {
 }
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
-
-function isCompactCommandMessage(message: ChatMessage): boolean {
-  const text = message.text.trim().toLowerCase();
-  return message.role === "user" && text === "/compact" && !message.attachments?.length;
-}
 
 type ChatViewProps =
   | {
@@ -2766,30 +2763,12 @@ export default function ChatView(props: ChatViewProps) {
     threadError,
   });
   const optimisticCompactionMessage = optimisticUserMessages.at(-1);
-  const pendingCompactionMessage =
-    isSendBusy &&
-    optimisticCompactionMessage !== undefined &&
-    isCompactCommandMessage(optimisticCompactionMessage)
-      ? optimisticCompactionMessage
-      : activeThread?.messages.findLast(isCompactCommandMessage);
-  const compactRequestIsActive =
-    pendingCompactionMessage !== undefined &&
-    (pendingCompactionMessage.createdAt >
-      (activeLatestTurn?.requestedAt ?? pendingCompactionMessage.createdAt) ||
-      (activeLatestTurn?.state === "running" &&
-        pendingCompactionMessage.createdAt === activeLatestTurn.requestedAt));
-  const compactionSettled =
-    pendingCompactionMessage !== undefined &&
-    (latestTurnStartFailureId(activeThread, pendingCompactionMessage.id) !== null ||
-      activeThread?.activities.some((activity) => {
-        if (activity.kind !== "context-compaction") return false;
-        const payload = activity.payload as { readonly requestId?: unknown } | null | undefined;
-        return payload?.requestId === pendingCompactionMessage.id;
-      }));
   const isCompacting =
-    (isSendBusy || phase === "connecting" || phase === "running") &&
-    compactRequestIsActive &&
-    !compactionSettled;
+    getThreadPendingOperation(activeThread)?.kind === "compact" ||
+    (isSendBusy &&
+      optimisticCompactionMessage !== undefined &&
+      isContextCompactionMessage(optimisticCompactionMessage) &&
+      !activeThread?.messages.some((message) => message.id === optimisticCompactionMessage.id));
   const isWorking =
     phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint || isCompacting;
   const activeWorkStartedAt = deriveActiveWorkStartedAt(
@@ -5732,7 +5711,7 @@ export default function ChatView(props: ChatViewProps) {
       : null;
   const activeThreadHasCompactableConversation =
     activeThread?.messages.some(
-      (message) => message.role === "user" && !isCompactCommandMessage(message),
+      (message) => message.role === "user" && !isContextCompactionMessage(message),
     ) ?? false;
   const compactThreadUnavailable =
     !activeThread ||

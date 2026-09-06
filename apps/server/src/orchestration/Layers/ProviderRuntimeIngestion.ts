@@ -16,7 +16,6 @@ import {
   type OrchestrationCheckpointSummary,
   type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
-  RuntimeRequestId,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Cause from "effect/Cause";
@@ -1488,16 +1487,13 @@ const make = Effect.gen(function* () {
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = thread.session?.activeTurnId ?? null;
       const isTerminalTurn = event.type === "turn.completed" || event.type === "turn.aborted";
-      const isCompactedThreadState =
-        event.type === "thread.state.changed" && event.payload.state === "compacted";
       const pendingTurnStart =
         event.type === "session.started" ||
         event.type === "session.state.changed" ||
         event.type === "session.exited" ||
         event.type === "thread.started" ||
         event.type === "turn.started" ||
-        isTerminalTurn ||
-        isCompactedThreadState
+        isTerminalTurn
           ? yield* projectionTurnRepository.getPendingTurnStartByThreadId({
               threadId: thread.id,
             })
@@ -2080,34 +2076,6 @@ const make = Effect.gen(function* () {
 
       let activityEvent = event;
       if (
-        isCompactedThreadState &&
-        event.requestId === undefined &&
-        Option.isSome(pendingTurnStart) &&
-        thread.session?.status === "starting" &&
-        activeTurnId === null &&
-        sameId(thread.session.providerName, event.provider) &&
-        sameId(thread.session.providerInstanceId, event.providerInstanceId) &&
-        DateTime.isGreaterThanOrEqualTo(
-          DateTime.makeUnsafe(event.createdAt),
-          DateTime.makeUnsafe(pendingTurnStart.value.requestedAt),
-        )
-      ) {
-        const pendingMessage = yield* getThreadMessageById(
-          thread.id,
-          pendingTurnStart.value.messageId,
-        );
-        if (
-          pendingMessage?.role === "user" &&
-          (pendingMessage.attachments?.length ?? 0) === 0 &&
-          pendingMessage.text.trim().toLowerCase() === "/compact"
-        ) {
-          activityEvent = {
-            ...event,
-            requestId: RuntimeRequestId.make(String(pendingTurnStart.value.messageId)),
-          };
-        }
-      }
-      if (
         activityEvent.type === "thread.state.changed" &&
         activityEvent.payload.state === "compacted" &&
         (activityEvent.payload.beforeTokens === undefined ||
@@ -2141,6 +2109,12 @@ const make = Effect.gen(function* () {
               commandId,
               threadId: thread.id,
               activity,
+              operationResult:
+                event.type === "thread.state.changed" &&
+                event.payload.state === "compacted" &&
+                event.requestId !== undefined
+                  ? { requestId: MessageId.make(String(event.requestId)), outcome: "completed" }
+                  : null,
               createdAt: activity.createdAt,
             }),
           ),

@@ -4,6 +4,9 @@ import {
 } from "@t3tools/shared/requestActivity";
 import * as Predicate from "effect/Predicate";
 import {
+  OrchestrationOperationKind,
+  OrchestrationPendingOperation,
+  isContextCompactionMessage,
   AgentSessionImportSource,
   ApprovalRequestId,
   EventId,
@@ -122,6 +125,22 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
+    pendingOperation: Schema.NullOr(
+      Schema.fromJsonString(
+        OrchestrationPendingOperation.mapFields(
+          Struct.assign({
+            kind: Schema.NullOr(OrchestrationOperationKind),
+            legacyMessage: Schema.NullOr(
+              Schema.Struct({
+                role: Schema.String,
+                text: Schema.String,
+                attachments: Schema.Array(Schema.Unknown),
+              }),
+            ),
+          }),
+        ),
+      ),
+    ),
   }),
 );
 const ProjectionThreadActivityDbRowSchema = ProjectionThreadActivity.mapFields(
@@ -147,6 +166,7 @@ const ProjectionCheckpointDbRowSchema = ProjectionCheckpoint.mapFields(
 const ProjectionLatestTurnDbRowSchema = Schema.Struct({
   threadId: ProjectionThread.fields.threadId,
   turnId: TurnId,
+  requestId: Schema.NullOr(MessageId),
   state: Schema.String,
   requestedAt: IsoDateTime,
   startedAt: Schema.NullOr(IsoDateTime),
@@ -327,6 +347,7 @@ function mapLatestTurn(
 ): OrchestrationLatestTurn {
   return {
     turnId: row.turnId,
+    ...(row.requestId !== null ? { requestId: row.requestId } : {}),
     state:
       row.state === "error"
         ? "error"
@@ -357,6 +378,21 @@ function mapTitleRegeneration(row: Schema.Schema.Type<typeof ProjectionThreadDbR
         startedAt: row.titleRegenerationStartedAt,
       }
     : null;
+}
+
+function mapPendingOperation(row: Schema.Schema.Type<typeof ProjectionThreadDbRowSchema>) {
+  const pending = row.pendingOperation;
+  if (pending === null) return null;
+  // An older server can write an untyped row after this migration has run.
+  // Resolve it here so lightweight snapshots do not need message history.
+  return {
+    kind:
+      pending.kind ??
+      (pending.legacyMessage !== null && isContextCompactionMessage(pending.legacyMessage)
+        ? "compact"
+        : "turn"),
+    requestId: pending.requestId,
+  };
 }
 
 function mapSessionRow(
@@ -491,6 +527,33 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
       `,
   });
 
+  const pendingOperationSql = sql`
+    (
+      SELECT json_object(
+        'kind', pending.operation_kind,
+        'requestId', pending.pending_message_id,
+        'legacyMessage', CASE
+          WHEN pending.operation_kind IS NULL AND messages.message_id IS NOT NULL THEN
+            json_object('role', messages.role, 'text', messages.text,
+              'attachments', json(COALESCE(messages.attachments_json, '[]')))
+          ELSE NULL
+        END
+      )
+      FROM projection_turns pending
+      LEFT JOIN projection_thread_messages messages
+        ON pending.operation_kind IS NULL
+        AND messages.thread_id = pending.thread_id
+        AND messages.message_id = pending.pending_message_id
+      WHERE pending.thread_id = projection_threads.thread_id
+        AND pending.turn_id IS NULL
+        AND pending.state = 'pending'
+        AND pending.pending_message_id IS NOT NULL
+        AND pending.checkpoint_turn_count IS NULL
+      ORDER BY pending.requested_at DESC
+      LIMIT 1
+    )
+  `;
+
   const listThreadRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: ProjectionThreadDbRowSchema,
@@ -507,6 +570,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
           latest_turn_id AS "latestTurnId",
+          ${pendingOperationSql} AS "pendingOperation",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
@@ -545,6 +609,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
           latest_turn_id AS "latestTurnId",
+          ${pendingOperationSql} AS "pendingOperation",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
@@ -585,6 +650,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
           latest_turn_id AS "latestTurnId",
+          ${pendingOperationSql} AS "pendingOperation",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
@@ -771,6 +837,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           turns.thread_id AS "threadId",
           turns.turn_id AS "turnId",
+          turns.pending_message_id AS "requestId",
           turns.state,
           turns.requested_at AS "requestedAt",
           turns.started_at AS "startedAt",
@@ -795,6 +862,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           turns.thread_id AS "threadId",
           turns.turn_id AS "turnId",
+          turns.pending_message_id AS "requestId",
           turns.state,
           turns.requested_at AS "requestedAt",
           turns.started_at AS "startedAt",
@@ -821,6 +889,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           turns.thread_id AS "threadId",
           turns.turn_id AS "turnId",
+          turns.pending_message_id AS "requestId",
           turns.state,
           turns.requested_at AS "requestedAt",
           turns.started_at AS "startedAt",
@@ -1074,6 +1143,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           worktree_path AS "worktreePath",
           linked_pull_request_json AS "linkedPullRequest",
           latest_turn_id AS "latestTurnId",
+          ${pendingOperationSql} AS "pendingOperation",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
           archived_at AS "archivedAt",
@@ -1415,6 +1485,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         SELECT
           turns.thread_id AS "threadId",
           turns.turn_id AS "turnId",
+          turns.pending_message_id AS "requestId",
           turns.state,
           turns.requested_at AS "requestedAt",
           turns.started_at AS "startedAt",
@@ -2016,29 +2087,7 @@ pending_approval_requests AS (
                 if (latestTurnByThread.has(row.threadId)) {
                   continue;
                 }
-                latestTurnByThread.set(row.threadId, {
-                  turnId: row.turnId,
-                  state:
-                    row.state === "error"
-                      ? "error"
-                      : row.state === "interrupted"
-                        ? "interrupted"
-                        : row.state === "completed"
-                          ? "completed"
-                          : "running",
-                  requestedAt: row.requestedAt,
-                  startedAt: row.startedAt,
-                  completedAt: row.completedAt,
-                  assistantMessageId: row.assistantMessageId,
-                  ...(row.sourceProposedPlanThreadId !== null && row.sourceProposedPlanId !== null
-                    ? {
-                        sourceProposedPlan: {
-                          threadId: row.sourceProposedPlanThreadId,
-                          planId: row.sourceProposedPlanId,
-                        },
-                      }
-                    : {}),
-                });
+                latestTurnByThread.set(row.threadId, mapLatestTurn(row));
               }
 
               for (const row of sessionRows) {
@@ -2102,6 +2151,7 @@ pending_approval_requests AS (
                 pinnedAt: row.pinnedAt,
                 pinOrderKey: row.pinOrderKey ?? null,
                 titleRegeneration: mapTitleRegeneration(row),
+                pendingOperation: mapPendingOperation(row),
                 deletedAt: row.deletedAt,
                 messages: messagesByThread.get(row.threadId) ?? [],
                 proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2315,6 +2365,7 @@ pending_approval_requests AS (
                   pinnedAt: row.pinnedAt,
                   pinOrderKey: row.pinOrderKey ?? null,
                   titleRegeneration: mapTitleRegeneration(row),
+                  pendingOperation: mapPendingOperation(row),
                   deletedAt: row.deletedAt,
                   messages: [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
@@ -2455,6 +2506,7 @@ pending_approval_requests AS (
                       pinnedAt: row.pinnedAt,
                       pinOrderKey: row.pinOrderKey ?? null,
                       titleRegeneration: mapTitleRegeneration(row),
+                      pendingOperation: mapPendingOperation(row),
                       session: sessionByThread.get(row.threadId) ?? null,
                       latestUserMessageAt: row.latestUserMessageAt,
                       hasPendingApprovals: row.pendingApprovalCount > 0,
@@ -2603,6 +2655,7 @@ pending_approval_requests AS (
                 pinnedAt: row.pinnedAt,
                 pinOrderKey: row.pinOrderKey ?? null,
                 titleRegeneration: mapTitleRegeneration(row),
+                pendingOperation: mapPendingOperation(row),
                 session: sessionByThread.get(row.threadId) ?? null,
                 latestUserMessageAt: row.latestUserMessageAt,
                 hasPendingApprovals: row.pendingApprovalCount > 0,
@@ -2924,6 +2977,7 @@ pending_approval_requests AS (
         pinnedAt: threadRow.value.pinnedAt,
         pinOrderKey: threadRow.value.pinOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
+        pendingOperation: mapPendingOperation(threadRow.value),
         session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
         latestUserMessageAt: threadRow.value.latestUserMessageAt,
         hasPendingApprovals: threadRow.value.pendingApprovalCount > 0,
@@ -3289,6 +3343,7 @@ pending_approval_requests AS (
         pinnedAt: threadRow.value.pinnedAt,
         pinOrderKey: threadRow.value.pinOrderKey ?? null,
         titleRegeneration: mapTitleRegeneration(threadRow.value),
+        pendingOperation: mapPendingOperation(threadRow.value),
         deletedAt: null,
         messages: messageRows.map((row) => {
           const message = {

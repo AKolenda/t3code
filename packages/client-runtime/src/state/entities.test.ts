@@ -1,5 +1,6 @@
 import {
   EnvironmentId,
+  MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -206,6 +207,7 @@ describe("environment entity projections", () => {
       ...THREAD_SHELL,
       environmentId: ENVIRONMENT_ID,
       title: "Cached thread",
+      pendingOperation: { kind: "compact", requestId: MessageId.make("cached-compact") },
       branch: "stale-branch",
       worktreePath: "/repo/stale-worktree",
       deletedAt: null,
@@ -218,6 +220,7 @@ describe("environment entity projections", () => {
       ...THREAD_SHELL,
       environmentId: ENVIRONMENT_ID,
       title: "Current thread",
+      pendingOperation: null,
       branch: "current-branch",
       worktreePath: "/repo/current-worktree",
     };
@@ -230,6 +233,10 @@ describe("environment entity projections", () => {
       worktreePath: "/repo/current-worktree",
     });
     expect(merged?.messages).toBe(messages);
+    expect(merged?.pendingOperation).toBeNull();
+    expect(
+      mergeEnvironmentThread(detail, { ...shell, pendingOperation: undefined })?.pendingOperation,
+    ).toEqual(detail.pendingOperation);
   });
 
   it("preserves untouched project and thread identities across unrelated shell updates", () => {

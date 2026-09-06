@@ -27,6 +27,7 @@ import { serializeAssistantCitation } from "@t3tools/shared/assistantCitations";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Option from "effect/Option";
@@ -265,7 +266,7 @@ describe("ProviderCommandReactor", () => {
         ),
       );
     });
-    const sendTurn = vi.fn((_: unknown) =>
+    const sendTurn = vi.fn<ProviderServiceShape["sendTurn"]>((_) =>
       Effect.succeed({
         threadId: ThreadId.make("thread-1"),
         turnId: asTurnId("turn-1"),
@@ -1034,6 +1035,17 @@ describe("ProviderCommandReactor", () => {
   effectIt.effect("rejects /compact without conversation context", () =>
     Effect.gen(function* () {
       const harness = yield* Effect.promise(() => createHarness());
+      const events = yield* harness.engine.subscribeDomainEvents;
+      const rejected = yield* events.pipe(
+        Stream.filter(
+          (event) =>
+            event.type === "thread.activity-appended" &&
+            event.payload.operationResult?.requestId === "user-message-empty-compact",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+        Effect.forkChild,
+      );
       yield* harness.engine.dispatch({
         type: "thread.turn.start",
         commandId: CommandId.make("cmd-empty-compact"),
@@ -1048,9 +1060,208 @@ describe("ProviderCommandReactor", () => {
         runtimeMode: "approval-required",
         createdAt: "2026-01-01T00:00:00.000Z",
       });
+      yield* Fiber.join(rejected);
       yield* Effect.promise(() => harness.drain());
       expect(harness.compactThread).not.toHaveBeenCalled();
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === "thread-1",
+      );
+      expect(thread?.pendingOperation).toBeNull();
     }),
+  );
+
+  const dispatchTestTurn = (
+    engine: OrchestrationEngineService["Service"],
+    id: string,
+    text: string,
+  ) =>
+    engine.dispatch({
+      type: "thread.turn.start",
+      commandId: CommandId.make(`cmd-${id}`),
+      threadId: ThreadId.make("thread-1"),
+      message: { messageId: MessageId.make(id), role: "user", text, attachments: [] },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+  const readyAfterTestTurn = (engine: OrchestrationEngineService["Service"], requestId: string) =>
+    engine.dispatch({
+      type: "thread.session.set",
+      commandId: CommandId.make(`ready-${requestId}`),
+      threadId: ThreadId.make("thread-1"),
+      operationResult: { requestId: MessageId.make(requestId), outcome: "completed" },
+      session: {
+        threadId: ThreadId.make("thread-1"),
+        status: "ready",
+        providerName: "codex",
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        runtimeMode: "approval-required",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+  effectIt.effect(
+    "retains the compaction result while a failed stop owns session restoration",
+    () =>
+      Effect.gen(function* () {
+        const initialSent = yield* Deferred.make<void>();
+        const compactStarted = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+        const finishCompact = yield* Deferred.make<void>();
+        const stopStarted = yield* Deferred.make<void>();
+        const failStop = yield* Deferred.make<void>();
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            compactThreadEffect: () =>
+              Effect.gen(function* () {
+                yield* Deferred.succeed(compactStarted, yield* Effect.fiber);
+                yield* Deferred.await(finishCompact);
+              }),
+            stopSessionEffect: () =>
+              Deferred.succeed(stopStarted, undefined).pipe(
+                Effect.andThen(Deferred.await(failStop)),
+                Effect.andThen(
+                  Effect.fail(
+                    new ProviderAdapterRequestError({
+                      provider: "codex",
+                      method: "session.stop",
+                      detail: "stop failed",
+                    }),
+                  ),
+                ),
+              ),
+          }),
+        );
+        harness.sendTurn.mockImplementation(() =>
+          Deferred.succeed(initialSent, undefined).pipe(
+            Effect.as({ threadId: ThreadId.make("thread-1"), turnId: TurnId.make("initial") }),
+          ),
+        );
+        yield* dispatchTestTurn(harness.engine, "before-stop-race", "hello");
+        yield* Deferred.await(initialSent);
+        yield* readyAfterTestTurn(harness.engine, "before-stop-race");
+        yield* dispatchTestTurn(harness.engine, "compact-stop-race", "/compact");
+        const compactFiber = yield* Deferred.await(compactStarted);
+        yield* harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("stop-race"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+        yield* Deferred.await(stopStarted);
+        yield* Deferred.succeed(finishCompact, undefined);
+        yield* Fiber.await(compactFiber);
+        yield* Deferred.succeed(failStop, undefined);
+        yield* Effect.promise(() => harness.drain());
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads[0];
+        expect(thread?.session?.status).toBe("ready");
+        expect(thread?.pendingOperation).toBeNull();
+      }),
+  );
+
+  effectIt.effect("does not let an older send failure stop an adopted newer request", () =>
+    Effect.gen(function* () {
+      const firstStarted = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+      const failFirst = yield* Deferred.make<void>();
+      const secondSent = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() => createHarness());
+      harness.sendTurn
+        .mockImplementationOnce(() =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(firstStarted, yield* Effect.fiber);
+            yield* Deferred.await(failFirst);
+            return yield* new ProviderAdapterRequestError({
+              provider: "codex",
+              method: "turn.start",
+              detail: "first send failed late",
+            });
+          }),
+        )
+        .mockImplementationOnce(() =>
+          Deferred.succeed(secondSent, undefined).pipe(
+            Effect.as({ threadId: ThreadId.make("thread-1"), turnId: TurnId.make("second-turn") }),
+          ),
+        );
+      yield* dispatchTestTurn(harness.engine, "first-send", "first");
+      const firstFiber = yield* Deferred.await(firstStarted);
+      yield* dispatchTestTurn(harness.engine, "second-send", "second");
+      yield* Deferred.await(secondSent);
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("second-send-started"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: TurnId.make("second-turn"),
+          lastError: null,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      yield* Deferred.succeed(failFirst, undefined);
+      yield* Fiber.await(firstFiber);
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads[0];
+      expect(thread?.latestTurn?.requestId).toBe("second-send");
+      expect(thread?.session).toMatchObject({ status: "running", activeTurnId: "second-turn" });
+    }),
+  );
+
+  effectIt.effect(
+    "rejects a compaction that did not get a pending record before the prior one finished",
+    () =>
+      Effect.gen(function* () {
+        const initialSent = yield* Deferred.make<void>();
+        const firstCompactStarted = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
+        const finishFirst = yield* Deferred.make<void>();
+        const secondPaused = yield* Deferred.make<void>();
+        const releaseSecond = yield* Deferred.make<void>();
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            compactThreadEffect: () =>
+              Effect.gen(function* () {
+                yield* Deferred.succeed(firstCompactStarted, yield* Effect.fiber);
+                yield* Deferred.await(finishFirst);
+              }),
+            tryHandlePromptCommandEffect: ({ text }) =>
+              text === "/COMPACT"
+                ? Deferred.succeed(secondPaused, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseSecond)),
+                    Effect.as(false),
+                  )
+                : Effect.succeed(false),
+          }),
+        );
+        harness.sendTurn.mockImplementation(() =>
+          Deferred.succeed(initialSent, undefined).pipe(
+            Effect.as({ threadId: ThreadId.make("thread-1"), turnId: TurnId.make("initial") }),
+          ),
+        );
+        yield* dispatchTestTurn(harness.engine, "before-admission-race", "hello");
+        yield* Deferred.await(initialSent);
+        yield* readyAfterTestTurn(harness.engine, "before-admission-race");
+        yield* dispatchTestTurn(harness.engine, "first-compact", "/compact");
+        const firstFiber = yield* Deferred.await(firstCompactStarted);
+        yield* dispatchTestTurn(harness.engine, "second-compact", "/COMPACT");
+        yield* Deferred.await(secondPaused);
+        yield* Deferred.succeed(finishFirst, undefined);
+        yield* Fiber.await(firstFiber);
+        yield* Deferred.succeed(releaseSecond, undefined);
+        yield* Effect.promise(() => harness.drain());
+        expect(harness.compactThread).toHaveBeenCalledTimes(1);
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads[0];
+        expect(thread?.pendingOperation).toBeNull();
+        expect(
+          thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed")
+            ?.payload,
+        ).toMatchObject({ requestId: "second-compact" });
+      }),
   );
 
   effectIt.effect("keeps turns blocked until compaction restores the session", () =>

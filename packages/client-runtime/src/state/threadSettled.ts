@@ -1,29 +1,19 @@
 // @effect-diagnostics globalDate:off -- UI snooze presets use local calendar boundaries and Intl labels.
 import type { OrchestrationThreadShell } from "@t3tools/contracts";
 
-/**
- * A queued turn start lives for at most this long: session adoption takes
- * seconds, so a user message still unadopted after the grace window is a
- * failed start (or stale data — shells from older servers can carry user
- * messages with no latestTurn at all), not pending work. Without this bound
- * such threads would be permanently unsettleable.
- */
+/** Bounds the timestamp fallback for snapshots from older servers. */
 export const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
 const DAY_MS = 24 * 60 * 60 * 1_000;
 
-/**
- * A user message no turn has picked up yet: the turn.start command was
- * dispatched (message-sent + turn-start-requested) but no session has
- * adopted it, so `session` is still null and the pending work is invisible
- * to the session-status checks. Detectable as a user message strictly newer
- * than every timestamp on the latest turn — on adoption the new turn's
- * requestedAt equals the message time, clearing the condition — and only
- * within the adoption grace window.
- */
+/** Reads typed pending state, with bounded timestamp matching for older snapshots. */
 export function hasQueuedTurnStart(
-  shell: Pick<OrchestrationThreadShell, "latestUserMessageAt" | "latestTurn" | "session">,
+  shell: Pick<
+    OrchestrationThreadShell,
+    "pendingOperation" | "latestUserMessageAt" | "latestTurn" | "session"
+  >,
   options: { readonly now: string },
 ): boolean {
+  if (shell.pendingOperation !== undefined) return shell.pendingOperation !== null;
   if (shell.latestUserMessageAt == null) return false;
   // A failed session start clears the queued state: the failure is already
   // visible (status edge / error).

@@ -1,5 +1,5 @@
 // @effect-diagnostics globalDate:off -- Tests exercise local calendar snooze boundaries.
-import { ThreadId } from "@t3tools/contracts";
+import { ThreadId, MessageId } from "@t3tools/contracts";
 import { TurnId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -214,6 +214,21 @@ describe("canSnooze", () => {
 });
 
 describe("hasQueuedTurnStart", () => {
+  it("uses typed pending results even when message timestamps have not changed", () => {
+    const shell = { latestUserMessageAt: NOW, latestTurn: null, session: null };
+    expect(hasQueuedTurnStart({ ...shell, pendingOperation: null }, { now: NOW })).toBe(false);
+    expect(
+      hasQueuedTurnStart(
+        {
+          ...shell,
+          latestUserMessageAt: null,
+          pendingOperation: { kind: "compact", requestId: MessageId.make("compact") },
+        },
+        { now: NOW },
+      ),
+    ).toBe(true);
+  });
+
   it("expires queued state after two minutes", () => {
     const thread = makeQueuedTurnShell({
       latestUserMessageAt: "2026-04-10T11:57:59.000Z",

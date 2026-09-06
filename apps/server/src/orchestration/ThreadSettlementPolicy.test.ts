@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
   ProviderInstanceId,
+  MessageId,
   ThreadId,
   ProjectId,
   TurnId,
@@ -48,6 +49,25 @@ const decide = (
   }) !== null;
 
 describe("resolveAutoSettlementAt", () => {
+  it("uses typed pending results instead of a compaction message timestamp", () => {
+    expect(
+      decide(
+        makeThread({
+          pendingOperation: { kind: "compact", requestId: MessageId.make("compact") },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      decide(
+        makeThread({
+          latestUserMessageAt: NOW,
+          pendingOperation: null,
+        }),
+        { state: "closed", updatedAt: NOW },
+      ),
+    ).toBe(true);
+  });
+
   it("returns the last activity time for persisted settlement", () => {
     expect(
       resolveAutoSettlementAt({

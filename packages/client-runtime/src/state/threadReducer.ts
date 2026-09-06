@@ -12,7 +12,11 @@ import type {
   OrchestrationThreadActivity,
   TurnId,
 } from "@t3tools/contracts";
-import { isImportedAgentSessionMessageId } from "@t3tools/contracts";
+import {
+  isImportedAgentSessionMessageId,
+  getThreadPendingOperation,
+  pendingOperationAfterEvent,
+} from "@t3tools/contracts";
 import { compareDateTimeStrings } from "@t3tools/shared/dateTime";
 
 export type ThreadDetailReducerResult =
@@ -98,6 +102,7 @@ export function applyThreadDetailEvent(
           branch: event.payload.branch,
           worktreePath: event.payload.worktreePath,
           latestTurn: null,
+          pendingOperation: null,
           createdAt: event.payload.createdAt,
           updatedAt: event.payload.updatedAt,
           archivedAt: null,
@@ -270,6 +275,13 @@ export function applyThreadDetailEvent(
         kind: "updated",
         thread: {
           ...thread,
+          pendingOperation: pendingOperationAfterEvent(
+            getThreadPendingOperation(thread),
+            event,
+            event.payload.operation === undefined
+              ? thread.messages.find((message) => message.id === event.payload.messageId)
+              : undefined,
+          ),
           ...(event.payload.modelSelection !== undefined
             ? { modelSelection: event.payload.modelSelection }
             : {}),
@@ -356,6 +368,9 @@ export function applyThreadDetailEvent(
           (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
           ? {
               turnId: event.payload.turnId,
+              ...(thread.latestTurn?.turnId === event.payload.turnId
+                ? { requestId: thread.latestTurn.requestId }
+                : {}),
               state: settlesTurn
                 ? thread.latestTurn?.state === "interrupted"
                   ? "interrupted"
@@ -414,6 +429,10 @@ export function applyThreadDetailEvent(
         event.payload.session.status === "running" && event.payload.session.activeTurnId !== null
           ? {
               turnId: event.payload.session.activeTurnId,
+              requestId:
+                thread.latestTurn?.turnId === event.payload.session.activeTurnId
+                  ? (thread.latestTurn.requestId ?? getThreadPendingOperation(thread)?.requestId)
+                  : getThreadPendingOperation(thread)?.requestId,
               state: "running",
               requestedAt:
                 thread.latestTurn?.turnId === event.payload.session.activeTurnId
@@ -448,6 +467,7 @@ export function applyThreadDetailEvent(
         thread: {
           ...thread,
           session: event.payload.session,
+          pendingOperation: pendingOperationAfterEvent(getThreadPendingOperation(thread), event),
           latestTurn,
           updatedAt: event.occurredAt,
         },
@@ -523,6 +543,9 @@ export function applyThreadDetailEvent(
         (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
           ? {
               turnId: event.payload.turnId,
+              ...(thread.latestTurn?.turnId === event.payload.turnId
+                ? { requestId: thread.latestTurn.requestId }
+                : {}),
               state:
                 thread.latestTurn?.state === "interrupted"
                   ? "interrupted"
@@ -572,6 +595,7 @@ export function applyThreadDetailEvent(
         kind: "updated",
         thread: {
           ...thread,
+          pendingOperation: null,
           checkpoints,
           messages,
           proposedPlans,
@@ -597,6 +621,7 @@ export function applyThreadDetailEvent(
     // ── Activities ──────────────────────────────────────────────────
     case "thread.activity-appended": {
       const activity = event.payload.activity;
+      const pendingOperation = pendingOperationAfterEvent(getThreadPendingOperation(thread), event);
       // A resolvable context-window update supersedes earlier resolvable ones
       // for the same turn: consumers only read the latest value (walking the
       // array backwards), and providers stream these updates continuously, so
@@ -627,6 +652,7 @@ export function applyThreadDetailEvent(
           thread: {
             ...thread,
             activities,
+            pendingOperation,
             updatedAt: event.occurredAt,
           },
         };
@@ -649,7 +675,7 @@ export function applyThreadDetailEvent(
 
       return {
         kind: "updated",
-        thread: { ...thread, activities, updatedAt: event.occurredAt },
+        thread: { ...thread, activities, pendingOperation, updatedAt: event.occurredAt },
       };
     }
 
@@ -715,6 +741,7 @@ function reuseLatestTurn(
     return next;
   }
   return previous.turnId === next.turnId &&
+    previous.requestId === next.requestId &&
     previous.state === next.state &&
     previous.requestedAt === next.requestedAt &&
     previous.startedAt === next.startedAt &&

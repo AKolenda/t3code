@@ -4,13 +4,14 @@ import {
   CheckpointRef,
   CommandId,
   EventId,
+  getThreadPendingOperation,
   MessageId,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
-import type { OrchestrationThread } from "@t3tools/contracts";
+import type { OrchestrationEvent, OrchestrationThread } from "@t3tools/contracts";
 
 import { applyThreadDetailEvent } from "./threadReducer.ts";
 
@@ -46,6 +47,87 @@ const baseThread: OrchestrationThread = {
 };
 
 describe("applyThreadDetailEvent", () => {
+  it("tracks compaction by request identity without message history or timestamps", () => {
+    let thread: OrchestrationThread = { ...baseThread, pendingOperation: null };
+    const fields = {
+      ...baseEventFields,
+      sequence: 1,
+      occurredAt: baseThread.createdAt,
+      aggregateKind: "thread" as const,
+      aggregateId: baseThread.id,
+    };
+    const apply = (event: OrchestrationEvent) => {
+      const result = applyThreadDetailEvent(thread, event);
+      if (result.kind !== "updated") throw new Error("Expected a thread update");
+      thread = result.thread;
+    };
+    const start = (requestId: string) =>
+      apply({
+        ...fields,
+        type: "thread.turn-start-requested",
+        payload: {
+          threadId: thread.id,
+          messageId: MessageId.make(requestId),
+          operation: "compact",
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: fields.occurredAt,
+        },
+      });
+    const result = (requestId: string | null) =>
+      apply({
+        ...fields,
+        type: "thread.activity-appended",
+        payload: {
+          threadId: thread.id,
+          operationResult:
+            requestId === null
+              ? null
+              : { requestId: MessageId.make(requestId), outcome: "completed" },
+          activity: {
+            id: EventId.make(`activity-${requestId ?? "automatic"}`),
+            kind: "context-compaction",
+            tone: "info",
+            summary: "Context compacted",
+            payload: { requestId: "first" },
+            turnId: null,
+            createdAt: fields.occurredAt,
+          },
+        },
+      });
+    start("first");
+    const first = { kind: "compact", requestId: "first" };
+    expect(getThreadPendingOperation(thread)).toEqual(first);
+    apply({
+      ...fields,
+      type: "thread.session-set",
+      payload: {
+        threadId: thread.id,
+        operationResult: null,
+        session: {
+          threadId: thread.id,
+          status: "running",
+          providerName: "claudeAgent",
+          runtimeMode: "full-access",
+          activeTurnId: TurnId.make("native-command-turn"),
+          lastError: null,
+          updatedAt: fields.occurredAt,
+        },
+      },
+    });
+    expect(thread.latestTurn?.requestId).toBe("first");
+    expect(getThreadPendingOperation({ ...thread, messages: [], activities: [] })).toEqual(first);
+    result(null);
+    expect(thread.pendingOperation).toEqual(first);
+    result("first");
+    expect(thread.pendingOperation).toBeNull();
+    start("second");
+    result("first");
+    expect(thread.pendingOperation).toEqual({ kind: "compact", requestId: "second" });
+    result("second");
+    expect(thread.pendingOperation).toBeNull();
+  });
+
   describe("project events", () => {
     it("returns unchanged for project.created", () => {
       const result = applyThreadDetailEvent(baseThread, {
