@@ -184,6 +184,9 @@ const makeHarness = Effect.fn("makeAntigravityAdapterHarness")(function* (option
       Effect.gen(function* () {
         yield* Deferred.succeed(dispatchStarted, undefined);
         if (options?.holdDispatch) yield* Deferred.await(dispatchRelease);
+        yield* (promptOptions?.beforeSubmit ?? Effect.void).pipe(
+          Effect.onError(() => promptOptions?.notSubmitted ?? Effect.void),
+        );
         const prompt: NativePrompt = {
           index: ++promptIndex,
           content: payload.prompt,
@@ -194,6 +197,7 @@ const makeHarness = Effect.fn("makeAntigravityAdapterHarness")(function* (option
         if (promptOptions?.dispatched) yield* Deferred.succeed(promptOptions.dispatched, undefined);
         yield* Queue.offer(prompts, prompt);
         return yield* Deferred.await(prompt.result).pipe(
+          Effect.tap(() => promptOptions?.nativeCompleted ?? Effect.void),
           Effect.ensuring(
             Effect.sync(() => {
               if (active === prompt) active = undefined;
@@ -343,9 +347,13 @@ it.layer(layer)("AntigravityAdapter", (it) => {
         const modelSelections: string[] = [];
         const observed: ProviderRuntimeEvent[] = [];
         const completed = yield* Deferred.make<void>();
+        const ownedStops: Array<Effect.Effect<void>> = [];
         const adapter = yield* makeAntigravityAdapter(decodeSettings({ enabled: true }), {
           instanceId,
-          withProcess: (_stop, task) => task,
+          withProcess: (stop, task) =>
+            Effect.sync(() => {
+              ownedStops.push(stop);
+            }).pipe(Effect.andThen(task)),
           makeRuntime: (input) =>
             makeAntigravityAcpRuntime({
               ...input,
@@ -396,7 +404,45 @@ it.layer(layer)("AntigravityAdapter", (it) => {
           resumeCursor: original.resumeCursor,
         });
         expect(resumed.model).toBe(nativeAlternative);
-        yield* adapter.sendTurn({ threadId, input: "Reply with one short line." });
+        const admissionEntered = yield* Deferred.make<void>();
+        const admissionRelease = yield* Deferred.make<void>();
+        const notSubmitted = yield* Deferred.make<void>();
+        const parked = yield* adapter
+          .sendTurn(
+            { threadId, input: "This prompt must not reach the provider." },
+            {
+              beforeSubmit: () =>
+                Deferred.succeed(admissionEntered, undefined).pipe(
+                  Effect.andThen(Deferred.await(admissionRelease)),
+                ),
+              nativeCompleted: () => Effect.die("A parked prompt cannot complete natively."),
+              nativeStopped: Effect.die("A parked prompt has no native work to stop."),
+              notSubmitted: Deferred.succeed(notSubmitted, undefined).pipe(Effect.asVoid),
+            },
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(admissionEntered);
+        yield* Fiber.interrupt(parked);
+        expect(yield* Deferred.isDone(notSubmitted)).toBe(true);
+        yield* adapter.interruptTurn(threadId);
+        yield* Deferred.succeed(admissionRelease, undefined);
+        const proofOrder: string[] = [];
+        const accepted = yield* adapter.sendTurn(
+          { threadId, input: "Reply with one short line." },
+          {
+            beforeSubmit: (turnId) =>
+              Effect.sync(() => {
+                proofOrder.push(`submit:${turnId}`);
+              }),
+            nativeCompleted: (turnId) =>
+              Effect.sync(() => {
+                proofOrder.push(`complete:${turnId}`);
+              }),
+            nativeStopped: Effect.void,
+            notSubmitted: Effect.die("The replacement prompt must be submitted."),
+          },
+        );
+        expect(proofOrder).toEqual([`submit:${accepted.turnId}`, `complete:${accepted.turnId}`]);
         yield* Deferred.await(completed);
         expect(commands).toEqual(["plan", "logout", "plan", "logout"]);
         expect(modelSelections.length).toBeGreaterThan(0);
@@ -414,6 +460,7 @@ it.layer(layer)("AntigravityAdapter", (it) => {
             .filter((request) => request.method === "authenticate")
             .map((request) => request.params),
         ).toEqual([{ methodId: "oauth-personal" }, { methodId: "oauth-personal" }]);
+        expect(requests.filter((request) => request.method === "session/prompt")).toHaveLength(1);
         expect(requests.some((request) => request.method === "session/resume")).toBe(true);
         expect(requests.some((request) => request.method === "session/load")).toBe(false);
         expect(
@@ -421,6 +468,44 @@ it.layer(layer)("AntigravityAdapter", (it) => {
             .filter((request) => request.method === "session/set_config_option")
             .map((request) => request.params),
         ).toContainEqual({ sessionId: "mock-session-1", configId: "mode", value: "auto_edit" });
+
+        for (const cleanup of ["stopAll", "auth-owned"] as const) {
+          yield* adapter.startSession({ threadId, cwd, runtimeMode: "auto-accept-edits" });
+          const entered = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const rejected = yield* Deferred.make<void>();
+          const pending = yield* adapter
+            .sendTurn(
+              { threadId, input: "Do not dispatch during cleanup." },
+              {
+                beforeSubmit: () =>
+                  Deferred.succeed(entered, undefined).pipe(
+                    Effect.andThen(Deferred.await(release)),
+                  ),
+                nativeCompleted: () => Effect.die("Cleanup must cancel this unsubmitted prompt."),
+                nativeStopped: Effect.die("A parked prompt has no native work to stop."),
+                notSubmitted: Deferred.succeed(rejected, undefined).pipe(Effect.asVoid),
+              },
+            )
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(entered);
+          if (cleanup === "stopAll") {
+            yield* adapter.stopAll();
+          } else {
+            const stop = ownedStops.at(-1);
+            if (!stop) return yield* Effect.die("Missing auth-owned process stop.");
+            yield* stop;
+          }
+          expect(Exit.isFailure(yield* Fiber.await(pending))).toBe(true);
+          expect(yield* Deferred.isDone(rejected)).toBe(true);
+          yield* Deferred.succeed(release, undefined);
+        }
+        const finalRequests = yield* decodeRequestLog(
+          (yield* fileSystem.readFileString(requestLog)).trim().split("\n"),
+        );
+        expect(finalRequests.filter((request) => request.method === "session/prompt")).toHaveLength(
+          1,
+        );
       }),
   );
 

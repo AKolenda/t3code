@@ -11,9 +11,11 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
+import * as PlatformError from "effect/PlatformError";
 import * as Scope from "effect/Scope";
 import * as TestClock from "effect/testing/TestClock";
 import * as Stream from "effect/Stream";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import { describe, expect } from "vite-plus/test";
 
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
@@ -32,6 +34,169 @@ const mockRuntimeOptions = {
 } satisfies AcpSessionRuntime.AcpSessionRuntimeOptions;
 
 describe("AcpSessionRuntime", () => {
+  for (const cancelBehavior of ["interrupt", "wait-for-prompt"] as const) {
+    it.effect(`cancels a parked admission before native ${cancelBehavior} cancellation`, () =>
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const notSubmitted = yield* Deferred.make<void>();
+        const order: string[] = [];
+        let wirePrompts = 0;
+        const runtime = yield* AcpSessionRuntime.make({
+          ...mockRuntimeOptions,
+          cancelBehavior,
+          requestLogger: (event) =>
+            Effect.sync(() => {
+              if (event.method === "session/prompt" && event.status === "started")
+                order.push("logged");
+            }),
+          protocolLogging: {
+            logOutgoing: true,
+            logger: (event) =>
+              Effect.sync(() => {
+                if (
+                  event.direction === "outgoing" &&
+                  event.stage === "raw" &&
+                  typeof event.payload === "string" &&
+                  event.payload.includes('"method":"session/prompt"')
+                )
+                  wirePrompts += 1;
+              }),
+          },
+        });
+        yield* runtime.start();
+        const prompt = yield* runtime
+          .prompt(
+            { prompt: [{ type: "text", text: "must not run" }] },
+            {
+              beforeSubmit: Effect.gen(function* () {
+                order.push("admission");
+                yield* Deferred.succeed(entered, undefined);
+                yield* Deferred.await(release);
+              }),
+              notSubmitted: Deferred.succeed(notSubmitted, undefined).pipe(Effect.asVoid),
+            },
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        expect(order).toEqual(["logged", "admission"]);
+        expect(wirePrompts).toBe(0);
+        yield* Fiber.interrupt(prompt);
+        expect(yield* Deferred.isDone(notSubmitted)).toBe(true);
+        yield* runtime.cancel;
+        yield* Deferred.succeed(release, undefined);
+        expect(
+          yield* runtime.prompt({ prompt: [{ type: "text", text: "replacement" }] }),
+        ).toMatchObject({ stopReason: "end_turn" });
+        expect(wirePrompts).toBe(1);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    );
+  }
+
+  it.effect("observes a true native reply after local cancellation and a replacement prompt", () =>
+    Effect.gen(function* () {
+      const toolStarted = yield* Deferred.make<void>();
+      const nativeCompleted = yield* Deferred.make<void>();
+      const runtime = yield* AcpSessionRuntime.make({
+        ...mockRuntimeOptions,
+        spawn: {
+          ...mockRuntimeOptions.spawn,
+          env: { T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1" },
+        },
+      });
+      yield* runtime.getEvents().pipe(
+        Stream.runForEach((event) => {
+          if (event._tag === "EventStreamBarrier")
+            return Deferred.succeed(event.acknowledge, undefined);
+          if (event._tag === "ToolCallUpdated" && event.toolCall.status === "inProgress")
+            return Deferred.succeed(toolStarted, undefined);
+          return Effect.void;
+        }),
+        Effect.forkChild,
+      );
+      yield* runtime.start();
+      const prompt = yield* runtime
+        .prompt(
+          { prompt: [{ type: "text", text: "first" }] },
+          {
+            nativeCompleted: Deferred.succeed(nativeCompleted, undefined).pipe(Effect.asVoid),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(toolStarted);
+      yield* runtime.cancel;
+      expect(yield* Fiber.join(prompt)).toEqual({ stopReason: "cancelled" });
+      expect(yield* Deferred.isDone(nativeCompleted)).toBe(false);
+      expect(
+        yield* runtime.prompt({ prompt: [{ type: "text", text: "replacement" }] }),
+      ).toMatchObject({ stopReason: "end_turn" });
+      expect(yield* Deferred.isDone(nativeCompleted)).toBe(false);
+      yield* runtime.request("_test/finish-cancel", {});
+      yield* Deferred.await(nativeCompleted);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("confirms final child cleanup when direct kill cannot prove native exit", () =>
+    Effect.gen(function* () {
+      const toolStarted = yield* Deferred.make<void>();
+      const nativeStopped = yield* Deferred.make<void>();
+      const runtimeScope = yield* Scope.make();
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const runtime = yield* AcpSessionRuntime.make({
+        ...mockRuntimeOptions,
+        spawn: {
+          ...mockRuntimeOptions.spawn,
+          env: { T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1" },
+        },
+      }).pipe(
+        Effect.provideService(Scope.Scope, runtimeScope),
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, {
+          ...spawner,
+          spawn: (command) =>
+            spawner.spawn(command).pipe(
+              Effect.map((child) => ({
+                ...child,
+                kill: () =>
+                  Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "Unknown",
+                      module: "ChildProcessSpawner",
+                      method: "kill",
+                      description:
+                        "Direct kill failed. The original scoped process cleanup still owns this child.",
+                    }),
+                  ),
+              })),
+            ),
+        }),
+      );
+      yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
+      yield* runtime.getEvents().pipe(
+        Stream.runForEach((event) => {
+          if (event._tag === "ToolCallUpdated" && event.toolCall.status === "inProgress")
+            return Deferred.succeed(toolStarted, undefined);
+          return Effect.void;
+        }),
+        Effect.forkChild,
+      );
+      yield* runtime.start();
+      const prompt = yield* runtime
+        .prompt(
+          { prompt: [{ type: "text", text: "first" }] },
+          {
+            nativeStopped: Deferred.succeed(nativeStopped, undefined).pipe(Effect.asVoid),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(toolStarted);
+      yield* runtime.cancel;
+      yield* Fiber.join(prompt);
+      expect(yield* Deferred.isDone(nativeStopped)).toBe(false);
+      yield* Scope.close(runtimeScope, Exit.void);
+      expect(yield* Deferred.isDone(nativeStopped)).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   for (const setupMethod of ["session/new", "session/resume"] as const) {
     it.effect(`buffers root metadata while ${setupMethod} startup is still pending`, () =>
       Effect.gen(function* () {

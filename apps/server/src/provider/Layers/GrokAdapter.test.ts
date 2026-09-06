@@ -212,6 +212,116 @@ it("requires a settlement to match the live Grok turn", () => {
 });
 
 it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
+  it.effect("records a fresh terminal after native completion follows local cancellation", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-late-native-proof");
+      const wrapperPath = yield* Effect.promise(() => makeMockGrokWrapper());
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const nativeReply = yield* Deferred.make<void>();
+      const releaseProof = yield* Deferred.make<void>();
+      yield* Effect.addFinalizer(() => Deferred.succeed(releaseProof, undefined));
+      const terminalBeforeProof = yield* Deferred.make<void>();
+      const terminalAfterProof = yield* Deferred.make<void>();
+      let proved = false;
+      const terminalEvents: Array<Extract<ProviderRuntimeEvent, { type: "turn.completed" }>> = [];
+      yield* adapter.streamEvents.pipe(
+        Stream.runForEach((event) => {
+          if (event.threadId !== threadId || event.type !== "turn.completed") return Effect.void;
+          terminalEvents.push(event);
+          return Deferred.succeed(proved ? terminalAfterProof : terminalBeforeProof, undefined);
+        }),
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+      const sending = yield* adapter
+        .sendTurn(
+          { threadId, input: "finish this prompt" },
+          {
+            beforeSubmit: () => Effect.void,
+            nativeCompleted: () =>
+              Deferred.succeed(nativeReply, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseProof)),
+                Effect.andThen(
+                  Effect.sync(() => {
+                    proved = true;
+                  }),
+                ),
+              ),
+            nativeStopped: Effect.void,
+            notSubmitted: Effect.die("This prompt has a real native reply."),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(nativeReply);
+      yield* adapter.interruptTurn(threadId);
+      yield* Fiber.join(sending);
+      yield* Deferred.await(terminalBeforeProof);
+      assert.isFalse(proved);
+      yield* Deferred.succeed(releaseProof, undefined);
+      yield* Deferred.await(terminalAfterProof);
+      assert.lengthOf(terminalEvents, 2);
+      assert.equal(terminalEvents[0]?.turnId, terminalEvents[1]?.turnId);
+      assert.deepEqual(terminalEvents[0]?.payload, terminalEvents[1]?.payload);
+      assert.notEqual(terminalEvents[0]?.eventId, terminalEvents[1]?.eventId);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("cancels a parked native admission and admits a later turn", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-parked-native-admission");
+      const directory = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "grok-admission-")),
+      );
+      const requestLog = NodePath.join(directory, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLog }),
+      );
+      const adapter = yield* makeTestAdapter(wrapperPath);
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const rejected = yield* Deferred.make<void>();
+      yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+      const parked = yield* adapter
+        .sendTurn(
+          { threadId, input: "must not run" },
+          {
+            beforeSubmit: () =>
+              Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+            nativeCompleted: () => Effect.die("A parked prompt cannot complete natively."),
+            notSubmitted: Deferred.succeed(rejected, undefined).pipe(Effect.asVoid),
+            nativeStopped: Effect.die("A parked prompt has no native work to stop."),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(parked);
+      assert.isTrue(yield* Deferred.isDone(rejected));
+      yield* adapter.interruptTurn(threadId);
+      yield* Deferred.succeed(release, undefined);
+      const proofs: string[] = [];
+      const accepted = yield* adapter.sendTurn(
+        { threadId, input: "can run" },
+        {
+          beforeSubmit: (turnId) =>
+            Effect.sync(() => {
+              proofs.push(`submit:${turnId}`);
+            }),
+          nativeCompleted: (turnId) =>
+            Effect.sync(() => {
+              proofs.push(`complete:${turnId}`);
+            }),
+          nativeStopped: Effect.void,
+          notSubmitted: Effect.die("The replacement prompt must be submitted."),
+        },
+      );
+      assert.deepEqual(proofs, [`submit:${accepted.turnId}`, `complete:${accepted.turnId}`]);
+      yield* adapter.stopSession(threadId);
+      const requests = yield* Effect.promise(() => readJsonLines(requestLog));
+      assert.equal(requests.filter((request) => request.method === "session/prompt").length, 1);
+    }),
+  );
+
   it.effect("sends runtime context with the current model without changing saved prompts", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("grok-runtime-context");

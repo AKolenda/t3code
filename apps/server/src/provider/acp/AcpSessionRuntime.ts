@@ -239,7 +239,13 @@ export class AcpSessionRuntime extends Context.Service<
      */
     readonly prompt: (
       payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">,
-      options?: { readonly dispatched?: Deferred.Deferred<void> },
+      options?: {
+        readonly dispatched?: Deferred.Deferred<void>;
+        readonly beforeSubmit?: Effect.Effect<void, EffectAcpErrors.AcpError>;
+        readonly nativeCompleted?: Effect.Effect<void>;
+        readonly nativeStopped?: Effect.Effect<void>;
+        readonly notSubmitted?: Effect.Effect<void>;
+      },
     ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
     /**
      * Sends a real ACP `session/cancel` notification for the active session.
@@ -317,6 +323,7 @@ interface EnsureActiveAssistantSegmentResult {
 interface AcpActivePrompt {
   readonly fiber: Fiber.Fiber<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
   readonly completed: Deferred.Deferred<void>;
+  readonly cancelled: Deferred.Deferred<void>;
 }
 
 export const make = (
@@ -358,6 +365,7 @@ export const make = (
     const promptSerializationSemaphore = yield* Semaphore.make(1);
     const promptDispatchSemaphore = yield* Semaphore.make(1);
     const activePromptRef = yield* Ref.make<Option.Option<AcpActivePrompt>>(Option.none());
+    const nativeClaims = new Set<{ readonly stopped: Effect.Effect<void> }>();
     const sessionLoadGateRef = yield* Ref.make<Option.Option<SessionLoadGate>>(Option.none());
 
     const ensureConnected = Effect.gen(function* () {
@@ -394,41 +402,44 @@ export const make = (
     const logRequest = (event: AcpSessionRequestLogEvent) =>
       options.requestLogger ? options.requestLogger(event) : Effect.void;
 
-    const runLoggedRequest = <A>(
+    const observeRequest = <A>(
       method: string,
       payload: unknown,
       effect: Effect.Effect<A, EffectAcpErrors.AcpError>,
     ): Effect.Effect<A, EffectAcpErrors.AcpError> =>
-      logRequest({ method, payload, status: "started" }).pipe(
-        Effect.flatMap(() =>
-          (options.onStderr
-            ? Effect.raceFirst(effect, Deferred.await(stderrFailure))
-            : effect
-          ).pipe(
-            Effect.tap((result) =>
-              logRequest({
-                method,
-                payload,
-                status: "succeeded",
-                result,
-              }),
-            ),
-            Effect.onError((cause) =>
-              logRequest({
-                method,
-                payload,
-                status: "failed",
-                cause,
-              }),
-            ),
-          ),
+      (options.onStderr ? Effect.raceFirst(effect, Deferred.await(stderrFailure)) : effect).pipe(
+        Effect.tap((result) =>
+          logRequest({
+            method,
+            payload,
+            status: "succeeded",
+            result,
+          }),
         ),
+        Effect.onError((cause) =>
+          logRequest({
+            method,
+            payload,
+            status: "failed",
+            cause,
+          }),
+        ),
+      );
+
+    const runLoggedRequest = <A>(
+      method: string,
+      payload: unknown,
+      effect: Effect.Effect<A, EffectAcpErrors.AcpError>,
+    ) =>
+      logRequest({ method, payload, status: "started" }).pipe(
+        Effect.andThen(observeRequest(method, payload, effect)),
       );
 
     const spawnCommand = yield* resolveSpawnCommand(options.spawn.command, options.spawn.args, {
       ...(options.spawn.env ? { env: options.spawn.env } : {}),
       extendEnv: options.spawn.extendEnv ?? true,
     });
+    const processScope = yield* Scope.fork(runtimeScope, "sequential");
     const child = yield* spawner
       .spawn(
         ChildProcess.make(spawnCommand.command, spawnCommand.args, {
@@ -436,10 +447,11 @@ export const make = (
           ...(options.spawn.env ? { env: options.spawn.env } : {}),
           extendEnv: options.spawn.extendEnv ?? true,
           shell: spawnCommand.shell,
+          forceKillAfter: "1 second",
         }),
       )
       .pipe(
-        Effect.provideService(Scope.Scope, runtimeScope),
+        Effect.provideService(Scope.Scope, processScope),
         Effect.mapError(
           (cause) =>
             new EffectAcpErrors.AcpSpawnError({
@@ -448,6 +460,22 @@ export const make = (
             }),
         ),
       );
+
+    const confirmNativeStopped = Effect.gen(function* () {
+      if (yield* child.isRunning.pipe(Effect.orElseSucceed(() => true))) return;
+      const claims = Array.from(nativeClaims);
+      nativeClaims.clear();
+      yield* Effect.forEach(claims, (claim) => claim.stopped, { discard: true });
+    }).pipe(Effect.uninterruptible);
+    yield* child.exitCode.pipe(
+      Effect.exit,
+      Effect.andThen(confirmNativeStopped),
+      Effect.forkIn(runtimeScope),
+    );
+    yield* Scope.addFinalizer(
+      runtimeScope,
+      Scope.close(processScope, Exit.void).pipe(Effect.ensuring(confirmNativeStopped)),
+    );
 
     yield* child.stderr.pipe(
       Stream.decodeText(),
@@ -920,11 +948,11 @@ export const make = (
       const started = yield* getStartedState;
       const activePrompt = yield* Ref.get(activePromptRef);
       if (options.cancelBehavior !== "wait-for-prompt") {
-        if (Option.isSome(activePrompt)) {
-          yield* Fiber.interrupt(activePrompt.value.fiber).pipe(Effect.ignore);
-        }
         // Write cancel before a replacement prompt can reach the agent.
         yield* acp.agent.cancel({ sessionId: started.sessionId }).pipe(Effect.ignore);
+        if (Option.isSome(activePrompt)) {
+          yield* Deferred.succeed(activePrompt.value.cancelled, undefined);
+        }
         return;
       }
 
@@ -989,12 +1017,36 @@ export const make = (
                   ...payload,
                 } satisfies EffectAcpSchema.PromptRequest;
                 const completed = yield* Deferred.make<void>();
-                const fiber = yield* runLoggedRequest(
+                const cancelled = yield* Deferred.make<void>();
+                // Admission can wait for a checkpoint while this permit is held.
+                // Stop must be able to cancel and join that wait before native cancel.
+                yield* Effect.interruptible(
+                  logRequest({
+                    method: "session/prompt",
+                    payload: requestPayload,
+                    status: "started",
+                  }).pipe(
+                    Effect.andThen(promptOptions?.beforeSubmit ?? Effect.void),
+                    Effect.andThen(ensureConnected),
+                  ),
+                ).pipe(Effect.onError(() => promptOptions?.notSubmitted ?? Effect.void));
+                const claim = { stopped: promptOptions?.nativeStopped ?? Effect.void };
+                nativeClaims.add(claim);
+                const fiber = yield* observeRequest(
                   "session/prompt",
                   requestPayload,
-                  acp.agent.prompt(requestPayload),
-                ).pipe(Effect.forkIn(runtimeScope));
-                const active = { fiber, completed } satisfies AcpActivePrompt;
+                  acp.agent
+                    .prompt(requestPayload)
+                    .pipe(
+                      Effect.tap(() =>
+                        (promptOptions?.nativeCompleted ?? Effect.void).pipe(
+                          Effect.andThen(Effect.sync(() => nativeClaims.delete(claim))),
+                          Effect.uninterruptible,
+                        ),
+                      ),
+                    ),
+                ).pipe(Effect.interruptible, Effect.forkIn(runtimeScope));
+                const active = { fiber, completed, cancelled } satisfies AcpActivePrompt;
                 yield* Ref.set(activePromptRef, Option.some(active));
                 if (promptOptions?.dispatched) {
                   yield* Deferred.succeed(promptOptions.dispatched, undefined);
@@ -1003,14 +1055,17 @@ export const make = (
               }),
             ),
             (activePrompt) =>
-              Fiber.join(activePrompt.fiber).pipe(
-                Effect.catchCause((cause) =>
-                  options.cancelBehavior !== "wait-for-prompt" && Cause.hasInterruptsOnly(cause)
-                    ? Effect.succeed({
+              (options.cancelBehavior === "wait-for-prompt"
+                ? Fiber.join(activePrompt.fiber)
+                : Effect.raceFirst(
+                    Fiber.join(activePrompt.fiber),
+                    Deferred.await(activePrompt.cancelled).pipe(
+                      Effect.as({
                         stopReason: "cancelled",
-                      } satisfies EffectAcpSchema.PromptResponse)
-                    : Effect.failCause(cause),
-                ),
+                      } satisfies EffectAcpSchema.PromptResponse),
+                    ),
+                  )
+              ).pipe(
                 Effect.tap(() =>
                   closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef }),
                 ),
@@ -1030,7 +1085,11 @@ export const make = (
                     }),
                   );
                 }
-                yield* Fiber.interrupt(activePrompt.fiber).pipe(Effect.ignore);
+                // A local cancellation does not end native work. Keep observing the
+                // RPC response until the agent replies or the runtime scope closes.
+                if (options.cancelBehavior === "wait-for-prompt") {
+                  yield* Fiber.interrupt(activePrompt.fiber).pipe(Effect.ignore);
+                }
                 yield* Ref.set(activePromptRef, Option.none());
                 yield* Deferred.succeed(activePrompt.completed, undefined);
               }),

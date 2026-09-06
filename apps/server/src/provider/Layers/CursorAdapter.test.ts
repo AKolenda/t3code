@@ -162,6 +162,267 @@ const cursorAdapterTestLayer = it.layer(
 );
 
 cursorAdapterTestLayer("CursorAdapterLive", (it) => {
+  for (const failPreparation of [false, true]) {
+    it.effect(
+      `shares a turn with a steer during initial preparation${failPreparation ? " failure" : ""}`,
+      () =>
+        Effect.gen(function* () {
+          const threadId = ThreadId.make("cursor-steer-during-configuration");
+          const configurationStarted = yield* Deferred.make<void>();
+          const releaseConfiguration = yield* Deferred.make<void>();
+          let holdConfiguration = false;
+          let held = false;
+          const isConfigurationStart = Schema.is(
+            Schema.Struct({
+              event: Schema.Struct({
+                kind: Schema.Literal("request"),
+                payload: Schema.Struct({
+                  method: Schema.Literal("session/set_config_option"),
+                  status: Schema.Literal("started"),
+                }),
+              }),
+            }),
+          );
+          const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
+          const adapter = yield* makeCursorAdapter(
+            decodeCursorSettings({ binaryPath: wrapperPath }),
+            {
+              nativeEventLogger: {
+                filePath: "memory://cursor-admission-configuration",
+                write: (record) =>
+                  Effect.gen(function* () {
+                    if (holdConfiguration && !held && isConfigurationStart(record)) {
+                      held = true;
+                      yield* Deferred.succeed(configurationStarted, undefined);
+                      yield* Deferred.await(releaseConfiguration);
+                    }
+                  }),
+                close: () => Effect.void,
+              },
+            },
+          );
+          yield* Effect.addFinalizer(() => Deferred.succeed(releaseConfiguration, undefined));
+          const started: ProviderRuntimeEvent[] = [];
+          const terminal =
+            yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "turn.completed" }>>();
+          yield* adapter.streamEvents.pipe(
+            Stream.runForEach((event) => {
+              if (event.type === "turn.started") started.push(event);
+              return event.type === "turn.completed"
+                ? Deferred.succeed(terminal, event)
+                : Effect.void;
+            }),
+            Effect.forkChild,
+          );
+          yield* adapter.startSession({
+            threadId,
+            cwd: process.cwd(),
+            runtimeMode: "full-access",
+            modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+          });
+          holdConfiguration = true;
+          const first = yield* adapter
+            .sendTurn({
+              threadId,
+              input: "first",
+              attachments: failPreparation
+                ? [
+                    {
+                      type: "image",
+                      id: "missing-attachment",
+                      name: "missing.png",
+                      mimeType: "image/png",
+                      sizeBytes: 1,
+                    },
+                  ]
+                : [],
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("cursor"),
+                model: "composer-2",
+              },
+            })
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(configurationStarted);
+          const steer = yield* adapter.sendTurn({ threadId, input: "steer" });
+          yield* Deferred.succeed(releaseConfiguration, undefined);
+          if (failPreparation) {
+            const error = yield* Fiber.join(first).pipe(Effect.flip);
+            assert.equal(error._tag, "ProviderAdapterRequestError");
+          } else {
+            const initial = yield* Fiber.join(first);
+            assert.equal(initial.turnId, steer.turnId);
+          }
+          const completed = yield* Deferred.await(terminal);
+          assert.equal(completed.turnId, steer.turnId);
+          assert.equal(completed.payload.state, failPreparation ? "failed" : "completed");
+          assert.lengthOf(started, 1);
+          yield* adapter.stopSession(threadId);
+        }),
+    );
+  }
+
+  it.effect("records a fresh terminal after native completion follows local cancellation", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("cursor-late-native-proof");
+      const adapter = yield* CursorAdapter;
+      const settings = yield* ServerSettingsService;
+      const wrapperPath = yield* Effect.promise(() => makeMockAgentWrapper());
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+      const nativeReply = yield* Deferred.make<void>();
+      const releaseProof = yield* Deferred.make<void>();
+      yield* Effect.addFinalizer(() => Deferred.succeed(releaseProof, undefined));
+      const terminalBeforeProof = yield* Deferred.make<void>();
+      const terminalAfterProof = yield* Deferred.make<void>();
+      let proved = false;
+      const terminalEvents: Array<Extract<ProviderRuntimeEvent, { type: "turn.completed" }>> = [];
+      yield* adapter.streamEvents.pipe(
+        Stream.runForEach((event) => {
+          if (event.threadId !== threadId || event.type !== "turn.completed") return Effect.void;
+          terminalEvents.push(event);
+          return Deferred.succeed(proved ? terminalAfterProof : terminalBeforeProof, undefined);
+        }),
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+      const sending = yield* adapter
+        .sendTurn(
+          { threadId, input: "finish this prompt" },
+          {
+            beforeSubmit: () => Effect.void,
+            nativeCompleted: () =>
+              Deferred.succeed(nativeReply, undefined).pipe(
+                Effect.andThen(Deferred.await(releaseProof)),
+                Effect.andThen(
+                  Effect.sync(() => {
+                    proved = true;
+                  }),
+                ),
+              ),
+            nativeStopped: Effect.void,
+            notSubmitted: Effect.die("This prompt has a real native reply."),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(nativeReply);
+      yield* adapter.interruptTurn(threadId);
+      yield* Fiber.join(sending);
+      yield* Deferred.await(terminalBeforeProof);
+      assert.isFalse(proved);
+      yield* Deferred.succeed(releaseProof, undefined);
+      yield* Deferred.await(terminalAfterProof);
+      assert.lengthOf(terminalEvents, 2);
+      assert.equal(terminalEvents[0]?.turnId, terminalEvents[1]?.turnId);
+      assert.deepEqual(terminalEvents[0]?.payload, terminalEvents[1]?.payload);
+      assert.notEqual(terminalEvents[0]?.eventId, terminalEvents[1]?.eventId);
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
+  it.effect("records a fresh terminal after stop confirms unresolved native work has exited", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-native-stop-proof");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_COMPLETE_FIRST_PROMPT_ON_CANCEL: "1" }),
+      );
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+      const nativeStarted = yield* Deferred.make<void>();
+      const stoppedTerminal = yield* Deferred.make<void>();
+      let provedStopped = false;
+      yield* adapter.streamEvents.pipe(
+        Stream.runForEach((event) => {
+          if (event.threadId !== threadId) return Effect.void;
+          if (event.type === "item.updated" && event.payload.itemType === "command_execution")
+            return Deferred.succeed(nativeStarted, undefined);
+          if (event.type === "turn.completed" && provedStopped)
+            return Deferred.succeed(stoppedTerminal, undefined);
+          return Effect.void;
+        }),
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+      const sending = yield* adapter
+        .sendTurn(
+          { threadId, input: "start native work" },
+          {
+            beforeSubmit: () => Effect.void,
+            nativeCompleted: () =>
+              Effect.die("The native prompt must stay unresolved until process exit."),
+            nativeStopped: Effect.sync(() => {
+              provedStopped = true;
+            }),
+            notSubmitted: Effect.die("The native prompt has already started."),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(nativeStarted);
+      yield* adapter.interruptTurn(threadId);
+      yield* Fiber.join(sending);
+      assert.isFalse(provedStopped);
+      yield* adapter.stopSession(threadId);
+      yield* Deferred.await(stoppedTerminal);
+      assert.isTrue(provedStopped);
+    }),
+  );
+
+  it.effect("cancels a parked native admission and admits a later turn", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("cursor-parked-native-admission");
+      const directory = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-admission-")),
+      );
+      const requestLog = NodePath.join(directory, "requests.ndjson");
+      const adapter = yield* CursorAdapter;
+      const settings = yield* ServerSettingsService;
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLog }),
+      );
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const rejected = yield* Deferred.make<void>();
+      yield* adapter.startSession({ threadId, cwd: process.cwd(), runtimeMode: "full-access" });
+      const parked = yield* adapter
+        .sendTurn(
+          { threadId, input: "must not run" },
+          {
+            beforeSubmit: () =>
+              Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+            nativeCompleted: () => Effect.die("A parked prompt cannot complete natively."),
+            notSubmitted: Deferred.succeed(rejected, undefined).pipe(Effect.asVoid),
+            nativeStopped: Effect.die("A parked prompt has no native work to stop."),
+          },
+        )
+        .pipe(Effect.forkChild);
+      yield* Deferred.await(entered);
+      yield* Fiber.interrupt(parked);
+      assert.isTrue(yield* Deferred.isDone(rejected));
+      yield* adapter.interruptTurn(threadId);
+      yield* Deferred.succeed(release, undefined);
+      const proofs: string[] = [];
+      const accepted = yield* adapter.sendTurn(
+        { threadId, input: "can run" },
+        {
+          beforeSubmit: (turnId) =>
+            Effect.sync(() => {
+              proofs.push(`submit:${turnId}`);
+            }),
+          nativeCompleted: (turnId) =>
+            Effect.sync(() => {
+              proofs.push(`complete:${turnId}`);
+            }),
+          nativeStopped: Effect.void,
+          notSubmitted: Effect.die("The replacement prompt must be submitted."),
+        },
+      );
+      assert.deepEqual(proofs, [`submit:${accepted.turnId}`, `complete:${accepted.turnId}`]);
+      yield* adapter.stopSession(threadId);
+      const requests = yield* Effect.promise(() => readJsonLines(requestLog));
+      assert.equal(requests.filter((request) => request.method === "session/prompt").length, 1);
+    }),
+  );
+
   it.effect("starts a session and maps mock ACP prompt flow to runtime events", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;

@@ -130,6 +130,7 @@ interface GrokTurnLivenessSignal {
 }
 
 interface GrokSessionContext {
+  lastTurnCompletion?: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>;
   readonly threadId: ThreadId;
   readonly acpSessionId: string;
   session: ProviderSession;
@@ -406,7 +407,35 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
       );
 
     const offerRuntimeEvent = (event: ProviderRuntimeEvent) =>
-      PubSub.publish(runtimeEventPubSub, event).pipe(Effect.asVoid);
+      Effect.gen(function* () {
+        if (event.type === "turn.completed") {
+          const context = sessions.get(event.threadId);
+          if (context) context.lastTurnCompletion = event;
+        }
+        yield* PubSub.publish(runtimeEventPubSub, event);
+      });
+    // A local terminal can precede native completion. Capture again after proof,
+    // using the last result so a late cancelled steer cannot replace the final result.
+    const repeatNativeTerminal = (context: GrokSessionContext, turnId: TurnId, stopped = false) =>
+      Effect.gen(function* () {
+        const previous = context.lastTurnCompletion;
+        if (!stopped && previous?.turnId !== turnId) return;
+        yield* offerRuntimeEvent({
+          type: "turn.completed",
+          provider: PROVIDER,
+          threadId: context.threadId,
+          turnId,
+          payload:
+            previous?.turnId === turnId
+              ? previous.payload
+              : { state: "cancelled", stopReason: "cancelled" },
+          ...(yield* makeEventStamp()),
+        });
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.logError("Failed to record native Grok completion.", { cause }),
+        ),
+      );
 
     const getThreadSemaphore = (threadId: string) =>
       SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
@@ -1472,7 +1501,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
         }).pipe(Effect.scoped),
       );
 
-    const sendTurn: GrokAdapterShape["sendTurn"] = (input) =>
+    const sendTurn: GrokAdapterShape["sendTurn"] = (input, startOptions) =>
       Effect.gen(function* () {
         const prepared = yield* withThreadLock(
           input.threadId,
@@ -1709,7 +1738,36 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
                       { type: "text", text: prepared.runtimeInstructions },
                     ],
                   },
-                  { dispatched },
+                  {
+                    dispatched,
+                    beforeSubmit: Effect.gen(function* () {
+                      yield* startOptions?.beforeSubmit(prepared.turnId) ?? Effect.void;
+                      if (
+                        liveCtx.stopped ||
+                        sessions.get(input.threadId) !== liveCtx ||
+                        liveCtx.activeTurnId !== prepared.turnId ||
+                        liveCtx.interruptedTurnIds.has(prepared.turnId) ||
+                        prepared.promptEpoch < liveCtx.discardBeforeEpoch
+                      ) {
+                        return yield* new EffectAcpErrors.AcpTransportError({
+                          method: "session/prompt",
+                          detail: "The Grok turn changed before prompt submission.",
+                          cause: undefined,
+                        });
+                      }
+                    }),
+                    nativeCompleted: startOptions
+                      ? startOptions
+                          .nativeCompleted(prepared.turnId)
+                          .pipe(Effect.andThen(repeatNativeTerminal(liveCtx, prepared.turnId)))
+                      : Effect.void,
+                    nativeStopped: startOptions
+                      ? startOptions.nativeStopped.pipe(
+                          Effect.andThen(repeatNativeTerminal(liveCtx, prepared.turnId, true)),
+                        )
+                      : Effect.void,
+                    notSubmitted: startOptions?.notSubmitted ?? Effect.void,
+                  },
                 )
                 .pipe(Effect.forkChild({ startImmediately: true }));
               // Hold the lifecycle permit until the runtime has registered this
@@ -1718,7 +1776,7 @@ export function makeGrokAdapter(grokSettings: GrokSettings, options?: GrokAdapte
               yield* Effect.raceFirst(
                 Deferred.await(dispatched),
                 Fiber.await(fiber).pipe(Effect.asVoid),
-              );
+              ).pipe(Effect.onInterrupt(() => Fiber.interrupt(fiber)));
               return { _tag: "Started" as const, fiber };
             }),
           );

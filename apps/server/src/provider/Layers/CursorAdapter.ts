@@ -22,6 +22,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -130,6 +131,7 @@ interface PendingUserInput {
 }
 
 interface CursorSessionContext {
+  lastTurnCompletion?: Extract<ProviderRuntimeEvent, { type: "turn.completed" }>;
   readonly threadId: ThreadId;
   session: ProviderSession;
   readonly scope: Scope.Closeable;
@@ -370,7 +372,35 @@ export function makeCursorAdapter(
       );
 
     const offerRuntimeEvent = (event: ProviderRuntimeEvent) =>
-      PubSub.publish(runtimeEventPubSub, event).pipe(Effect.asVoid);
+      Effect.gen(function* () {
+        if (event.type === "turn.completed") {
+          const context = sessions.get(event.threadId);
+          if (context) context.lastTurnCompletion = event;
+        }
+        yield* PubSub.publish(runtimeEventPubSub, event);
+      });
+    // A local terminal can precede native completion. Capture again after proof,
+    // using the last result so a late cancelled steer cannot replace the final result.
+    const repeatNativeTerminal = (context: CursorSessionContext, turnId: TurnId, stopped = false) =>
+      Effect.gen(function* () {
+        const previous = context.lastTurnCompletion;
+        if (!stopped && previous?.turnId !== turnId) return;
+        yield* offerRuntimeEvent({
+          type: "turn.completed",
+          provider: PROVIDER,
+          threadId: context.threadId,
+          turnId,
+          payload:
+            previous?.turnId === turnId
+              ? previous.payload
+              : { state: "cancelled", stopReason: "cancelled" },
+          ...(yield* makeEventStamp()),
+        });
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.logError("Failed to record native Cursor completion.", { cause }),
+        ),
+      );
 
     const getThreadSemaphore = (threadId: string) =>
       SynchronizedRef.modifyEffect(threadLocksRef, (current) => {
@@ -923,18 +953,21 @@ export function makeCursorAdapter(
         }).pipe(Effect.scoped),
       );
 
-    const sendTurn: CursorAdapterShape["sendTurn"] = (input) =>
+    const sendTurn: CursorAdapterShape["sendTurn"] = (input, startOptions) =>
       Effect.gen(function* () {
-        const ctx = yield* requireSession(input.threadId);
-        // A sendTurn while a prompt is in flight is a steer: the agent folds
-        // the new prompt into the ongoing work, so the active turn id is
-        // reused instead of opening a new turn.
-        const steeringTurnId = ctx.promptsInFlight > 0 ? ctx.activeTurnId : undefined;
-        const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
-        // Count this prompt immediately so a superseded in-flight prompt
-        // resolving from here on does not settle the turn; the matching
-        // decrement is the `ensuring` below.
-        ctx.promptsInFlight += 1;
+        const { ctx, steeringTurnId, turnId } = yield* withThreadLock(
+          input.threadId,
+          Effect.gen(function* () {
+            const ctx = yield* requireSession(input.threadId);
+            const steeringTurnId = ctx.promptsInFlight > 0 ? ctx.activeTurnId : undefined;
+            const turnId = steeringTurnId ?? TurnId.make(yield* randomUUIDv4);
+            // Reserve the local turn before configuration can yield. Concurrent
+            // preparation and native prompts must use the same steering identity.
+            ctx.activeTurnId = turnId;
+            ctx.promptsInFlight += 1;
+            return { ctx, steeringTurnId, turnId };
+          }),
+        );
 
         return yield* Effect.gen(function* () {
           const turnModelSelection =
@@ -1047,15 +1080,44 @@ export function makeCursorAdapter(
 
           // ACP has no system-message field; keep runtime context separate from the user's text.
           const result = yield* ctx.acp
-            .prompt({
-              prompt: [
-                ...promptParts,
-                {
-                  type: "text",
-                  text: buildRuntimeInstructions({ harness: "Cursor", model: resolvedModel }),
-                },
-              ],
-            })
+            .prompt(
+              {
+                prompt: [
+                  ...promptParts,
+                  {
+                    type: "text",
+                    text: buildRuntimeInstructions({ harness: "Cursor", model: resolvedModel }),
+                  },
+                ],
+              },
+              {
+                beforeSubmit: Effect.gen(function* () {
+                  yield* startOptions?.beforeSubmit(turnId) ?? Effect.void;
+                  if (
+                    ctx.stopped ||
+                    sessions.get(input.threadId) !== ctx ||
+                    ctx.activeTurnId !== turnId
+                  ) {
+                    return yield* new EffectAcpErrors.AcpTransportError({
+                      method: "session/prompt",
+                      detail: "The Cursor session changed before prompt submission.",
+                      cause: undefined,
+                    });
+                  }
+                }),
+                nativeCompleted: startOptions
+                  ? startOptions
+                      .nativeCompleted(turnId)
+                      .pipe(Effect.andThen(repeatNativeTerminal(ctx, turnId)))
+                  : Effect.void,
+                nativeStopped: startOptions
+                  ? startOptions.nativeStopped.pipe(
+                      Effect.andThen(repeatNativeTerminal(ctx, turnId, true)),
+                    )
+                  : Effect.void,
+                notSubmitted: startOptions?.notSubmitted ?? Effect.void,
+              },
+            )
             .pipe(
               Effect.mapError((error) =>
                 mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
@@ -1102,6 +1164,31 @@ export function makeCursorAdapter(
             Effect.sync(() => {
               ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
             }),
+          ),
+          Effect.onError((cause) =>
+            Effect.gen(function* () {
+              if (
+                ctx.stopped ||
+                ctx.promptsInFlight > 0 ||
+                ctx.activeTurnId !== turnId ||
+                ctx.lastTurnCompletion?.turnId === turnId
+              )
+                return;
+              yield* offerRuntimeEvent({
+                type: "turn.completed",
+                ...(yield* makeEventStamp()),
+                provider: PROVIDER,
+                threadId: input.threadId,
+                turnId,
+                payload: Cause.hasInterruptsOnly(cause)
+                  ? { state: "cancelled", stopReason: "cancelled" }
+                  : { state: "failed", errorMessage: "Cursor prompt request failed." },
+              });
+            }).pipe(
+              Effect.catch((error) =>
+                Effect.logError("Failed to record Cursor prompt failure.", { error }),
+              ),
+            ),
           ),
         );
       });
