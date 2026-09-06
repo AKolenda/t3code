@@ -34,109 +34,108 @@ export class TurnCheckpointCapture extends Context.Service<
 
 // Tracks known terminal events before they reach the independent runtime consumers.
 // An interrupt reserves the known active turn before adapter cancellation can return.
-export const layer = Layer.effect(
-  TurnCheckpointCapture,
-  Effect.sync(() => {
-    const threads = new Map<ThreadId, ThreadCaptureState>();
-    const events = new Map<EventId, PendingCapture>();
+export function make(): TurnCheckpointCapture["Service"] {
+  const threads = new Map<ThreadId, ThreadCaptureState>();
+  const events = new Map<EventId, PendingCapture>();
 
-    const stateFor = (threadId: ThreadId) => {
-      let state = threads.get(threadId);
-      if (!state) {
-        state = { activeTurnId: undefined, pending: new Set() };
-        threads.set(threadId, state);
-      }
-      return state;
+  const stateFor = (threadId: ThreadId) => {
+    let state = threads.get(threadId);
+    if (!state) {
+      state = { activeTurnId: undefined, pending: new Set() };
+      threads.set(threadId, state);
+    }
+    return state;
+  };
+
+  const prepare = (threadId: ThreadId, turnId: TurnId | undefined) => {
+    const state = stateFor(threadId);
+    const existing = turnId
+      ? [...state.pending].find((capture) => capture.turnId === turnId)
+      : undefined;
+    if (existing) return existing;
+    const capture: PendingCapture = {
+      threadId,
+      turnId,
+      events: new Set(),
+      reservations: new Set(),
+      outcome: Deferred.makeUnsafe(),
     };
+    state.pending.add(capture);
+    return capture;
+  };
 
-    const prepare = (threadId: ThreadId, turnId: TurnId | undefined) => {
-      const state = stateFor(threadId);
-      const existing = turnId
-        ? [...state.pending].find((capture) => capture.turnId === turnId)
-        : undefined;
-      if (existing) return existing;
-      const capture: PendingCapture = {
-        threadId,
-        turnId,
-        events: new Set(),
-        reservations: new Set(),
-        outcome: Deferred.makeUnsafe(),
-      };
-      state.pending.add(capture);
-      return capture;
-    };
+  const complete = (capture: PendingCapture, outcome: CaptureOutcome) => {
+    const state = threads.get(capture.threadId);
+    state?.pending.delete(capture);
+    if (state?.activeTurnId === undefined && state?.pending.size === 0) {
+      threads.delete(capture.threadId);
+    }
+    for (const eventId of capture.events) events.delete(eventId);
+    Deferred.doneUnsafe(capture.outcome, Effect.succeed(outcome));
+  };
 
-    const complete = (capture: PendingCapture, outcome: CaptureOutcome) => {
-      const state = threads.get(capture.threadId);
-      state?.pending.delete(capture);
-      if (state?.activeTurnId === undefined && state?.pending.size === 0) {
-        threads.delete(capture.threadId);
-      }
-      for (const eventId of capture.events) events.delete(eventId);
-      Deferred.doneUnsafe(capture.outcome, Effect.succeed(outcome));
-    };
+  const awaitCapture = Effect.fn("TurnCheckpointCapture.awaitCapture")(function* (
+    threadId: ThreadId,
+  ) {
+    while (true) {
+      const pending = [...(threads.get(threadId)?.pending ?? [])];
+      if (pending.length === 0) return;
+      yield* Effect.forEach(pending, (capture) => Deferred.await(capture.outcome), {
+        discard: true,
+      });
+    }
+  });
 
-    const awaitCapture = Effect.fn("TurnCheckpointCapture.awaitCapture")(function* (
-      threadId: ThreadId,
-    ) {
-      while (true) {
-        const pending = [...(threads.get(threadId)?.pending ?? [])];
-        if (pending.length === 0) return;
-        yield* Effect.forEach(pending, (capture) => Deferred.await(capture.outcome), {
-          discard: true,
-        });
-      }
-    });
-
-    return TurnCheckpointCapture.of({
-      observe: (event) =>
-        Effect.sync(() => {
-          if (event.type === "turn.started" && event.turnId !== undefined) {
-            stateFor(event.threadId).activeTurnId = TurnId.make(event.turnId);
-          } else if (event.type === "turn.completed" || event.type === "turn.aborted") {
-            const state = stateFor(event.threadId);
-            const turnId =
-              event.turnId === undefined ? state.activeTurnId : TurnId.make(event.turnId);
-            const capture = prepare(event.threadId, turnId);
-            capture.events.add(event.eventId);
-            events.set(event.eventId, capture);
-            if (state.activeTurnId === turnId) state.activeTurnId = undefined;
-          } else if (event.type === "session.exited") {
-            const state = threads.get(event.threadId);
-            if (!state) return;
-            state.activeTurnId = undefined;
-            for (const capture of state.pending) {
-              // Terminal events can still be queued for capture after session exit.
-              if (capture.events.size === 0) complete(capture, "skipped");
-            }
-            if (state.pending.size === 0) threads.delete(event.threadId);
+  return TurnCheckpointCapture.of({
+    observe: (event) =>
+      Effect.sync(() => {
+        if (event.type === "turn.started" && event.turnId !== undefined) {
+          stateFor(event.threadId).activeTurnId = TurnId.make(event.turnId);
+        } else if (event.type === "turn.completed" || event.type === "turn.aborted") {
+          const state = stateFor(event.threadId);
+          const turnId =
+            event.turnId === undefined ? state.activeTurnId : TurnId.make(event.turnId);
+          const capture = prepare(event.threadId, turnId);
+          capture.events.add(event.eventId);
+          events.set(event.eventId, capture);
+          if (state.activeTurnId === turnId) state.activeTurnId = undefined;
+        } else if (event.type === "session.exited") {
+          const state = threads.get(event.threadId);
+          if (!state) return;
+          state.activeTurnId = undefined;
+          for (const capture of state.pending) {
+            // Terminal events can still be queued for capture after session exit.
+            if (capture.events.size === 0) complete(capture, "skipped");
           }
-        }),
-      expectInterrupt: (threadId) =>
-        Effect.sync(() => {
-          const turnId = threads.get(threadId)?.activeTurnId;
-          if (turnId === undefined) return Effect.void;
-          const capture = prepare(threadId, turnId);
-          const reservation = Symbol();
-          capture.reservations.add(reservation);
-          return Effect.sync(() => {
-            capture.reservations.delete(reservation);
-            // A failed call cannot release another interrupt or observed capture work.
-            if (capture.reservations.size === 0 && capture.events.size === 0) {
-              complete(capture, "skipped");
-            }
-          });
-        }),
-      pendingCapture: (threadId) =>
-        Effect.sync(() =>
-          (threads.get(threadId)?.pending.size ?? 0) > 0 ? awaitCapture(threadId) : undefined,
-        ),
-      awaitCapture,
-      complete: (event, outcome) =>
-        Effect.sync(() => {
-          const capture = events.get(event.eventId);
-          if (capture) complete(capture, outcome);
-        }),
-    });
-  }),
-);
+          if (state.pending.size === 0) threads.delete(event.threadId);
+        }
+      }),
+    expectInterrupt: (threadId) =>
+      Effect.sync(() => {
+        const turnId = threads.get(threadId)?.activeTurnId;
+        if (turnId === undefined) return Effect.void;
+        const capture = prepare(threadId, turnId);
+        const reservation = Symbol();
+        capture.reservations.add(reservation);
+        return Effect.sync(() => {
+          capture.reservations.delete(reservation);
+          // A failed call cannot release another interrupt or observed capture work.
+          if (capture.reservations.size === 0 && capture.events.size === 0) {
+            complete(capture, "skipped");
+          }
+        });
+      }),
+    pendingCapture: (threadId) =>
+      Effect.sync(() =>
+        (threads.get(threadId)?.pending.size ?? 0) > 0 ? awaitCapture(threadId) : undefined,
+      ),
+    awaitCapture,
+    complete: (event, outcome) =>
+      Effect.sync(() => {
+        const capture = events.get(event.eventId);
+        if (capture) complete(capture, outcome);
+      }),
+  });
+}
+
+export const layer = Layer.effect(TurnCheckpointCapture, Effect.sync(make));
