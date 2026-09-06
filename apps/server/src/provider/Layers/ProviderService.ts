@@ -9,7 +9,7 @@
  *
  * @module ProviderServiceLive
  */
-import { isDeepStrictEqual } from "node:util";
+import * as NodeUtil from "node:util";
 import {
   EventId,
   MessageId,
@@ -2017,8 +2017,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       if (
         routed.instanceId !== expectedInstanceId ||
         routed.adapter.provider !== plan.source.provider ||
-        (!isDeepStrictEqual(binding?.resumeCursor ?? null, plan.source.resumeCursor ?? null) &&
-          !isDeepStrictEqual(binding?.resumeCursor ?? null, input.resumeCursor))
+        (!NodeUtil.isDeepStrictEqual(
+          binding?.resumeCursor ?? null,
+          plan.source.resumeCursor ?? null,
+        ) &&
+          !NodeUtil.isDeepStrictEqual(binding?.resumeCursor ?? null, input.resumeCursor))
       ) {
         return yield* toValidationError(
           "ProviderService.rollbackConversation",

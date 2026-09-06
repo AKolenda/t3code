@@ -1,6 +1,5 @@
 import {
   CommandId,
-  type CheckpointRef,
   EventId,
   MessageId,
   type ProjectId,
