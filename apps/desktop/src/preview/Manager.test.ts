@@ -21,6 +21,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
+import { HUMAN_INPUT_CHANNEL } from "./GuestProtocol.ts";
 import * as BrowserSession from "./BrowserSession.ts";
 import * as PreviewManager from "./Manager.ts";
 
@@ -355,13 +356,15 @@ const makeAutomationWebContents = (id = 42, host = makeTestHostWebContents()) =>
       destroyed = true;
       events.emit("destroyed");
     },
-    remove: () => {
+    remove: (registrationId?: number, tabId?: string) => {
       destroyed = true;
       events.emit("destroyed");
       const request = host.send.mock.calls.findLast(
         ([channel, , guestId]) => channel === "desktop:preview-webview-reset" && guestId === id,
       );
-      if (request) host.ipc.emit("desktop:preview-webview-removed", {}, ...request.slice(1));
+      if (registrationId !== undefined && tabId !== undefined) {
+        host.ipc.emit("desktop:preview-webview-removed", {}, tabId, id, registrationId);
+      } else if (request) host.ipc.emit("desktop:preview-webview-removed", {}, ...request.slice(1));
     },
   };
 };
@@ -3019,6 +3022,81 @@ describe("PreviewManager", () => {
           ).toBe(42);
         }),
       ),
+  );
+
+  effectIt.effect.each(["remount", "close"] as const)(
+    "accepts removal before the deadline during %s",
+    (mode) =>
+      withManager((manager) =>
+        Effect.gen(function* () {
+          const guest = makeAutomationWebContents();
+          const replacement = makeAutomationWebContents(43, guest.host);
+          fromId.mockImplementation((id) => (id === 43 ? replacement.wc : guest.wc));
+          const tabId = "tab_early_removal";
+          yield* manager.createTab(tabId);
+          const registrationId = yield* manager.registerWebview(tabId, 42);
+          yield* manager.automationEvaluate(tabId, { expression: "42" });
+          const entered = yield* Deferred.make<void>();
+          const pending = Promise.withResolvers<unknown>();
+          guest.sendCommand.mockImplementation(async (method) => {
+            if (method === "Runtime.evaluate") {
+              queueMicrotask(() => Deferred.doneUnsafe(entered, Effect.void));
+              return pending.promise;
+            }
+          });
+          guest.wc.debugger.detach.mockImplementation(() =>
+            pending.reject(new Error("guest removed")),
+          );
+          const evaluation = yield* manager
+            .automationEvaluate(tabId, {
+              expression: "new Promise(() => {})",
+            })
+            .pipe(Effect.forkChild({ startImmediately: true }));
+          yield* Deferred.await(entered);
+          const close =
+            mode === "close"
+              ? yield* manager.closeTab(tabId).pipe(Effect.forkChild({ startImmediately: true }))
+              : undefined;
+          guest.remove(registrationId, tabId);
+          if (close) {
+            yield* Fiber.join(close);
+            yield* manager.createTab(tabId);
+          }
+          yield* manager.registerWebview(tabId, 43);
+          expect(Exit.isFailure(yield* Fiber.await(evaluation))).toBe(true);
+          expect(yield* manager.automationEvaluate(tabId, { expression: "42" })).toBe(42);
+          yield* TestClock.adjust(12_000);
+          expect((yield* manager.automationStatus(tabId)).available).toBe(true);
+        }),
+      ),
+  );
+
+  effectIt.effect("keeps human control visible while replacing a guest", () =>
+    withManager((manager) =>
+      Effect.gen(function* () {
+        const guest = makeAutomationWebContents();
+        const replacement = makeAutomationWebContents(43, guest.host);
+        const ipc = new NodeEvents.EventEmitter();
+        Object.assign(guest.wc, { ipc });
+        fromId.mockImplementation((id) => (id === 43 ? replacement.wc : guest.wc));
+        const states: Array<PreviewManager.PreviewTabState> = [];
+        const humanInput = yield* Deferred.make<void>();
+        yield* manager.subscribeStateChanges((_tabId, state) =>
+          Effect.sync(() => {
+            states.push(state);
+            if (state.controller === "human") Deferred.doneUnsafe(humanInput, Effect.void);
+          }),
+        );
+        yield* manager.createTab("tab_human_replace");
+        yield* manager.registerWebview("tab_human_replace", 42);
+        ipc.emit(HUMAN_INPUT_CHANNEL, {});
+        yield* Deferred.await(humanInput);
+        yield* manager.registerWebview("tab_human_replace", 43);
+        expect(states.at(-1)?.controller).toBe("human");
+        yield* TestClock.adjust(750);
+        expect(states.at(-1)?.controller).toBe("none");
+      }),
+    ),
   );
 
   effectIt.effect("requests DOM removal after a pending guest loses its wrapper", () =>

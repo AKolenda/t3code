@@ -73,6 +73,15 @@ export function HostedBrowserWebview(props: {
   const tabLeaseRef = useRef<AcquiredDesktopTab | null>(null);
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const webviewRef = useRef<ElectronWebview | null>(null);
+  const ownedWebviewsRef = useRef(
+    new Map<
+      number,
+      {
+        webview: ElectronWebview;
+        registrationId: number | undefined;
+      }
+    >(),
+  );
   const crashRecoveryRef = useRef<WebviewCrashRecoveryState>(INITIAL_WEBVIEW_CRASH_RECOVERY_STATE);
   const [aspectRatioLocked, setAspectRatioLocked] = useState(false);
   const presentation = useBrowserSurfaceStore(
@@ -118,6 +127,38 @@ export function HostedBrowserWebview(props: {
     webviewRef.current = node as ElectronWebview | null;
   }, []);
 
+  const confirmRemovedWebview = useCallback(
+    (webContentsId: number) => {
+      const owned = ownedWebviewsRef.current.get(webContentsId);
+      if (!owned || owned.webview.isConnected || owned.registrationId === undefined) return;
+      previewBridge?.confirmWebviewRemoved?.(runtimeTabId, webContentsId, owned.registrationId);
+      ownedWebviewsRef.current.delete(webContentsId);
+    },
+    [runtimeTabId],
+  );
+
+  // Keep removal proof across crash remounts and late registration replies.
+  useEffect(
+    () =>
+      previewBridge?.onWebviewReset?.((tabId, webContentsId, registrationId) => {
+        if (tabId !== runtimeTabId) return;
+        const owned = ownedWebviewsRef.current.get(webContentsId);
+        if (
+          !owned ||
+          (owned.registrationId !== undefined && owned.registrationId !== registrationId)
+        )
+          return;
+        owned.registrationId = registrationId;
+        if (!owned.webview.isConnected) {
+          confirmRemovedWebview(webContentsId);
+        } else if (owned.webview === webviewRef.current) {
+          setRecoverySrc(latestUrlRef.current ?? initialSrc);
+          setWebviewGeneration((generation) => generation + 1);
+        }
+      }),
+    [confirmRemovedWebview, initialSrc, runtimeTabId],
+  );
+
   useEffect(() => {
     const webview = webviewRef.current;
     const bridge = previewBridge;
@@ -125,7 +166,6 @@ export function HostedBrowserWebview(props: {
     let disposed = false;
     let replacing = false;
     let registeredWebContentsId: number | undefined;
-    let pendingReset: { webContentsId: number; resetId: number } | undefined;
     let recoveryTimeout: ReturnType<typeof setTimeout> | null = null;
     const register = () => {
       const lease = tabLeaseRef.current;
@@ -140,7 +180,16 @@ export function HostedBrowserWebview(props: {
           const webContentsId = webview.getWebContentsId();
           if (Number.isInteger(webContentsId) && webContentsId > 0) {
             registeredWebContentsId = webContentsId;
-            await bridge.registerWebview(runtimeTabId, webContentsId);
+            const owned = ownedWebviewsRef.current.get(webContentsId) ?? {
+              webview,
+              registrationId: undefined,
+            };
+            ownedWebviewsRef.current.set(webContentsId, owned);
+            const registrationId = await bridge.registerWebview(runtimeTabId, webContentsId);
+            if (typeof registrationId === "number") {
+              owned.registrationId = registrationId;
+              confirmRemovedWebview(webContentsId);
+            }
           }
         } catch {
           // did-attach/dom-ready will retry if the guest was not ready yet.
@@ -153,14 +202,6 @@ export function HostedBrowserWebview(props: {
       setRecoverySrc(latestUrlRef.current ?? initialSrc);
       setWebviewGeneration((generation) => generation + 1);
     };
-    const unsubscribeReset = bridge.onWebviewReset?.((tabId, webContentsId, resetId) => {
-      if (tabId !== runtimeTabId || disposed || replacing) return;
-      if (registeredWebContentsId !== webContentsId) return;
-      pendingReset = { webContentsId, resetId };
-      // Remounting removes Electron's outer frame. Closing the main-process
-      // WebContents wrapper alone does not retire an attached guest target.
-      replaceGuest();
-    });
     const recoverGuest = () => {
       if (disposed || replacing || recoveryTimeout !== null) return;
       const recovery = planWebviewCrashRecovery(crashRecoveryRef.current, Date.now());
@@ -177,22 +218,20 @@ export function HostedBrowserWebview(props: {
     register();
     return () => {
       disposed = true;
-      unsubscribeReset?.();
-      // Passive cleanup runs after React removes the old node. The connection
-      // check also excludes effect reruns that keep the same DOM webview.
-      if (pendingReset && !webview.isConnected) {
-        bridge.confirmWebviewRemoved?.(
-          runtimeTabId,
-          pendingReset.webContentsId,
-          pendingReset.resetId,
-        );
-      }
+      if (registeredWebContentsId !== undefined) confirmRemovedWebview(registeredWebContentsId);
       if (recoveryTimeout !== null) clearTimeout(recoveryTimeout);
       webview.removeEventListener("did-attach", register);
       webview.removeEventListener("dom-ready", register);
       webview.removeEventListener("render-process-gone", recoverGuest);
     };
-  }, [clientSettingsHydrated, config, initialSrc, runtimeTabId, webviewGeneration]);
+  }, [
+    clientSettingsHydrated,
+    config,
+    confirmRemovedWebview,
+    initialSrc,
+    runtimeTabId,
+    webviewGeneration,
+  ]);
 
   const active = presentation.visible && presentation.rect !== null;
   const lastRect = presentation.rect;

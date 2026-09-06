@@ -653,10 +653,18 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     }
     return lock;
   };
-  const webviewHosts = new WeakMap<Electron.WebContents, Electron.WebContents>();
+  const registeredWebviews = new Map<
+    number,
+    {
+      readonly tabId: string;
+      readonly webContents: Electron.WebContents;
+      readonly host: Electron.WebContents | undefined;
+    }
+  >();
+  const webviewRegistrationIds = new WeakMap<Electron.WebContents, number>();
   const resetHosts = new WeakSet<Electron.WebContents>();
   const removedWebContents = new WeakSet<Electron.WebContents>();
-  let nextWebviewResetId = 0;
+  let nextWebviewRegistrationId = 0;
   const pendingWebviewResets = new Map<
     string,
     {
@@ -1253,12 +1261,17 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
   // The host confirms removal of the DOM webview. Electron's destroyed event
   // can mean only wrapper loss, while the outer frame still owns the target.
   const observeWebviewHost = Effect.fn("PreviewManager.observeWebviewHost")(function* (
+    tabId: string,
     wc: Electron.WebContents,
   ) {
-    const host = wc.hostWebContents;
-    if (!host) return;
-    webviewHosts.set(wc, host);
-    if (resetHosts.has(host)) return;
+    const host = wc.hostWebContents ?? undefined;
+    let registrationId = webviewRegistrationIds.get(wc);
+    if (registrationId === undefined) {
+      registrationId = ++nextWebviewRegistrationId;
+      webviewRegistrationIds.set(wc, registrationId);
+      registeredWebviews.set(registrationId, { tabId, webContents: wc, host });
+    }
+    if (!host || resetHosts.has(host)) return registrationId;
     const hostIpc = host.ipc;
     const onRemoved = (
       _event: Electron.IpcMainEvent,
@@ -1266,26 +1279,29 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       webContentsId: unknown,
       resetId: unknown,
     ) => {
-      if (typeof tabId !== "string") return;
-      const pending = pendingWebviewResets.get(tabId);
+      if (typeof resetId !== "number") return;
+      const registered = registeredWebviews.get(resetId);
       if (
-        !pending ||
-        pending.host !== host ||
-        pending.resetId !== resetId ||
-        pending.webContents.id !== webContentsId
+        !registered ||
+        registered.tabId !== tabId ||
+        registered.host !== host ||
+        registered.webContents.id !== webContentsId
       )
         return;
-      pendingWebviewResets.delete(tabId);
-      removedWebContents.add(pending.webContents);
-      Deferred.doneUnsafe(pending.removed, Effect.void);
+      registeredWebviews.delete(resetId);
+      const guest = registered.webContents;
+      removedWebContents.add(guest);
+      retiredWebContents.add(guest);
+      const pending = pendingWebviewResets.get(registered.tabId);
+      if (pending?.webContents === guest && pending.resetId === resetId) {
+        pendingWebviewResets.delete(registered.tabId);
+        Deferred.doneUnsafe(pending.removed, Effect.void);
+      }
       runFork(
-        Effect.all(
-          [
-            detachControlSession(pending.webContents.id, pending.webContents),
-            detachListeners(pending.webContents.id, pending.webContents),
-          ],
-          { concurrency: 2, discard: true },
-        ),
+        Effect.all([detachControlSession(guest.id, guest), detachListeners(guest.id, guest)], {
+          concurrency: 2,
+          discard: true,
+        }),
       );
     };
     yield* attempt({ operation: "observeWebviewHost", webContentsId: wc.id }, () => {
@@ -1298,6 +1314,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         hostIpc.off(PREVIEW_WEBVIEW_REMOVED_CHANNEL, onRemoved);
       }),
     );
+    return registrationId;
   });
 
   const retireWebview = Effect.fn("PreviewManager.retireWebview")(function* (
@@ -1308,15 +1325,15 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     if (removedWebContents.has(wc)) return;
     let pending = pendingWebviewResets.get(tabId);
     if (!pending) {
-      const host = webviewHosts.get(wc);
+      const resetId = webviewRegistrationIds.get(wc) ?? ++nextWebviewRegistrationId;
+      const host = registeredWebviews.get(resetId)?.host;
       pending = {
         webContents: wc,
         host,
-        resetId: ++nextWebviewResetId,
+        resetId,
         removed: Deferred.makeUnsafe<void>(),
       };
       pendingWebviewResets.set(tabId, pending);
-      const resetId = pending.resetId;
       yield* attempt({ operation: "retireWebview", tabId, webContentsId: wc.id }, () => {
         if (!host || host.isDestroyed()) throw new Error("Preview host is unavailable.");
         host.send(PREVIEW_WEBVIEW_RESET_CHANNEL, tabId, wc.id, resetId);
@@ -2349,7 +2366,6 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     if (retiredWebContents.has(wc)) {
       return yield* new PreviewAutomationGuestRetiredError({ tabId, webContentsId });
     }
-    yield* observeWebviewHost(wc);
     yield* awaitWebviewReset(tabId);
     const attached = yield* Ref.get(attachedRef);
     const annotationTheme = yield* Ref.get(annotationThemeRef);
@@ -2363,7 +2379,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
       yield* attempt({ operation: "registerWebview.sendTheme", tabId, webContentsId }, () =>
         wc.send(ANNOTATION_THEME_CHANNEL, annotationTheme),
       );
-      return;
+      return yield* observeWebviewHost(tabId, wc);
     }
     const replacedWebContentsId =
       tab.webContentsId != null &&
@@ -2404,6 +2420,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
     yield* attempt({ operation: "registerWebview.restoreAudioMuted", tabId, webContentsId }, () =>
       wc.setAudioMuted(currentTab.audioMuted),
     );
+    const registrationId = yield* observeWebviewHost(tabId, wc);
     yield* attachListeners(tabId, wc);
     const readAudible = attempt(
       { operation: "registerWebview.readAudible", tabId, webContentsId },
@@ -2429,7 +2446,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         const next: PreviewTabState = {
           ...currentWithoutFavicon,
           webContentsId,
-          controller: "none",
+          controller: current.controller === "human" ? "human" : "none",
           navStatus: pendingUrl === null ? computeNavStatus(wc) : current.navStatus,
           canGoBack: wc.navigationHistory.canGoBack(),
           canGoForward: wc.navigationHistory.canGoForward(),
@@ -2487,6 +2504,7 @@ const makeNativeOperations = Effect.fn("PreviewManager.makeOperations")(function
         ).pipe(Effect.ignore),
       );
     }
+    return registrationId;
   });
 
   const registerWebview = Effect.fn("PreviewManager.registerWebview")(function* (
@@ -4794,7 +4812,7 @@ export class PreviewManager extends Context.Service<
     readonly registerWebview: (
       tabId: string,
       webContentsId: number,
-    ) => Effect.Effect<void, PreviewManagerError>;
+    ) => Effect.Effect<number, PreviewManagerError>;
     readonly navigate: (tabId: string, url: string) => Effect.Effect<void, PreviewManagerError>;
     readonly goBack: (tabId: string) => Effect.Effect<void, PreviewManagerError>;
     readonly goForward: (tabId: string) => Effect.Effect<void, PreviewManagerError>;

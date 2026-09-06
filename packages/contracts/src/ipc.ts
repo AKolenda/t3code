@@ -1170,7 +1170,7 @@ export const DESKTOP_PREVIEW_RECORDING_CAPTURE_TRIGGER = "__t3DesktopPreviewReco
 export interface DesktopPreviewBridge {
   createTab: (tabId: string, defaults?: DesktopPreviewTabDefaults) => Promise<void>;
   closeTab: (tabId: string) => Promise<void>;
-  registerWebview: (tabId: string, webContentsId: number) => Promise<void>;
+  registerWebview: (tabId: string, webContentsId: number) => Promise<number | void>;
   /** Remove and replace this exact guest after its native command stops responding. */
   onWebviewReset?: (
     listener: (tabId: string, webContentsId: number, resetId: number) => void,

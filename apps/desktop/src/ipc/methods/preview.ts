@@ -82,10 +82,10 @@ export const closeTab = DesktopIpc.makeIpcMethod({
 export const registerWebview = DesktopIpc.makeIpcMethod({
   channel: IpcChannels.PREVIEW_REGISTER_WEBVIEW_CHANNEL,
   payload: DesktopPreviewRegisterWebviewInputSchema,
-  result: Schema.Void,
+  result: Schema.Number,
   handler: Effect.fn("desktop.ipc.preview.registerWebview")(function* ({ tabId, webContentsId }) {
     const manager = yield* PreviewManager.PreviewManager;
-    yield* manager.registerWebview(tabId, webContentsId);
+    return yield* manager.registerWebview(tabId, webContentsId);
   }),
 });
 

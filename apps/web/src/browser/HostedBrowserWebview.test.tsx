@@ -206,68 +206,87 @@ describe("HostedBrowserWebview settings hydration", () => {
 });
 
 describe("HostedBrowserWebview native reset", () => {
-  it("replaces only the requested guest and keeps late reset requests away from its replacement", async () => {
-    mocks.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
-    const listeners = new Set<Parameters<NonNullable<DesktopPreviewBridge["onWebviewReset"]>>[0]>();
-    mocks.onWebviewReset.mockImplementation((listener) => {
-      listeners.add(listener);
-      return () => {
-        listeners.delete(listener);
+  it.each(["requested reset", "crash before reset", "crash before registration reply"] as const)(
+    "keeps removal proof through %s",
+    async (scenario) => {
+      vi.useFakeTimers();
+      const firstRegistration = deferred<number>();
+      mocks.registerWebview.mockImplementation(async (_tabId, id) => {
+        if (id === 41 && scenario === "crash before registration reply")
+          return firstRegistration.promise;
+        return id - 40;
+      });
+      mocks.getClientSettings.mockResolvedValue(DEFAULT_CLIENT_SETTINGS);
+      const listeners = new Set<
+        Parameters<NonNullable<DesktopPreviewBridge["onWebviewReset"]>>[0]
+      >();
+      mocks.onWebviewReset.mockImplementation((listener) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      });
+      const guests: Array<EventTarget & { getWebContentsId: () => number }> = [];
+      const threadRef = {
+        environmentId: EnvironmentId.make("host-reset-test"),
+        threadId: ThreadId.make("thread-reset-test"),
       };
-    });
-    const guests: Array<EventTarget & { getWebContentsId: () => number }> = [];
-    const threadRef = {
-      environmentId: EnvironmentId.make("host-reset-test"),
-      threadId: ThreadId.make("thread-reset-test"),
-    };
-    const runtimeTabId = "native-reset-tab";
-    await act(() => {
-      renderer = create(
-        <HostedBrowserWebview
-          threadRef={threadRef}
-          tabId="server-tab"
-          runtimeTabId={runtimeTabId}
-          initialUrl="https://example.com"
-          viewport={FILL_PREVIEW_VIEWPORT}
-          pictureInPicture={false}
-          profileId="work"
-          zoomFactor={1}
-        />,
-        {
-          createNodeMock: (element) => {
-            if (element.type !== "webview")
-              return { scrollLeft: 0, scrollTop: 0, scrollTo: () => undefined };
-            const id = 41 + guests.length;
-            const guest = Object.assign(new EventTarget(), { getWebContentsId: () => id });
-            Object.defineProperty(guest, "isConnected", { get: () => guests.at(-1) === guest });
-            guests.push(guest);
-            return guest;
+      const runtimeTabId = "native-reset-tab";
+      await act(() => {
+        renderer = create(
+          <HostedBrowserWebview
+            threadRef={threadRef}
+            tabId="server-tab"
+            runtimeTabId={runtimeTabId}
+            initialUrl="https://example.com"
+            viewport={FILL_PREVIEW_VIEWPORT}
+            pictureInPicture={false}
+            profileId="work"
+            zoomFactor={1}
+          />,
+          {
+            createNodeMock: (element) => {
+              if (element.type !== "webview")
+                return { scrollLeft: 0, scrollTop: 0, scrollTo: () => undefined };
+              const id = 41 + guests.length;
+              const guest = Object.assign(new EventTarget(), { getWebContentsId: () => id });
+              Object.defineProperty(guest, "isConnected", { get: () => guests.at(-1) === guest });
+              guests.push(guest);
+              return guest;
+            },
           },
-        },
-      );
-    });
-    expect(mocks.registerWebview).toHaveBeenCalledWith(runtimeTabId, 41);
-    const staleListener = [...listeners][0]!;
-    await act(() => {
-      for (const listener of listeners) {
-        listener("another-tab", 41, 1);
-        listener(runtimeTabId, 99, 1);
+        );
+      });
+      expect(mocks.registerWebview).toHaveBeenCalledWith(runtimeTabId, 41);
+      const staleListener = [...listeners][0]!;
+      await act(() => {
+        for (const listener of listeners) {
+          listener("another-tab", 41, 1);
+          listener(runtimeTabId, 99, 1);
+        }
+      });
+      expect(guests).toHaveLength(1);
+      if (scenario !== "requested reset") {
+        await act(async () => {
+          guests[0]!.dispatchEvent(new Event("render-process-gone"));
+          await vi.advanceTimersByTimeAsync(250);
+        });
       }
-    });
-    expect(guests).toHaveLength(1);
-    await act(() => {
-      staleListener(runtimeTabId, 41, 1);
-    });
-    expect(guests).toHaveLength(2);
-    expect(mocks.confirmWebviewRemoved).toHaveBeenCalledExactlyOnceWith(runtimeTabId, 41, 1);
-    expect(mocks.registerWebview).toHaveBeenCalledWith(runtimeTabId, 42);
-    await act(() => {
-      staleListener(runtimeTabId, 41, 1);
-      guests[0]!.dispatchEvent(new Event("dom-ready"));
-      for (const listener of listeners) listener(runtimeTabId, 41, 1);
-    });
-    expect(guests).toHaveLength(2);
-    expect(mocks.registerWebview.mock.calls.filter(([, id]) => id === 41)).toHaveLength(1);
-    expect(mocks.closeTab).not.toHaveBeenCalled();
-  });
+      await act(() => {
+        staleListener(runtimeTabId, 41, 1);
+      });
+      firstRegistration.resolve(1);
+      expect(guests).toHaveLength(2);
+      expect(mocks.confirmWebviewRemoved).toHaveBeenCalledExactlyOnceWith(runtimeTabId, 41, 1);
+      expect(mocks.registerWebview).toHaveBeenCalledWith(runtimeTabId, 42);
+      await act(() => {
+        staleListener(runtimeTabId, 41, 1);
+        guests[0]!.dispatchEvent(new Event("dom-ready"));
+        for (const listener of listeners) listener(runtimeTabId, 41, 1);
+      });
+      expect(guests).toHaveLength(2);
+      expect(mocks.registerWebview.mock.calls.filter(([, id]) => id === 41)).toHaveLength(1);
+      expect(mocks.closeTab).not.toHaveBeenCalled();
+    },
+  );
 });
