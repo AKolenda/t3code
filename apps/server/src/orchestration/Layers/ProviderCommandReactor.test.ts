@@ -783,72 +783,90 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
-  effectIt.effect("keeps steering concurrent and joins a pending send before native stop", () =>
-    Effect.gen(function* () {
-      const firstSent = yield* Deferred.make<void>();
-      const secondSent = yield* Deferred.make<void>();
-      const sendJoined = yield* Deferred.make<void>();
-      const stopped = yield* Deferred.make<void>();
-      const harness = yield* Effect.promise(() =>
-        createHarness({
-          sendTurnEffect: (input) =>
-            input.input === "first"
-              ? Deferred.succeed(firstSent, undefined).pipe(
-                  Effect.andThen(Effect.never),
-                  Effect.ensuring(Deferred.succeed(sendJoined, undefined)),
-                )
-              : Deferred.succeed(secondSent, undefined).pipe(
-                  Effect.as({ threadId: input.threadId, turnId: asTurnId("turn-1") }),
-                ),
-          stopSessionEffect: () =>
-            Effect.gen(function* () {
-              expect(yield* Deferred.isDone(sendJoined)).toBe(true);
-              yield* Deferred.succeed(stopped, undefined);
+  effectIt.effect.each([false, true])(
+    "joins pending admission before Stop with steering %s",
+    (steer) =>
+      Effect.gen(function* () {
+        const firstSent = yield* Deferred.make<void>();
+        const secondSent = yield* Deferred.make<void>();
+        const sendJoined = yield* Deferred.make<void>();
+        const stopped = yield* Deferred.make<void>();
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            sendTurnEffect: (input) =>
+              input.input === "first"
+                ? Deferred.succeed(firstSent, undefined).pipe(
+                    Effect.andThen(Effect.never),
+                    Effect.ensuring(Deferred.succeed(sendJoined, undefined)),
+                  )
+                : Deferred.succeed(secondSent, undefined).pipe(
+                    Effect.as({ threadId: input.threadId, turnId: asTurnId("turn-1") }),
+                  ),
+            stopSessionEffect: () =>
+              Effect.gen(function* () {
+                expect(yield* Deferred.isDone(sendJoined)).toBe(true);
+                yield* Deferred.succeed(stopped, undefined);
+              }),
+          }),
+        );
+        const threadId = ThreadId.make("thread-1");
+        const createdAt = "2026-01-01T00:00:00.000Z";
+        const inputs = steer ? ["first", "second"] : ["first"];
+        for (const text of inputs) {
+          yield* harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(`concurrent-send-${text}`),
+            threadId,
+            message: {
+              messageId: asMessageId(`concurrent-send-${text}`),
+              role: "user",
+              text,
+              attachments: [],
+            },
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            runtimeMode: "approval-required",
+            createdAt,
+          });
+        }
+        yield* Deferred.await(firstSent);
+        if (steer) yield* Deferred.await(secondSent);
+        expect(harness.startSession).toHaveBeenCalledOnce();
+        expect(harness.sendTurn.mock.calls.map(([input]) => input.input)).toEqual(inputs);
+        const events = yield* harness.engine.subscribeDomainEvents;
+        let interrupted = false;
+        yield* events.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "thread.activity-appended" &&
+              event.payload.operationResult?.requestId === "concurrent-send-first" &&
+              event.payload.operationResult.outcome === "interrupted",
+          ),
+          Stream.runForEach(() =>
+            Effect.sync(() => {
+              interrupted = true;
             }),
-        }),
-      );
-      const threadId = ThreadId.make("thread-1");
-      const createdAt = "2026-01-01T00:00:00.000Z";
-      for (const text of ["first", "second"]) {
+          ),
+          Effect.forkChild({ startImmediately: true }),
+        );
+
         yield* harness.engine.dispatch({
-          type: "thread.turn.start",
-          commandId: CommandId.make(`concurrent-send-${text}`),
+          type: "thread.session.stop",
+          commandId: CommandId.make("stop-concurrent-sends"),
           threadId,
-          message: {
-            messageId: asMessageId(`concurrent-send-${text}`),
-            role: "user",
-            text,
-            attachments: [],
-          },
-          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
-          runtimeMode: "approval-required",
           createdAt,
         });
-      }
-      yield* Deferred.await(firstSent);
-      yield* Deferred.await(secondSent);
-      expect(harness.startSession).toHaveBeenCalledOnce();
-      expect(harness.sendTurn.mock.calls.map(([input]) => input.input)).toEqual([
-        "first",
-        "second",
-      ]);
-
-      yield* harness.engine.dispatch({
-        type: "thread.session.stop",
-        commandId: CommandId.make("stop-concurrent-sends"),
-        threadId,
-        createdAt,
-      });
-      yield* Deferred.await(stopped);
-      yield* Effect.promise(harness.drain);
-      const thread = (yield* Effect.promise(harness.readModel)).threads.find(
-        (entry) => entry.id === threadId,
-      );
-      expect(thread?.session?.status).toBe("stopped");
-      expect(
-        thread?.activities.some((activity) => activity.summary === "Queued message cancelled"),
-      ).toBe(false);
-    }),
+        yield* Deferred.await(stopped);
+        yield* Effect.promise(harness.drain);
+        expect(interrupted).toBe(true);
+        const thread = (yield* Effect.promise(harness.readModel)).threads.find(
+          (entry) => entry.id === threadId,
+        );
+        expect(thread?.session?.status).toBe("stopped");
+        expect(thread?.pendingOperation).toBeNull();
+        expect(
+          thread?.activities.some((activity) => activity.summary === "Queued message cancelled"),
+        ).toBe(false);
+      }),
   );
 
   effectIt.effect("cancels compaction preparation before stopping its previous session", () =>
@@ -1328,12 +1346,17 @@ describe("ProviderCommandReactor", () => {
   effectIt.effect("starts a turn and generates its title without loading old message bodies", () =>
     Effect.gen(function* () {
       const started = yield* Deferred.make<void>();
+      const sent = yield* Deferred.make<void>();
       const titleGenerated = yield* Deferred.make<void>();
       const harness = yield* Effect.promise(() =>
         createHarness({
           unreadableHistory: true,
           startSessionEffect: (session) =>
             Deferred.succeed(started, undefined).pipe(Effect.as(session)),
+          sendTurnEffect: (input) =>
+            Deferred.succeed(sent, undefined).pipe(
+              Effect.as({ threadId: input.threadId, turnId: asTurnId("turn-1") }),
+            ),
         }),
       );
       harness.generateThreadTitle.mockReturnValue(
@@ -1356,6 +1379,7 @@ describe("ProviderCommandReactor", () => {
       });
       yield* Deferred.await(started);
       yield* Deferred.await(titleGenerated);
+      yield* Deferred.await(sent);
       yield* Effect.promise(() => harness.drain());
 
       expect(harness.sendTurn).toHaveBeenCalledWith(

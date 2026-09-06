@@ -307,7 +307,6 @@ describe("CheckpointReactor", () => {
     | CheckpointReactor
     | TurnCheckpointCapture.TurnCheckpointCapture
     | CheckpointStore.CheckpointStore
-    | TurnCheckpointCapture.TurnCheckpointCapture
     | ProjectionSnapshotQuery
     | RuntimeReceiptBus.RuntimeReceiptBus
     | SqlClient.SqlClient,

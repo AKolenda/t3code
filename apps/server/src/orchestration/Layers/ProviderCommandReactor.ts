@@ -1665,7 +1665,10 @@ const make = Effect.gen(function* () {
           ),
           Effect.asVoid,
         );
-      }).pipe(Effect.catchCause(recoverTurnStartFailure)),
+      }).pipe(
+        Effect.catchCause(recoverTurnStartFailure),
+        Effect.onInterrupt(() => recoverTurnStartFailure(Cause.interrupt())),
+      ),
     );
   });
 
