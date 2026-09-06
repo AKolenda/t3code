@@ -1633,7 +1633,9 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           stopKind === "external Stop"
             ? yield* OpenCodeAdapter
             : yield* makeOpenCodeAdapter(
-                Schema.decodeSync(OpenCodeSettings)({ binaryPath: "fake-opencode" }),
+                yield* Schema.decodeUnknownEffect(OpenCodeSettings)({
+                  binaryPath: "fake-opencode",
+                }),
               ).pipe(
                 Effect.provideService(OpenCodeRuntime, {
                   ...OpenCodeRuntimeTestDouble,
