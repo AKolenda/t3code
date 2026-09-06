@@ -146,6 +146,21 @@ describe("applyThreadDetailEvent", () => {
       });
       session("running");
       expect(thread.latestTurn?.sourceProposedPlan?.planId).toBe("plan-a");
+      apply({
+        ...fields,
+        type: "thread.message-sent",
+        payload: {
+          threadId: thread.id,
+          messageId: MessageId.make("assistant-reply"),
+          role: "assistant",
+          text: "Working",
+          turnId: TurnId.make("turn-a"),
+          streaming: true,
+          createdAt: fields.occurredAt,
+          updatedAt: fields.occurredAt,
+        },
+      });
+      expect(thread.latestTurn?.sourceProposedPlan?.planId).toBe("plan-a");
 
       thread = { ...baseThread, pendingOperation: null };
       start("a");
@@ -154,6 +169,56 @@ describe("applyThreadDetailEvent", () => {
       accept("a");
       session("running");
       expect(thread.latestTurn?.requestId).toBe("b");
+      expect(thread.pendingOperation).toBeNull();
+      thread = { ...baseThread, pendingOperation: null };
+      start("a");
+      start("b");
+      accept("a");
+      accept("b");
+      session("running");
+      expect(thread.latestTurn?.requestId).toBe("a");
+      expect(thread.pendingOperation).toBeNull();
+      // Named completions can recover a turn whose start event was lost.
+      thread = { ...baseThread, pendingOperation: null };
+      start("a");
+      accept("a");
+      if (beforeStart) {
+        apply({
+          ...fields,
+          type: "thread.message-sent",
+          payload: {
+            threadId: thread.id,
+            messageId: MessageId.make("recovered-reply"),
+            role: "assistant",
+            text: "Done",
+            turnId: TurnId.make("turn-a"),
+            streaming: false,
+            createdAt: fields.occurredAt,
+            updatedAt: fields.occurredAt,
+          },
+        });
+        expect(thread.latestTurn?.requestId).toBe("a");
+        expect(thread.latestTurn?.sourceProposedPlan?.planId).toBe("plan-a");
+      }
+      apply({
+        ...fields,
+        type: "thread.turn-diff-completed",
+        payload: {
+          threadId: thread.id,
+          turnId: TurnId.make("turn-a"),
+          checkpointRef: CheckpointRef.make("refs/t3/checkpoints/recovered"),
+          checkpointTurnCount: 1,
+          status: "ready",
+          files: [],
+          assistantMessageId: null,
+          completedAt: fields.occurredAt,
+        },
+      });
+      expect(thread.latestTurn).toMatchObject({
+        requestId: "a",
+        state: "completed",
+        sourceProposedPlan: { planId: "plan-a" },
+      });
     },
   );
   it("tracks compaction by request identity without message history or timestamps", () => {

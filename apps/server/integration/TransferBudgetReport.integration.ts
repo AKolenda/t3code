@@ -50,7 +50,8 @@ interface ProviderTransferBudget {
 // orders of magnitude. The CI report preserves exact values for review.
 const TRANSFER_BUDGET = {
   totalWireBytes: 15_500,
-  threadSnapshotWireBytes: 7_500,
+  // Ten history turns include request bindings for send acceptance.
+  threadSnapshotWireBytes: 8_000,
   measuredTurnWebSocketWireBytes: 8_000,
   measuredTurnWebSocketDecodedBytes: 68_000,
   measuredTurnWebSocketMessages: 21,

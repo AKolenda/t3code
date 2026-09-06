@@ -16,7 +16,6 @@ import {
   isImportedAgentSessionMessageId,
   getThreadPendingOperation,
   pendingOperationAfterEvent,
-  acceptedRequestIdForEvent,
   bindAcceptedTurn,
   bindTurnFromActivities,
   turnStartAcceptance,
@@ -370,33 +369,41 @@ export function applyThreadDetailEvent(
         event.payload.role === "assistant" &&
           event.payload.turnId !== null &&
           (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
-          ? {
-              turnId: event.payload.turnId,
-              ...(thread.latestTurn?.turnId === event.payload.turnId
-                ? { requestId: thread.latestTurn.requestId }
-                : {}),
-              state: settlesTurn
-                ? thread.latestTurn?.state === "interrupted"
-                  ? "interrupted"
-                  : thread.latestTurn?.state === "error"
-                    ? "error"
-                    : "completed"
-                : "running",
-              requestedAt:
-                thread.latestTurn?.turnId === event.payload.turnId
-                  ? thread.latestTurn.requestedAt
-                  : event.payload.createdAt,
-              startedAt:
-                thread.latestTurn?.turnId === event.payload.turnId
-                  ? (thread.latestTurn.startedAt ?? event.payload.createdAt)
-                  : event.payload.createdAt,
-              completedAt: settlesTurn
-                ? event.payload.updatedAt
-                : thread.latestTurn?.turnId === event.payload.turnId
-                  ? (thread.latestTurn.completedAt ?? null)
-                  : null,
-              assistantMessageId: event.payload.messageId,
-            }
+          ? bindTurnFromActivities(
+              {
+                turnId: event.payload.turnId,
+                ...(thread.latestTurn?.turnId === event.payload.turnId
+                  ? {
+                      requestId: thread.latestTurn.requestId,
+                      ...(thread.latestTurn.sourceProposedPlan
+                        ? { sourceProposedPlan: thread.latestTurn.sourceProposedPlan }
+                        : {}),
+                    }
+                  : {}),
+                state: settlesTurn
+                  ? thread.latestTurn?.state === "interrupted"
+                    ? "interrupted"
+                    : thread.latestTurn?.state === "error"
+                      ? "error"
+                      : "completed"
+                  : "running",
+                requestedAt:
+                  thread.latestTurn?.turnId === event.payload.turnId
+                    ? thread.latestTurn.requestedAt
+                    : event.payload.createdAt,
+                startedAt:
+                  thread.latestTurn?.turnId === event.payload.turnId
+                    ? (thread.latestTurn.startedAt ?? event.payload.createdAt)
+                    : event.payload.createdAt,
+                completedAt: settlesTurn
+                  ? event.payload.updatedAt
+                  : thread.latestTurn?.turnId === event.payload.turnId
+                    ? (thread.latestTurn.completedAt ?? null)
+                    : null,
+                assistantMessageId: event.payload.messageId,
+              },
+              thread.activities,
+            )
           : thread.latestTurn,
       );
 
@@ -483,12 +490,7 @@ export function applyThreadDetailEvent(
         thread: {
           ...thread,
           session: event.payload.session,
-          pendingOperation: pendingOperationAfterEvent(
-            getThreadPendingOperation(thread),
-            event,
-            undefined,
-            acceptedRequestIdForEvent(thread, event),
-          ),
+          pendingOperation: pendingOperationAfterEvent(getThreadPendingOperation(thread), event),
           latestTurn,
           updatedAt: event.occurredAt,
         },
@@ -562,20 +564,28 @@ export function applyThreadDetailEvent(
       const latestTurn =
         !diffTurnStillRunning &&
         (thread.latestTurn === null || thread.latestTurn.turnId === event.payload.turnId)
-          ? {
-              turnId: event.payload.turnId,
-              ...(thread.latestTurn?.turnId === event.payload.turnId
-                ? { requestId: thread.latestTurn.requestId }
-                : {}),
-              state:
-                thread.latestTurn?.state === "interrupted"
-                  ? "interrupted"
-                  : checkpointStatusToTurnState(event.payload.status),
-              requestedAt: thread.latestTurn?.requestedAt ?? event.payload.completedAt,
-              startedAt: thread.latestTurn?.startedAt ?? event.payload.completedAt,
-              completedAt: event.payload.completedAt,
-              assistantMessageId: event.payload.assistantMessageId,
-            }
+          ? bindTurnFromActivities(
+              {
+                turnId: event.payload.turnId,
+                ...(thread.latestTurn?.turnId === event.payload.turnId
+                  ? {
+                      requestId: thread.latestTurn.requestId,
+                      ...(thread.latestTurn.sourceProposedPlan
+                        ? { sourceProposedPlan: thread.latestTurn.sourceProposedPlan }
+                        : {}),
+                    }
+                  : {}),
+                state:
+                  thread.latestTurn?.state === "interrupted"
+                    ? "interrupted"
+                    : checkpointStatusToTurnState(event.payload.status),
+                requestedAt: thread.latestTurn?.requestedAt ?? event.payload.completedAt,
+                startedAt: thread.latestTurn?.startedAt ?? event.payload.completedAt,
+                completedAt: event.payload.completedAt,
+                assistantMessageId: event.payload.assistantMessageId,
+              },
+              thread.activities,
+            )
           : thread.latestTurn;
 
       return {
@@ -645,12 +655,7 @@ export function applyThreadDetailEvent(
         event.payload.activity.kind === "provider.turn.start.accepted"
           ? { ...event.payload.activity, sequence: event.sequence }
           : event.payload.activity;
-      const pendingOperation = pendingOperationAfterEvent(
-        getThreadPendingOperation(thread),
-        event,
-        undefined,
-        acceptedRequestIdForEvent(thread, event),
-      );
+      const pendingOperation = pendingOperationAfterEvent(getThreadPendingOperation(thread), event);
       const latestTurn = bindAcceptedTurn(thread.latestTurn, turnStartAcceptance(activity));
       // A resolvable context-window update supersedes earlier resolvable ones
       // for the same turn: consumers only read the latest value (walking the

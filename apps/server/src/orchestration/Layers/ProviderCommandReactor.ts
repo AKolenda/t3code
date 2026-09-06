@@ -399,6 +399,7 @@ const make = Effect.gen(function* () {
     readonly threadId: ThreadId;
     readonly session: OrchestrationSession;
     readonly operationResult?: OrchestrationOperationResult | null;
+    readonly expectedPendingRequestId?: MessageId;
     readonly createdAt: string;
   }) =>
     serverCommandId("provider-session-set").pipe(
@@ -409,6 +410,9 @@ const make = Effect.gen(function* () {
           threadId: input.threadId,
           session: input.session,
           operationResult: input.operationResult ?? null,
+          ...(input.expectedPendingRequestId
+            ? { expectedPendingRequestId: input.expectedPendingRequestId }
+            : {}),
           createdAt: input.createdAt,
         }),
       ),
@@ -425,11 +429,12 @@ const make = Effect.gen(function* () {
     if (!thread) {
       return;
     }
-    if (thread.pendingOperation && thread.pendingOperation.requestId !== input.requestId) return;
+    if (thread.pendingOperation?.requestId !== input.requestId) return;
     const session = thread.session;
     yield* setThreadSession({
       threadId: input.threadId,
       operationResult: { requestId: input.requestId, outcome: "failed" },
+      expectedPendingRequestId: input.requestId,
       session: {
         ...(session ?? {
           threadId: input.threadId,

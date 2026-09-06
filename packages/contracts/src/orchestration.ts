@@ -1135,6 +1135,7 @@ const ThreadSessionSetCommand = Schema.Struct({
   threadId: ThreadId,
   session: OrchestrationSession,
   operationResult: Schema.optional(Schema.NullOr(OrchestrationOperationResult)),
+  expectedPendingRequestId: Schema.optional(MessageId),
   createdAt: IsoDateTime,
 });
 

@@ -4309,7 +4309,13 @@ engineLayer("pending operation facts", (it) => {
               summary: "Provider accepted the request",
               turnId: TurnId.make(turnId),
               createdAt: now,
-              payload: { requestId: id, turnId, requestedAt: now, timelineBypass: true },
+              payload: {
+                requestId: id,
+                turnId,
+                requestedAt: now,
+                timelineBypass: true,
+                sourceProposedPlan: { threadId, planId: `plan-${id}` },
+              },
             },
             createdAt: now,
           });
@@ -4328,8 +4334,29 @@ engineLayer("pending operation facts", (it) => {
           assert.equal(detail.latestTurn?.requestId, requestId);
           assert.equal(replay.threads[0]?.latestTurn?.requestId, requestId);
           assert.equal(replay.threads[0]?.latestTurn?.state, detail.latestTurn?.state);
+          assert.deepEqual(
+            replay.threads[0]?.latestTurn?.sourceProposedPlan,
+            detail.latestTurn?.sourceProposedPlan,
+          );
+          if (requestId !== undefined)
+            assert.equal(detail.latestTurn?.sourceProposedPlan?.planId, `plan-${requestId}`);
         });
 
+        yield* start("lost-start");
+        yield* accept("lost-start", "recovered-turn");
+        yield* engine.dispatch({
+          type: "thread.turn.diff.complete",
+          commandId: CommandId.make("recovered-checkpoint"),
+          threadId,
+          turnId: TurnId.make("recovered-turn"),
+          checkpointRef: CheckpointRef.make("refs/t3/checkpoints/recovered"),
+          checkpointTurnCount: 1,
+          status: "ready",
+          files: [],
+          completedAt: now,
+          createdAt: now,
+        });
+        yield* check(null, "lost-start");
         yield* start("a");
         yield* start("b");
         yield* session("running", "turn-a");
@@ -4348,7 +4375,7 @@ engineLayer("pending operation facts", (it) => {
 
         // B's response arrives before turn.started. No public running state is invented.
         yield* accept("b", "turn-b");
-        yield* check("b", "a");
+        yield* check(null, "a");
         const waiting =
           yield* sql`SELECT state, started_at FROM projection_turns WHERE thread_id = ${threadId} AND turn_id = 'turn-b'`;
         assert.deepEqual(waiting, [{ state: "pending", started_at: null }]);
@@ -4362,6 +4389,7 @@ engineLayer("pending operation facts", (it) => {
         const bindings =
           yield* sql`SELECT turn_id, pending_message_id FROM projection_turns WHERE thread_id = ${threadId} ORDER BY turn_id`;
         assert.deepEqual(bindings, [
+          { turn_id: "recovered-turn", pending_message_id: "lost-start" },
           { turn_id: "turn-a", pending_message_id: "a" },
           { turn_id: "turn-b", pending_message_id: "b" },
         ]);
@@ -4379,6 +4407,12 @@ engineLayer("pending operation facts", (it) => {
         );
         yield* session("running", "turn-c");
         yield* check(null, "d");
+        yield* start("e");
+        yield* start("f");
+        yield* accept("e", "turn-e");
+        yield* accept("f", "turn-e");
+        yield* session("running", "turn-e");
+        yield* check(null, "e");
       }),
   );
   it.effect("keeps SQL snapshots and event replay consistent for delayed compaction results", () =>

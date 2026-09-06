@@ -4,7 +4,6 @@ import {
   isImportedAgentSessionMessageId,
   getThreadPendingOperation,
   pendingOperationAfterEvent,
-  acceptedRequestIdForEvent,
   bindAcceptedTurn,
   bindTurnFromActivities,
   turnStartAcceptance,
@@ -676,12 +675,7 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             session,
-            pendingOperation: pendingOperationAfterEvent(
-              getThreadPendingOperation(thread),
-              event,
-              undefined,
-              acceptedRequestIdForEvent(thread, event),
-            ),
+            pendingOperation: pendingOperationAfterEvent(getThreadPendingOperation(thread), event),
             latestTurn: bindTurnFromActivities(
               session.status === "running" && session.activeTurnId !== null
                 ? {
@@ -821,27 +815,35 @@ export function projectEvent(
             checkpoints,
             latestTurn: turnStillRunning
               ? thread.latestTurn
-              : {
-                  turnId: payload.turnId,
-                  ...(thread.latestTurn?.turnId === payload.turnId
-                    ? { requestId: thread.latestTurn.requestId }
-                    : {}),
-                  state:
-                    thread.latestTurn?.turnId === payload.turnId &&
-                    thread.latestTurn.state === "interrupted"
-                      ? "interrupted"
-                      : checkpointStatusToLatestTurnState(payload.status),
-                  requestedAt:
-                    thread.latestTurn?.turnId === payload.turnId
-                      ? thread.latestTurn.requestedAt
-                      : payload.completedAt,
-                  startedAt:
-                    thread.latestTurn?.turnId === payload.turnId
-                      ? (thread.latestTurn.startedAt ?? payload.completedAt)
-                      : payload.completedAt,
-                  completedAt: payload.completedAt,
-                  assistantMessageId: payload.assistantMessageId,
-                },
+              : bindTurnFromActivities(
+                  {
+                    turnId: payload.turnId,
+                    ...(thread.latestTurn?.turnId === payload.turnId
+                      ? {
+                          requestId: thread.latestTurn.requestId,
+                          ...(thread.latestTurn.sourceProposedPlan
+                            ? { sourceProposedPlan: thread.latestTurn.sourceProposedPlan }
+                            : {}),
+                        }
+                      : {}),
+                    state:
+                      thread.latestTurn?.turnId === payload.turnId &&
+                      thread.latestTurn.state === "interrupted"
+                        ? "interrupted"
+                        : checkpointStatusToLatestTurnState(payload.status),
+                    requestedAt:
+                      thread.latestTurn?.turnId === payload.turnId
+                        ? thread.latestTurn.requestedAt
+                        : payload.completedAt,
+                    startedAt:
+                      thread.latestTurn?.turnId === payload.turnId
+                        ? (thread.latestTurn.startedAt ?? payload.completedAt)
+                        : payload.completedAt,
+                    completedAt: payload.completedAt,
+                    assistantMessageId: payload.assistantMessageId,
+                  },
+                  thread.activities,
+                ),
             updatedAt: event.occurredAt,
           }),
         };
@@ -933,8 +935,6 @@ export function projectEvent(
               pendingOperation: pendingOperationAfterEvent(
                 getThreadPendingOperation(thread),
                 event,
-                undefined,
-                acceptedRequestIdForEvent(thread, event),
               ),
               updatedAt: event.occurredAt,
             }),

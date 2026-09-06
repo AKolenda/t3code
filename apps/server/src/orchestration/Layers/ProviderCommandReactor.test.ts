@@ -180,6 +180,7 @@ describe("ProviderCommandReactor", () => {
     readonly titleRegenerationBeforeStart?: "one" | "two";
     readonly serverActivation?: Effect.Effect<void>;
     readonly beforeReadySessionDispatch?: () => Effect.Effect<void>;
+    readonly beforeErrorSessionDispatch?: () => Effect.Effect<void>;
     readonly compactThreadEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly interruptTurnEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
     readonly stopSessionEffect?: () => Effect.Effect<void, ProviderAdapterRequestError>;
@@ -446,7 +447,9 @@ describe("ProviderCommandReactor", () => {
             return (
               command.type === "thread.session.set" && command.session.status === "ready"
                 ? (input?.beforeReadySessionDispatch?.() ?? Effect.void)
-                : Effect.void
+                : command.type === "thread.session.set" && command.session.status === "error"
+                  ? (input?.beforeErrorSessionDispatch?.() ?? Effect.void)
+                  : Effect.void
             ).pipe(Effect.andThen(engine.dispatch(command)));
           },
           get streamDomainEvents() {
@@ -1156,7 +1159,7 @@ describe("ProviderCommandReactor", () => {
         });
         expect(
           (yield* Effect.promise(() => harness.readModel())).threads[0]?.pendingOperation,
-        ).toEqual(outcome === "accepted" ? { kind: "turn", requestId: "correlated-send" } : null);
+        ).toBeNull();
         if (outcome === "accepted") {
           yield* harness.engine.dispatch({
             type: "thread.session.set",
@@ -1350,14 +1353,30 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
-  effectIt.effect.each([false, true])(
-    "ignores older send failure after newer acceptance, with start: %s",
-    (secondStarted) =>
+  effectIt.effect.each([
+    { secondStarted: false, pauseErrorDispatch: false },
+    { secondStarted: true, pauseErrorDispatch: false },
+    { secondStarted: false, pauseErrorDispatch: true },
+    { secondStarted: true, pauseErrorDispatch: true },
+  ])(
+    "ignores older send failure after newer acceptance, with start $secondStarted and paused dispatch $pauseErrorDispatch",
+    ({ secondStarted, pauseErrorDispatch }) =>
       Effect.gen(function* () {
         const firstStarted = yield* Deferred.make<Fiber.Fiber<unknown, unknown>>();
         const failFirst = yield* Deferred.make<void>();
         const secondSent = yield* Deferred.make<void>();
-        const harness = yield* Effect.promise(() => createHarness());
+        const errorDispatchPaused = yield* Deferred.make<void>();
+        const releaseErrorDispatch = yield* Deferred.make<void>();
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            beforeErrorSessionDispatch: () =>
+              pauseErrorDispatch
+                ? Deferred.succeed(errorDispatchPaused, undefined).pipe(
+                    Effect.andThen(Deferred.await(releaseErrorDispatch)),
+                  )
+                : Effect.void,
+          }),
+        );
         harness.sendTurn
           .mockImplementationOnce(() =>
             Effect.gen(function* () {
@@ -1380,6 +1399,10 @@ describe("ProviderCommandReactor", () => {
           );
         yield* dispatchTestTurn(harness.engine, "first-send", "first");
         const firstFiber = yield* Deferred.await(firstStarted);
+        if (pauseErrorDispatch) {
+          yield* Deferred.succeed(failFirst, undefined);
+          yield* Deferred.await(errorDispatchPaused);
+        }
         const events = yield* harness.engine.subscribeDomainEvents;
         const accepted = yield* events.pipe(
           Stream.filter(
@@ -1412,12 +1435,11 @@ describe("ProviderCommandReactor", () => {
             createdAt: "2026-01-01T00:00:00.000Z",
           });
         yield* Deferred.succeed(failFirst, undefined);
+        yield* Deferred.succeed(releaseErrorDispatch, undefined);
         yield* Fiber.await(firstFiber);
         const thread = (yield* Effect.promise(() => harness.readModel())).threads[0];
         expect(thread?.latestTurn?.requestId).toBe(secondStarted ? "second-send" : undefined);
-        expect(thread?.pendingOperation).toEqual(
-          secondStarted ? null : { kind: "turn", requestId: "second-send" },
-        );
+        expect(thread?.pendingOperation).toBeNull();
         expect(thread?.session).toMatchObject({
           status: secondStarted ? "running" : "starting",
           activeTurnId: secondStarted ? "second-turn" : null,

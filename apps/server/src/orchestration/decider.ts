@@ -1226,6 +1226,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      if (
+        command.expectedPendingRequestId !== undefined &&
+        thread.pendingOperation?.requestId !== command.expectedPendingRequestId
+      ) {
+        return yield* new OrchestrationOperationSupersededError({
+          requestId: command.expectedPendingRequestId,
+          currentRequestId: thread.pendingOperation?.requestId ?? null,
+        });
+      }
       const result = command.operationResult;
       if (result != null) {
         const currentRequestId =
