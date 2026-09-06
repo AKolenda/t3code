@@ -1835,6 +1835,7 @@ describe("CheckpointReactor", () => {
     );
 
     await waitForEvent(harness.engine, (event) => event.type === "thread.reverted");
+    await harness.drain();
     const thread = await waitForThread(
       harness.readModel,
       (entry) => entry.checkpoints.length === 1,
