@@ -343,11 +343,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const checkpointCapture = yield* TurnCheckpointCapture.TurnCheckpointCapture;
   const pendingSends = new Map<ThreadId, Set<Deferred.Deferred<Fiber.Fiber<unknown, unknown>>>>();
   const blockedSends = new Map<ThreadId, Set<symbol>>();
+  let stoppingAll = false;
 
   const withPendingSend = <A, E, R>(threadId: ThreadId, effect: Effect.Effect<A, E, R>) =>
     Effect.acquireUseRelease(
       Effect.gen(function* () {
-        if (blockedSends.has(threadId)) {
+        if (stoppingAll || blockedSends.has(threadId)) {
           return yield* toValidationError(
             "ProviderService.sendTurn",
             "This thread is stopping. Retry after it stops.",
@@ -2202,6 +2203,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   );
 
   const runStopAll = Effect.fn("runStopAll")(function* () {
+    stoppingAll = true;
     const continueAfterRestart = yield* serverSettings.getSettings.pipe(
       Effect.map((settings) => settings.continueThreadsAfterServerUpdate),
       Effect.orElseSucceed(() => false),
@@ -2241,6 +2243,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }),
       ),
     ).pipe(Effect.asVoid);
+    const current = yield* Effect.fiber;
+    yield* Effect.forEach(
+      [...pendingSends.values()].flatMap((sends) => [...sends]),
+      (ready) =>
+        Deferred.await(ready).pipe(
+          Effect.flatMap((fiber) => (fiber === current ? Effect.void : Fiber.interrupt(fiber))),
+        ),
+      { discard: true, concurrency: "unbounded" },
+    );
     yield* Effect.forEach(currentAdapters, ([, adapter]) => adapter.stopAll()).pipe(Effect.asVoid);
     yield* McpSessionRegistry.revokeAllActiveMcpCredentials();
     McpProviderSession.clearAllMcpProviderSessions();

@@ -391,7 +391,10 @@ const make = Effect.gen(function* () {
 
   // Capture the files left by a completed or interrupted turn.
   const captureCheckpointFromTurnCompletion = Effect.fn("captureCheckpointFromTurnCompletion")(
-    function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" | "turn.aborted" }>) {
+    function* (
+      event: Extract<ProviderRuntimeEvent, { type: "turn.completed" | "turn.aborted" }>,
+      ownsNativeTurn: boolean,
+    ) {
       const turnId = toTurnId(event.turnId);
       if (!turnId) {
         return "skipped" as const;
@@ -403,7 +406,11 @@ const make = Effect.gen(function* () {
       }
 
       // When a primary turn is active, only that turn may produce completion checkpoints.
-      if (thread.session?.activeTurnId && !sameId(thread.session.activeTurnId, turnId)) {
+      if (
+        !ownsNativeTurn &&
+        thread.session?.activeTurnId &&
+        !sameId(thread.session.activeTurnId, turnId)
+      ) {
         return "skipped" as const;
       }
 
@@ -981,7 +988,8 @@ const make = Effect.gen(function* () {
 
   const processTurnCompletion = Effect.fn("processTurnCompletion")(
     function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" | "turn.aborted" }>) {
-      if (!(yield* checkpointCapture.shouldCapture(event))) return "skipped" as const;
+      const nativeCaptureReady = yield* checkpointCapture.nativeCaptureReady(event);
+      if (nativeCaptureReady === false) return "skipped" as const;
       const turnId = toTurnId(event.turnId);
       const thread = yield* resolveThreadDetail(event.threadId);
       const startedTurnId = startedTurns.get(event.threadId);
@@ -1002,12 +1010,13 @@ const make = Effect.gen(function* () {
       }
       if (
         event.type === "turn.aborted" &&
+        nativeCaptureReady !== true &&
         !isTrackedTurn &&
         !sameId(thread?.session?.activeTurnId, turnId)
       ) {
         return "skipped" as const;
       }
-      return yield* captureCheckpointFromTurnCompletion(event).pipe(
+      return yield* captureCheckpointFromTurnCompletion(event, nativeCaptureReady === true).pipe(
         Effect.catch((error) =>
           Effect.flatMap(nowIso, (createdAt) =>
             appendCaptureFailureActivity({

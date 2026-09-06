@@ -670,6 +670,59 @@ describe("CheckpointReactor", () => {
     }),
   );
 
+  effectIt.effect.each([null, TurnId.make("stale-primary-turn")])(
+    "captures a confirmed native stop without a started event and active turn %s",
+    (activeTurnId) =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() =>
+          createHarness({ seedFilesystemCheckpoints: false }),
+        );
+        const threadId = ThreadId.make("thread-1");
+        const turnId = TurnId.make("accepted-before-started");
+        const providerInstanceId = ProviderInstanceId.make("codex");
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("accepted-no-start-session"),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            providerInstanceId,
+            runtimeMode: "approval-required",
+            activeTurnId,
+            lastError: null,
+            updatedAt: "2026-01-01T00:00:00.000Z",
+          },
+          createdAt: "2026-01-01T00:00:00.000Z",
+        });
+        const submission = yield* harness.captures.trackSubmission(threadId, providerInstanceId);
+        yield* submission.beforeSubmit(turnId);
+        yield* submission.accept(turnId);
+        NodeFS.writeFileSync(
+          NodePath.join(harness.cwd, "README.md"),
+          "native edits before confirmed stop\n",
+        );
+        yield* submission.nativeStopped;
+        const stopped = {
+          type: "turn.aborted" as const,
+          eventId: EventId.make("accepted-no-start-stopped"),
+          provider: ProviderDriverKind.make("codex"),
+          providerInstanceId,
+          threadId,
+          turnId,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          payload: { reason: "Native process exited." },
+        };
+        yield* harness.captures.observe(stopped);
+        harness.provider.emit(stopped);
+        yield* harness.captures.awaitNativeCapture(threadId);
+        expect(
+          gitShowFileAtRef(harness.cwd, checkpointRefForThreadTurn(threadId, 1), "README.md"),
+        ).toBe("native edits before confirmed stop\n");
+      }),
+  );
+
   effectIt.effect("captures baseline and large turn summaries before completion receipts", () =>
     Effect.gen(function* () {
       const harness = yield* Effect.promise(() =>

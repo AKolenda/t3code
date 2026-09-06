@@ -173,7 +173,7 @@ it.effect.each(["captured", "skipped", "failed"] as const)(
       assert.equal(waiting.pollUnsafe(), undefined);
       yield* submission.nativeCompleted(nativeTerminal.turnId);
       yield* captures.observe(nativeTerminal);
-      assert.equal(yield* captures.shouldCapture(nativeTerminal), true);
+      assert.equal(yield* captures.nativeCaptureReady(nativeTerminal), true);
       assert.equal(waiting.pollUnsafe(), undefined);
       yield* captures.complete(nativeTerminal, outcome);
       yield* Fiber.join(waiting);
@@ -187,7 +187,7 @@ it.effect("does not reuse a synthetic failure capture after native completion", 
     const submission = yield* captures.trackSubmission(threadId, instanceId);
     yield* submission.beforeSubmit(nativeTerminal.turnId);
     yield* captures.observe(nativeTerminal);
-    assert.equal(yield* captures.shouldCapture(nativeTerminal), false);
+    assert.equal(yield* captures.nativeCaptureReady(nativeTerminal), false);
     yield* captures.complete(nativeTerminal, "skipped");
     yield* submission.nativeCompleted(nativeTerminal.turnId);
     const waiting = yield* captures.awaitNativeCapture(threadId).pipe(Effect.forkChild);
@@ -195,7 +195,7 @@ it.effect("does not reuse a synthetic failure capture after native completion", 
     assert.equal(waiting.pollUnsafe(), undefined);
     const confirmed = { ...nativeTerminal, eventId: EventId.make("confirmed") };
     yield* captures.observe(confirmed);
-    assert.equal(yield* captures.shouldCapture(confirmed), true);
+    assert.equal(yield* captures.nativeCaptureReady(confirmed), true);
     yield* captures.complete(confirmed, "captured");
     yield* Fiber.join(waiting);
   }),
@@ -228,12 +228,12 @@ it.effect("keeps each same-turn steering request until its native reply and fina
     yield* steer.beforeSubmit(nativeTerminal.turnId);
     yield* first.nativeCompleted(nativeTerminal.turnId);
     yield* captures.observe(nativeTerminal);
-    assert.equal(yield* captures.shouldCapture(nativeTerminal), false);
+    assert.equal(yield* captures.nativeCaptureReady(nativeTerminal), false);
     yield* captures.complete(nativeTerminal, "skipped");
     yield* steer.nativeCompleted(nativeTerminal.turnId);
     const confirmed = { ...nativeTerminal, eventId: EventId.make("steering-final") };
     yield* captures.observe(confirmed);
-    assert.equal(yield* captures.shouldCapture(confirmed), true);
+    assert.equal(yield* captures.nativeCaptureReady(confirmed), true);
     yield* captures.complete(confirmed, "captured");
     yield* captures.awaitNativeCapture(threadId);
   }),

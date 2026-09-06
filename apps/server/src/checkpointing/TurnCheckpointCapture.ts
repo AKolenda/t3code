@@ -79,7 +79,7 @@ export class TurnCheckpointCapture extends Context.Service<
       instanceId: ProviderInstanceId,
     ) => Effect.Effect<TurnSubmission>;
     readonly awaitNativeCapture: (threadId: ThreadId) => Effect.Effect<void>;
-    readonly shouldCapture: (event: TerminalEvent) => Effect.Effect<boolean>;
+    readonly nativeCaptureReady: (event: TerminalEvent) => Effect.Effect<boolean | undefined>;
   }
 >()("t3/checkpointing/TurnCheckpointCapture") {}
 
@@ -264,7 +264,13 @@ export function make(): TurnCheckpointCapture["Service"] {
       ),
     awaitCapture,
     awaitNativeCapture,
-    shouldCapture: (event) => Effect.sync(() => nativeCaptures.get(event.eventId)?.allowed ?? true),
+    nativeCaptureReady: (event) =>
+      Effect.sync(() => {
+        const capture = nativeCaptures.get(event.eventId);
+        return capture !== undefined && capture.submissions.length > 0
+          ? capture.allowed
+          : undefined;
+      }),
     trackSubmission: (threadId, instanceId) =>
       Effect.sync(() => {
         let submission: NativeSubmission | undefined;

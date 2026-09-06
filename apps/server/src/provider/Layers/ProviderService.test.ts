@@ -574,14 +574,50 @@ for (const [enabled, completed] of [
           });
         }
         const markers: unknown[] = [];
+        const captures = yield* TurnCheckpointCapture.TurnCheckpointCapture.pipe(
+          Effect.provide(services),
+        );
+        const pendingTerminal = {
+          type: "turn.completed" as const,
+          eventId: asEventId("shutdown-pending-terminal"),
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          turnId,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          payload: { state: "completed" as const },
+        };
+        yield* captures.observe(pendingTerminal);
+        const sendPreparing = yield* Deferred.make<void>();
+        let parkedSendJoined = false;
+        codex.sendTurn.mockImplementationOnce((input, hooks) =>
+          Effect.gen(function* () {
+            if (hooks === undefined) return yield* Effect.die("Missing native admission.");
+            yield* Deferred.succeed(sendPreparing, undefined);
+            yield* hooks.beforeSubmit(asTurnId("shutdown-parked-turn"));
+            return { threadId: input.threadId, turnId: asTurnId("shutdown-parked-turn") };
+          }).pipe(
+            Effect.onInterrupt(() =>
+              Effect.sync(() => {
+                parkedSendJoined = true;
+              }),
+            ),
+          ),
+        );
+        const parkedSend = yield* provider
+          .sendTurn({ threadId, input: "wait for checkpoint" })
+          .pipe(Effect.exit, Effect.forkChild);
+        yield* Deferred.await(sendPreparing);
         codex.stopAll.mockImplementation(() =>
           Effect.gen(function* () {
+            assert.equal(parkedSendJoined, true);
             const binding = yield* directory.getBinding(threadId);
             assert(Option.isSome(binding));
             markers.push(binding.value.runtimePayload);
           }).pipe(Effect.orDie),
         );
         yield* Scope.close(scope, Exit.void);
+        assert.equal(Exit.isFailure(yield* Fiber.join(parkedSend)), true);
         const binding = yield* directory.getBinding(threadId);
         assert(Option.isSome(binding));
         assert.equal(codex.stopAll.mock.calls.length, 1);
@@ -1067,7 +1103,7 @@ admissionOrdering.layer("ProviderServiceLive native turn admission", (it) => {
         });
         const terminal = yield* Deferred.await(published);
         assert.equal(terminal.providerInstanceId, codexInstanceId);
-        assert.equal(yield* captures.shouldCapture(terminal), true);
+        assert.equal(yield* captures.nativeCaptureReady(terminal), true);
         assert.equal(replacement.pollUnsafe(), undefined);
         yield* captures.complete(terminal, "captured");
         yield* Fiber.join(replacement);
