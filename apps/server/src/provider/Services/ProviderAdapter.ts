@@ -56,6 +56,8 @@ export interface ProviderTurnStartOptions {
   readonly notSubmitted: Effect.Effect<void>;
   /** Only a native terminal response can confirm that submitted work has finished. */
   readonly nativeCompleted: (turnId: TurnId) => Effect.Effect<void>;
+  /** The captured native process has exited. Local stream or scope closure is not enough. */
+  readonly nativeStopped: Effect.Effect<void>;
 }
 
 export interface ProviderAdapterShape<TError> {
