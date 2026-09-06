@@ -49,6 +49,20 @@ You can also send `/compact` in an existing conversation. Web and desktop offer
 a large older thread. See [commands and skills](./composer.md#commands-and-skills)
 for using composer commands.
 
+## See what fills the context window
+
+On web and desktop, hover the context meter next to the send button in a Claude
+thread. The popover shows how many tokens each part of the context uses: system
+prompt, system tools, MCP tools, messages, skills, memory files, and custom
+agents. Below the list, expand a row to see the individual MCP tools, memory
+files, skills, or agents and their token counts. Deferred tool schemas are listed
+without a percentage because they do not occupy the window until Claude loads
+them.
+
+The breakdown comes from Claude Code itself, so it is only available for Claude
+threads. Opening the popover on a thread with no running session resumes that
+session first.
+
 ## Usage limits
 
 If your Claude subscription runs out of usage mid-turn, the thread shows which

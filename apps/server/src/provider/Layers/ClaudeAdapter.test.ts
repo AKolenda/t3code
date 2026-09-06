@@ -8,6 +8,7 @@ import type {
   Options as ClaudeQueryOptions,
   PermissionMode,
   PermissionResult,
+  SDKControlGetContextUsageResponse,
   SDKMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
@@ -116,6 +117,10 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly setMaxThinkingTokens = async (maxThinkingTokens: number | null): Promise<void> => {
     this.setMaxThinkingTokensCalls.push(maxThinkingTokens);
+  };
+
+  getContextUsage = async (): Promise<SDKControlGetContextUsageResponse> => {
+    throw new Error("getContextUsage not stubbed");
   };
 
   readonly close = (): void => {
@@ -2926,16 +2931,14 @@ describe("ClaudeAdapterLive", () => {
   it.effect("completes with result usage without querying current context usage", () => {
     const harness = makeHarness();
     let getContextUsageCalls = 0;
-    Object.assign(harness.query, {
-      getContextUsage: async () => {
-        getContextUsageCalls += 1;
-        return {
-          totalTokens: 999,
-          maxTokens: 200000,
-          isAutoCompactEnabled: true,
-        };
-      },
-    });
+    harness.query.getContextUsage = async () => {
+      getContextUsageCalls += 1;
+      return {
+        totalTokens: 999,
+        maxTokens: 200000,
+        isAutoCompactEnabled: true,
+      } as unknown as SDKControlGetContextUsageResponse;
+    };
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
       const runtimeEventsFiber = yield* Stream.take(adapter.streamEvents, 7).pipe(
@@ -3232,6 +3235,86 @@ describe("ClaudeAdapterLive", () => {
           hasSubagents: false,
         });
       }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("reads the context breakdown on demand through the SDK", () => {
+    const harness = makeHarness();
+    let getContextUsageCalls = 0;
+    harness.query.getContextUsage = async () => {
+      getContextUsageCalls += 1;
+      return {
+        categories: [
+          { name: "System tools", tokens: 19_200, color: "inactive" },
+          { name: "Messages", tokens: 12_000.4, color: "purple" },
+          { name: "Free space", tokens: 168_800, color: "inactive" },
+          { name: "MCP tools (deferred)", tokens: 42_400, color: "inactive", isDeferred: true },
+        ],
+        totalTokens: 31_200,
+        maxTokens: 200_000,
+        rawMaxTokens: 200_000,
+        percentage: 15.6,
+        gridRows: [],
+        model: "claude-fable-5-1",
+        memoryFiles: [{ path: "/Users/me/repo/CLAUDE.md", type: "Project", tokens: 3_100 }],
+        mcpTools: [
+          { name: "mcp__t3-code__preview_click", serverName: "t3-code", tokens: 400 },
+          { name: "mcp__xcodebuildmcp__build_run_sim", serverName: "xcodebuildmcp", tokens: 900 },
+        ],
+        agents: [{ agentType: "sol", source: "user", tokens: 87 }],
+        systemTools: [{ name: "Bash", tokens: 5_000 }],
+        isAutoCompactEnabled: true,
+        apiUsage: null,
+      } as SDKControlGetContextUsageResponse;
+    };
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      // Nothing queried the breakdown yet: it is on-demand only.
+      assert.equal(getContextUsageCalls, 0);
+      assert.isDefined(adapter.getContextUsage);
+      const usage = yield* adapter.getContextUsage!(THREAD_ID);
+
+      assert.equal(getContextUsageCalls, 1);
+      assert.equal(usage.model, "claude-fable-5-1");
+      assert.equal(usage.totalTokens, 31_200);
+      assert.equal(usage.maxTokens, 200_000);
+      assert.deepEqual(usage.categories, [
+        { name: "System tools", tokens: 19_200, deferred: false },
+        { name: "Messages", tokens: 12_000, deferred: false },
+        { name: "Free space", tokens: 168_800, deferred: false },
+        { name: "MCP tools (deferred)", tokens: 42_400, deferred: true },
+      ]);
+      assert.deepEqual(
+        usage.groups.map((group) => [group.label, group.tokens, group.items.length]),
+        [
+          ["System tools", 5_000, 1],
+          ["MCP tools", 1_300, 2],
+          ["Memory files", 3_100, 1],
+          ["Custom agents", 87, 1],
+        ],
+      );
+      // Items inside a group sort by size so the biggest offender is first,
+      // and MCP names drop their `mcp__<server>__` prefix.
+      assert.deepEqual(usage.groups[1]?.items[0], {
+        name: "build_run_sim",
+        tokens: 900,
+        detail: "xcodebuildmcp",
+      });
+      // Memory file paths shrink to their last two segments.
+      assert.deepEqual(usage.groups[2]?.items[0], {
+        name: "repo/CLAUDE.md",
+        tokens: 3_100,
+        detail: "Project",
+      });
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

@@ -21,6 +21,7 @@ import {
   ProviderSendTurnInput,
   ProviderSessionStartInput,
   ProviderStopSessionInput,
+  ProviderContextUsageInput,
   ProviderUploadFeedbackInput,
   ThreadId,
   TurnId,
@@ -1992,6 +1993,34 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const getContextUsage: ProviderServiceMethod<"getContextUsage"> = Effect.fn("getContextUsage")(
+    function* (rawInput) {
+      const input = yield* decodeInputOrValidationError({
+        operation: "ProviderService.getContextUsage",
+        schema: ProviderContextUsageInput,
+        payload: rawInput,
+      });
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.getContextUsage",
+        allowRecovery: true,
+      });
+      const getContextUsage = routed.adapter.getContextUsage;
+      if (getContextUsage === undefined) {
+        return yield* toValidationError(
+          "ProviderService.getContextUsage",
+          `Provider '${routed.adapter.provider}' does not report context usage.`,
+        );
+      }
+      yield* Effect.annotateCurrentSpan({
+        "provider.operation": "get-context-usage",
+        "provider.kind": routed.adapter.provider,
+        "provider.thread_id": input.threadId,
+      });
+      return yield* getContextUsage(input.threadId);
+    },
+  );
+
   const runStopAll = Effect.fn("runStopAll")(function* () {
     const continueAfterRestart = yield* serverSettings.getSettings.pipe(
       Effect.map((settings) => settings.continueThreadsAfterServerUpdate),
@@ -2085,6 +2114,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     assertConversationRollbackSupported,
     rollbackConversation,
     uploadFeedback,
+    getContextUsage,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

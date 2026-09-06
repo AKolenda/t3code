@@ -189,7 +189,7 @@ import {
   renderProviderTraitsMenuContent,
   renderProviderTraitsPicker,
 } from "./composerProviderState";
-import { ContextWindowMeter } from "./ContextWindowMeter";
+import { ContextWindowMeter, type ContextUsageLoader } from "./ContextWindowMeter";
 import {
   providerSupportsManualCompaction,
   resolveContextWindowModelDisplayName,
@@ -824,6 +824,7 @@ import { searchProviderSkills } from "../../providerSkillSearch";
 import { useMediaQuery } from "../../hooks/useMediaQuery";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "../../state/server";
+import { threadEnvironment } from "../../state/threads";
 import type { ReviewCommentContext } from "../../reviewCommentContext";
 
 const WORKSPACE_SNAPSHOT_RETRY_COOLDOWN_MS = 10_000;
@@ -1068,6 +1069,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
   onCompactContext?: (() => void) | undefined;
+  loadContextBreakdown?: ContextUsageLoader | undefined;
   compactDisabled: boolean;
   compactDisabledReason: string | null;
 }) {
@@ -1080,6 +1082,7 @@ const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryActions(
           onCompact={props.onCompactContext}
           compactDisabled={props.compactDisabled}
           compactDisabledReason={props.compactDisabledReason}
+          loadBreakdown={props.loadContextBreakdown}
         />
       ) : null}
       <ComposerPrimaryActions
@@ -1325,7 +1328,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     activeThreadEnvironmentId: _activeThreadEnvironmentId,
     activeThread,
     promptHistoryMessages,
-    isServerThread: _isServerThread,
+    isServerThread,
     isLocalDraftThread: _isLocalDraftThread,
     forceExpandedOnMobile,
     projectSelectionRequired,
@@ -2919,6 +2922,24 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     });
     submitComposer(undefined, intent ?? "foreground");
   }, [isMobileViewport, routeKind, submitComposer]);
+  const getThreadContextUsage = useAtomCommand(threadEnvironment.getContextUsage, {
+    reportFailure: false,
+  });
+  // Only Claude reports a per-category breakdown, and only for a thread the
+  // server knows about. Everything else keeps the plain meter.
+  const loadContextBreakdown = useMemo<ContextUsageLoader | undefined>(() => {
+    if (selectedProvider !== "claudeAgent" || !isServerThread || !activeThreadId) {
+      return undefined;
+    }
+    const threadId = activeThreadId;
+    return async () => {
+      const result = await getThreadContextUsage({ environmentId, input: { threadId } });
+      return result._tag === "Success"
+        ? { ok: true, usage: result.value }
+        : { ok: false, message: "Context breakdown is unavailable right now." };
+    };
+  }, [activeThreadId, environmentId, getThreadContextUsage, isServerThread, selectedProvider]);
+
   const compactThreadContext = useCallback(() => {
     if (
       compactDisabled ||
@@ -5657,6 +5678,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     }
                     compactDisabledReason={resolvedCompactDisabledReason}
                     {...(compactCommandAvailable ? { onCompactContext: compactThreadContext } : {})}
+                    loadContextBreakdown={loadContextBreakdown}
                   />
                 </div>
               </div>

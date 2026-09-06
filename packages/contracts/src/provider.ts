@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
   ApprovalRequestId,
   EventId,
@@ -133,6 +133,64 @@ export class ProviderUploadFeedbackError extends Schema.TaggedErrorClass<Provide
 ) {
   override get message(): string {
     return `Failed to upload feedback for thread ${this.threadId}.`;
+  }
+}
+
+export const ProviderContextUsageInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type ProviderContextUsageInput = typeof ProviderContextUsageInput.Type;
+
+/**
+ * One slice of the live context window, as the provider itself accounts for
+ * it. Deferred slices (tool schemas loaded on demand) are reported but do not
+ * occupy the window yet, so clients show them without a percentage.
+ */
+export const ProviderContextUsageCategory = Schema.Struct({
+  name: TrimmedNonEmptyString,
+  tokens: NonNegativeInt,
+  deferred: Schema.Boolean,
+});
+export type ProviderContextUsageCategory = typeof ProviderContextUsageCategory.Type;
+
+export const ProviderContextUsageDetailItem = Schema.Struct({
+  name: TrimmedNonEmptyString,
+  tokens: NonNegativeInt,
+  detail: Schema.optional(TrimmedNonEmptyString),
+});
+export type ProviderContextUsageDetailItem = typeof ProviderContextUsageDetailItem.Type;
+
+/** An expandable section under the category list, such as "MCP tools" listing every tool. */
+export const ProviderContextUsageDetailGroup = Schema.Struct({
+  label: TrimmedNonEmptyString,
+  tokens: NonNegativeInt,
+  items: Schema.Array(ProviderContextUsageDetailItem),
+});
+export type ProviderContextUsageDetailGroup = typeof ProviderContextUsageDetailGroup.Type;
+
+/**
+ * Point-in-time breakdown of what fills a thread's context window. Adapters
+ * translate their provider's native report into this shape; providers without
+ * a native breakdown do not implement the call.
+ */
+export const ProviderContextUsage = Schema.Struct({
+  model: Schema.String,
+  totalTokens: NonNegativeInt,
+  maxTokens: PositiveInt,
+  categories: Schema.Array(ProviderContextUsageCategory),
+  groups: Schema.Array(ProviderContextUsageDetailGroup),
+});
+export type ProviderContextUsage = typeof ProviderContextUsage.Type;
+
+export class ProviderContextUsageError extends Schema.TaggedErrorClass<ProviderContextUsageError>()(
+  "ProviderContextUsageError",
+  {
+    threadId: ThreadId,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    return `Failed to read context usage for thread ${this.threadId}.`;
   }
 }
 

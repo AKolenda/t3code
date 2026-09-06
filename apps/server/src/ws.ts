@@ -51,6 +51,7 @@ import {
   ProjectSearchContentsError,
   ProjectSearchEntriesError,
   ProjectWriteFileError,
+  ProviderContextUsageError,
   ProviderUploadFeedbackError,
   ProviderSetupError,
   RelayClientInstallFailedError,
@@ -1828,6 +1829,20 @@ const makeWsRpcLayer = (
               Effect.mapError(
                 (cause) =>
                   new ProviderUploadFeedbackError({
+                    threadId: input.threadId,
+                    cause,
+                  }),
+              ),
+            ),
+            { "rpc.aggregate": "provider" },
+          ),
+        [WS_METHODS.providerGetContextUsage]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.providerGetContextUsage,
+            providerService.getContextUsage(input).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderContextUsageError({
                     threadId: input.threadId,
                     cause,
                   }),

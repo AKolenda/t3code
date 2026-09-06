@@ -1,9 +1,22 @@
+import type { ProviderContextUsage } from "@t3tools/contracts";
+import { Minimize2Icon } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+
 import { Button } from "../ui/button";
 import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
+import { ContextUsageBreakdown, type ContextUsageBreakdownState } from "./ContextUsageBreakdown";
 import { formatContextWindowCompactionMessage } from "./ContextWindowMeter.logic";
-import { Minimize2Icon } from "lucide-react";
 import { composerFloatingLayerProps } from "./composerEventScope";
+
+/**
+ * Fetches the provider's context breakdown, or returns a failure message.
+ * Passed only for providers that report one (Claude today).
+ */
+export type ContextUsageLoader = () => Promise<
+  | { readonly ok: true; readonly usage: ProviderContextUsage }
+  | { readonly ok: false; readonly message: string }
+>;
 
 function formatPercentage(value: number | null): string | null {
   if (value === null || !Number.isFinite(value)) {
@@ -21,8 +34,54 @@ export function ContextWindowMeter(props: {
   onCompact?: (() => void) | undefined;
   compactDisabled?: boolean | undefined;
   compactDisabledReason?: string | null | undefined;
+  loadBreakdown?: ContextUsageLoader | undefined;
 }) {
   const { usage, modelDisplayName, onCompact, compactDisabled, compactDisabledReason } = props;
+  const { loadBreakdown } = props;
+  const [open, setOpen] = useState(false);
+  const [breakdown, setBreakdown] = useState<ContextUsageBreakdownState | null>(null);
+  // The breakdown is a live read from the provider, so it is refetched when
+  // the popover opens after the meter has moved. `updatedAt` changes once per
+  // token-usage event, which is the cheapest "something happened" signal.
+  const loadedForRef = useRef<string | null>(null);
+  const requestIdRef = useRef(0);
+
+  const refreshBreakdown = useCallback(
+    (loader: ContextUsageLoader) => {
+      const requestId = requestIdRef.current + 1;
+      requestIdRef.current = requestId;
+      loadedForRef.current = usage.updatedAt;
+      setBreakdown((current) => current ?? { status: "loading" });
+      void loader().then((result) => {
+        if (requestIdRef.current !== requestId) return;
+        setBreakdown(
+          result.ok
+            ? { status: "ready", usage: result.usage }
+            : { status: "error", message: result.message },
+        );
+      });
+    },
+    [usage.updatedAt],
+  );
+
+  const handleOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      setOpen(nextOpen);
+      if (nextOpen && loadBreakdown && loadedForRef.current !== usage.updatedAt) {
+        refreshBreakdown(loadBreakdown);
+      }
+    },
+    [loadBreakdown, refreshBreakdown, usage.updatedAt],
+  );
+
+  // A token-usage event while the popover is open (turn finishing under the
+  // pointer) refreshes in place rather than showing a stale split.
+  useEffect(() => {
+    if (!open || !loadBreakdown || loadedForRef.current === usage.updatedAt) return;
+    refreshBreakdown(loadBreakdown);
+  }, [open, loadBreakdown, refreshBreakdown, usage.updatedAt]);
+
+  const showBreakdown = loadBreakdown !== undefined && breakdown !== null;
   const usedPercentage = formatPercentage(usage.usedPercentage);
   const normalizedPercentage = Math.max(0, Math.min(100, usage.usedPercentage ?? 0));
   const radius = 9.75;
@@ -36,11 +95,11 @@ export function ContextWindowMeter(props: {
     : "color-mix(in oklab, var(--color-muted-foreground) 72%, transparent)";
 
   return (
-    <Popover>
+    <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger
         openOnHover
         delay={150}
-        closeDelay={onCompact ? 150 : 0}
+        closeDelay={onCompact || loadBreakdown ? 150 : 0}
         render={
           <Button
             size="icon-sm"
@@ -89,7 +148,11 @@ export function ContextWindowMeter(props: {
         side="top"
         align="end"
         viewportClassName="p-0"
-        className="w-64 max-w-none text-left whitespace-normal"
+        className={
+          loadBreakdown
+            ? "w-80 max-w-none text-left whitespace-normal"
+            : "w-64 max-w-none text-left whitespace-normal"
+        }
       >
         <div className="flex flex-col gap-2 p-[var(--floating-content-inset)]">
           <div className="flex items-center justify-between gap-3">
@@ -109,7 +172,9 @@ export function ContextWindowMeter(props: {
               </div>
             )}
           </div>
-          {usage.maxTokens !== null ? (
+          {showBreakdown ? (
+            <ContextUsageBreakdown state={breakdown} />
+          ) : usage.maxTokens !== null ? (
             <div
               className="h-1.5 w-full overflow-hidden rounded-full bg-muted/60"
               role="progressbar"

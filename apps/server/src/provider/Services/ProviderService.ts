@@ -12,6 +12,8 @@
  * @module ProviderService
  */
 import type {
+  ProviderContextUsage,
+  ProviderContextUsageInput,
   ProviderInterruptTurnInput,
   ProviderInstanceId,
   ProviderRespondToRequestInput,
@@ -127,6 +129,14 @@ export interface ProviderServiceShape {
   readonly uploadFeedback: (
     input: ProviderUploadFeedbackInput,
   ) => Effect.Effect<ProviderUploadFeedbackResult, ProviderServiceError>;
+
+  /**
+   * Read the provider's breakdown of a thread's context window. Resumes the
+   * provider session when it is not currently running.
+   */
+  readonly getContextUsage: (
+    input: ProviderContextUsageInput,
+  ) => Effect.Effect<ProviderContextUsage, ProviderServiceError>;
 
   /**
    * Canonical provider runtime event stream.

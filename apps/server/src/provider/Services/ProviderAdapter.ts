@@ -10,6 +10,7 @@
 import type {
   ApprovalRequestId,
   ProviderApprovalDecision,
+  ProviderContextUsage,
   ProviderDriverKind,
   ProviderUserInputAnswers,
   ProviderRuntimeEvent,
@@ -145,6 +146,12 @@ export interface ProviderAdapterShape<TError> {
   readonly uploadFeedback?: (
     input: ProviderUploadFeedbackInput,
   ) => Effect.Effect<ProviderUploadFeedbackResult, TError>;
+
+  /**
+   * Read the provider's own breakdown of what fills a thread's context window.
+   * Only adapters whose runtime reports per-category usage implement this.
+   */
+  readonly getContextUsage?: (threadId: ThreadId) => Effect.Effect<ProviderContextUsage, TError>;
 
   /**
    * Stop all sessions owned by this adapter.

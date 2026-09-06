@@ -219,5 +219,9 @@ export function createThreadEnvironmentAtoms<R, E>(
       scheduler,
       concurrency,
     }),
+    getContextUsage: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:get-context-usage",
+      tag: WS_METHODS.providerGetContextUsage,
+    }),
   };
 }

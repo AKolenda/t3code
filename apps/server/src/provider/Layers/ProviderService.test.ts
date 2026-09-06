@@ -9,6 +9,7 @@ import type {
   ProviderSendTurnInput,
   ProviderSession,
   ProviderTurnStartResult,
+  ProviderContextUsage,
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
 } from "@t3tools/contracts";
@@ -263,6 +264,17 @@ function makeFakeCodexAdapter(
       Effect.succeed({ feedbackId: `feedback-${input.threadId}` }),
   );
 
+  const getContextUsage = vi.fn(
+    (threadId: ThreadId): Effect.Effect<ProviderContextUsage, ProviderAdapterError> =>
+      Effect.succeed({
+        model: `model-${threadId}`,
+        totalTokens: 1_000,
+        maxTokens: 200_000,
+        categories: [],
+        groups: [],
+      }),
+  );
+
   const stopAll = vi.fn((): Effect.Effect<void, ProviderAdapterError> =>
     Effect.sync(() => {
       sessions.clear();
@@ -294,6 +306,7 @@ function makeFakeCodexAdapter(
     readThread,
     rollbackThread,
     ...(provider === CODEX_DRIVER ? { uploadFeedback } : {}),
+    ...(provider === CLAUDE_AGENT_DRIVER ? { getContextUsage } : {}),
     stopAll,
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
@@ -331,6 +344,7 @@ function makeFakeCodexAdapter(
     readThread,
     rollbackThread,
     uploadFeedback,
+    getContextUsage,
     stopAll,
   };
 }
@@ -2057,6 +2071,48 @@ routing.layer("ProviderServiceLive routing", (it) => {
       assert.instanceOf(error, ProviderValidationError);
       assert.include(error.issue, "does not support feedback uploads");
       assert.strictEqual(routing.claude.startSession.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("reads context usage through the Claude adapter, resuming a stopped session", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-context-usage-claude");
+      yield* provider.startSession(threadId, {
+        provider: CLAUDE_AGENT_DRIVER,
+        providerInstanceId: claudeAgentInstanceId,
+        threadId,
+        cwd: fixtureCwd("context-usage-project"),
+        runtimeMode: "full-access",
+      });
+      yield* routing.claude.stopSession(threadId);
+      routing.claude.startSession.mockClear();
+      routing.claude.getContextUsage.mockClear();
+
+      const usage = yield* provider.getContextUsage({ threadId });
+
+      assert.strictEqual(usage.model, `model-${threadId}`);
+      assert.strictEqual(routing.claude.startSession.mock.calls.length, 1);
+      assert.deepStrictEqual(routing.claude.getContextUsage.mock.calls, [[threadId]]);
+      routing.claude.startSession.mockClear();
+    }),
+  );
+
+  it.effect("rejects context usage for providers without a breakdown", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("thread-context-usage-codex");
+      yield* provider.startSession(threadId, {
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      const error = yield* provider.getContextUsage({ threadId }).pipe(Effect.flip);
+
+      assert.instanceOf(error, ProviderValidationError);
+      assert.include(error.issue, "does not report context usage");
     }),
   );
 
