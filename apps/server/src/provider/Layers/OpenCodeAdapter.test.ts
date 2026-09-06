@@ -535,6 +535,7 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
 // the layer graph reach for it — but the routing values the assertions
 // probe (serverUrl, serverPassword) must be threaded directly through the
 // decoded `OpenCodeSettings`.
+const decodeOpenCodeSettings = Schema.decodeUnknownEffect(OpenCodeSettings);
 const openCodeAdapterTestSettings = Schema.decodeSync(OpenCodeSettings)({
   binaryPath: "fake-opencode",
   serverUrl: "http://127.0.0.1:9999",
@@ -1633,7 +1634,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           stopKind === "external Stop"
             ? yield* OpenCodeAdapter
             : yield* makeOpenCodeAdapter(
-                yield* Schema.decodeUnknownEffect(OpenCodeSettings)({
+                yield* decodeOpenCodeSettings({
                   binaryPath: "fake-opencode",
                 }),
               ).pipe(
