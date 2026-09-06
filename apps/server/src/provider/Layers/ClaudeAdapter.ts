@@ -3346,6 +3346,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (
       context.turnState &&
       pending &&
+      pending.submissions.length > 0 &&
       (pending.exactMatch || pending.submissions.every((submitted) => submitted.nativeFinished))
     ) {
       context.turnState.priorTokenUsage = addClaudeTurnTokenUsage(
@@ -3483,7 +3484,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         observedSubmissions.push(submitted);
       }
     }
-    if (status === "failed")
+    // Callers without admission callbacks have no submission entries.
+    if (
+      status === "failed" &&
+      (observedSubmissions.length > 0 || context.submittedPrompts.size === 0)
+    )
       yield* emitRuntimeError(context, errorMessage ?? "Claude turn failed.");
     if (context.stopped) return;
     if (context.submittedPrompts.size === 0) {
@@ -4953,6 +4958,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         )
           ? { debug: true }
           : {}),
+        // The public SDK hook needs a concrete Node child process and its exit event.
+        // Effect's process handle cannot satisfy that interface.
         spawnClaudeCodeProcess: ({ command, args, cwd, env, signal }) => {
           const child = NodeChildProcess.spawn(command, args, {
             cwd,
@@ -4962,6 +4969,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             windowsHide: true,
           });
           nativeProcess.captured = child.pid !== undefined;
+          if (!child.stdin || !child.stdout || !child.stderr) {
+            // EMFILE/ENFILE can return before pipes exist, then emit error on the next tick.
+            child.once("error", () => undefined);
+            throw new Error("Claude could not create its process streams.");
+          }
           child.stderr.on("error", () => {
             runFork(Effect.logWarning("Claude stderr read failed."));
           });

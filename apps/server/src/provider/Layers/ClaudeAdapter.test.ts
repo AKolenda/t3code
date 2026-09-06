@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -52,6 +53,8 @@ import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import type { ProviderTurnStartOptions } from "../Services/ProviderAdapter.ts";
 import type { ClaudeScopedLimitNames } from "./claudeUsageLimits.ts";
 import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
+vi.mock("node:child_process", { spy: true });
+
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -1978,14 +1981,19 @@ describe("ClaudeAdapterLive", () => {
             })
           : undefined;
         const processed = yield* adapter.streamEvents.pipe(
-          Stream.takeUntil((event) => event.type === "session.configured"),
+          Stream.takeUntil(
+            (event) =>
+              event.type === "session.configured" &&
+              event.payload.config.uuid === "unknown-result-processed",
+          ),
           Stream.runCollect,
           Effect.forkChild,
         );
         harness.query.emit({
           type: "result",
-          subtype: "success",
-          is_error: false,
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["Unowned command failed."],
           num_turns: 0,
           session_id: "sdk-unknown",
           uuid: "unknown-result",
@@ -1998,7 +2006,9 @@ describe("ClaudeAdapterLive", () => {
         } as unknown as SDKMessage);
         const events = yield* Fiber.join(processed);
         assert.equal(
-          events.some((event) => event.type === "runtime.warning"),
+          events.some(
+            (event) => event.type === "runtime.warning" || event.type === "runtime.error",
+          ),
           false,
         );
         const blockedInput = {
@@ -2112,7 +2122,7 @@ describe("ClaudeAdapterLive", () => {
   );
 
   it.effect.each(["cancelled", "discarded", "refused"] as const)(
-    "finishes an exact %s command without waiting for a result that will not arrive",
+    "finishes an exact %s command and ignores its late result on the next turn",
     (state) => {
       const harness = makeHarness();
       return Effect.gen(function* () {
@@ -2153,6 +2163,50 @@ describe("ClaudeAdapterLive", () => {
         assert.equal(completions, 1);
         if (event?.type === "turn.completed")
           assert.equal(event.payload.state, state === "refused" ? "failed" : "interrupted");
+
+        const next = yield* adapter.sendTurn(
+          { threadId: THREAD_ID, input: "Next" },
+          admissionOptions(),
+        );
+        const nextPrompt = yield* Effect.promise(() =>
+          readFirstPromptMessage(harness.getLastCreateQueryInput()),
+        );
+        const nextEvents = yield* adapter.streamEvents.pipe(
+          Stream.takeUntil((nextEvent) => nextEvent.type === "turn.completed"),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        harness.query.emit({
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["Old command failed."],
+          session_id: "sdk-command-rejected",
+          uuid: "late-old-result",
+          user_message_uuid: prompt!.uuid,
+          usage: { input_tokens: 999, output_tokens: 999 },
+        } as unknown as SDKMessage);
+        harness.query.emit({
+          type: "result",
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["Current command failed."],
+          session_id: "sdk-command-rejected",
+          uuid: "current-result",
+          user_message_uuid: nextPrompt!.uuid,
+          usage: { input_tokens: 50, output_tokens: 10 },
+        } as unknown as SDKMessage);
+        const events = yield* Fiber.join(nextEvents);
+        assert.deepEqual(
+          events
+            .filter((nextEvent) => nextEvent.type === "runtime.error")
+            .map((nextEvent) => nextEvent.payload.message),
+          ["Current command failed."],
+        );
+        const nextCompleted = events.find((nextEvent) => nextEvent.type === "turn.completed");
+        assert.equal(nextCompleted?.turnId, next.turnId);
+        assert.equal(nextCompleted?.payload.state, "failed");
+        assert.equal(nextCompleted?.payload.tokenUsage?.inputTokens, 50);
       }).pipe(Effect.provide(harness.layer));
     },
   );
@@ -2183,6 +2237,38 @@ describe("ClaudeAdapterLive", () => {
       yield* adapter.stopSession(THREAD_ID);
       assert.equal(completed, false);
       assert.equal(stopped, false);
+    }).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("handles a spawn failure that has no process pipes", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      const spawnProcess = harness.getLastCreateQueryInput()?.options.spawnClaudeCodeProcess;
+      assert.isDefined(spawnProcess);
+      const child = new NodeChildProcess.ChildProcess();
+      const spawn = vi.spyOn(NodeChildProcess, "spawn").mockReturnValueOnce(child);
+      try {
+        assert.throws(
+          () =>
+            spawnProcess!({
+              command: "claude",
+              args: [],
+              env: {},
+              signal: new AbortController().signal,
+            }),
+          /Claude could not create its process streams/u,
+        );
+        // Node emits this after its failed spawn returns without assigning pipes.
+        assert.doesNotThrow(() => child.emit("error", new Error("spawn EMFILE")));
+      } finally {
+        spawn.mockRestore();
+      }
     }).pipe(Effect.provide(harness.layer));
   });
 
