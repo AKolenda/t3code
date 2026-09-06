@@ -644,269 +644,287 @@ const make = Effect.gen(function* () {
   const ensureSessionForThread = Effect.fn("ensureSessionForThread")(function* (
     threadId: ThreadId,
     createdAt: string,
+    command: PendingSessionCommand,
     options?: {
       readonly modelSelection?: ModelSelection;
       readonly pendingTurnStart?: boolean;
     },
   ) {
-    const thread = yield* resolveThreadShell(threadId);
-    if (!thread) {
-      return yield* Effect.die(new Error(`Thread '${threadId}' was not found in read model.`));
-    }
-
-    const desiredRuntimeMode = thread.runtimeMode;
-    const requestedModelSelection = options?.modelSelection;
-    const resolveActiveSession = (threadId: ThreadId) =>
-      providerService
-        .listSessions()
-        .pipe(Effect.map((sessions) => sessions.find((session) => session.threadId === threadId)));
-
-    const activeSession = yield* resolveActiveSession(threadId);
-    const activeThreadSession =
-      thread.session !== null && thread.session.status !== "stopped" && activeSession
-        ? thread.session
-        : null;
-    if (
-      activeThreadSession !== null &&
-      activeSession !== undefined &&
-      (activeThreadSession.providerInstanceId === undefined ||
-        activeSession.providerInstanceId === undefined)
-    ) {
-      return yield* new ProviderAdapterRequestError({
-        provider: providerErrorLabel(activeThreadSession.providerName ?? undefined),
-        method: "thread.turn.start",
-        detail: `Thread '${threadId}' has an active provider session without a provider instance id.`,
-      });
-    }
-    const currentInstanceId =
-      activeThreadSession !== null &&
-      activeSession !== undefined &&
-      activeSession.providerInstanceId !== undefined
-        ? activeSession.providerInstanceId
-        : thread.modelSelection.instanceId;
-    const desiredModelSelection = requestedModelSelection ?? thread.modelSelection;
-    const desiredInstanceId = desiredModelSelection.instanceId;
-    const currentInfo = yield* providerService.getInstanceInfo(currentInstanceId).pipe(
-      Effect.mapError(
-        () =>
-          new ProviderAdapterRequestError({
-            provider: providerErrorLabelFromInstanceHint({
-              instanceId: String(currentInstanceId),
-              modelSelectionInstanceId: String(thread.modelSelection.instanceId),
-              sessionProvider: thread.session?.providerName ?? undefined,
-            }),
-            method: "thread.turn.start",
-            detail: `Thread '${threadId}' references unknown provider instance '${currentInstanceId}'. The instance is not configured in this build.`,
-          }),
-      ),
-    );
-    const desiredInfo = yield* providerService.getInstanceInfo(desiredInstanceId).pipe(
-      Effect.mapError(
-        () =>
-          new ProviderAdapterRequestError({
-            provider: providerErrorLabelFromInstanceHint({
-              instanceId: String(desiredModelSelection.instanceId),
-            }),
-            method: "thread.turn.start",
-            detail: `Requested provider instance '${desiredInstanceId}' is not configured in this build.`,
-          }),
-      ),
-    );
-    const desiredDriverKind = desiredInfo.driverKind;
-    if (!isProviderDriverKind(desiredDriverKind)) {
-      return yield* new ProviderAdapterRequestError({
-        provider: providerErrorLabel(String(desiredDriverKind)),
-        method: "thread.turn.start",
-        detail: `Requested provider instance '${desiredInstanceId}' uses unknown provider driver '${desiredDriverKind}'. The driver is not installed in this build.`,
-      });
-    }
-    const preferredProvider: ProviderDriverKind = desiredDriverKind;
-    if (options?.pendingTurnStart === true && thread.session?.status !== "running") {
-      yield* setThreadSession({
-        threadId,
-        session: {
-          threadId,
-          status: "starting",
-          providerName: activeSession?.provider ?? preferredProvider,
-          providerInstanceId: activeSession?.providerInstanceId ?? desiredInstanceId,
-          runtimeMode: desiredRuntimeMode,
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: createdAt,
-        },
-        createdAt,
-      });
-    }
-    if (thread.session !== null) {
-      yield* rejectStartedThreadModelChangeIfRequired({
-        threadId,
-        currentModelSelection:
-          activeSession?.model !== undefined
-            ? {
-                ...thread.modelSelection,
-                instanceId: currentInstanceId,
-                model: activeSession.model,
-              }
-            : thread.modelSelection,
-        requestedModelSelection,
-      });
-    }
-    if (
-      thread.session !== null &&
-      requestedModelSelection !== undefined &&
-      requestedModelSelection.instanceId !== currentInstanceId
-    ) {
-      if (currentInfo.driverKind !== desiredInfo.driverKind) {
-        return yield* new ProviderAdapterRequestError({
-          provider: preferredProvider,
-          method: "thread.turn.start",
-          detail: `Thread '${threadId}' is bound to driver '${currentInfo.driverKind}' and cannot switch to '${desiredInfo.driverKind}'.`,
-        });
+    while (true) {
+      const thread = yield* resolveThreadShell(threadId);
+      if (!thread) {
+        return yield* Effect.die(new Error(`Thread '${threadId}' was not found in read model.`));
       }
+
+      const desiredRuntimeMode = thread.runtimeMode;
+      const requestedModelSelection = options?.modelSelection;
+      const resolveActiveSession = (threadId: ThreadId) =>
+        providerService
+          .listSessions()
+          .pipe(
+            Effect.map((sessions) => sessions.find((session) => session.threadId === threadId)),
+          );
+
+      const activeSession = yield* resolveActiveSession(threadId);
+      const activeThreadSession =
+        thread.session !== null && thread.session.status !== "stopped" && activeSession
+          ? thread.session
+          : null;
       if (
-        currentInfo.continuationIdentity.continuationKey !==
-        desiredInfo.continuationIdentity.continuationKey
+        activeThreadSession !== null &&
+        activeSession !== undefined &&
+        (activeThreadSession.providerInstanceId === undefined ||
+          activeSession.providerInstanceId === undefined)
       ) {
         return yield* new ProviderAdapterRequestError({
-          provider: preferredProvider,
+          provider: providerErrorLabel(activeThreadSession.providerName ?? undefined),
           method: "thread.turn.start",
-          detail: `Thread '${threadId}' cannot switch from instance '${currentInstanceId}' to '${desiredInstanceId}' because their provider resume state is incompatible.`,
+          detail: `Thread '${threadId}' has an active provider session without a provider instance id.`,
         });
       }
-    }
-    const project = yield* resolveProject(thread.projectId);
-    const effectiveCwd = resolveThreadWorkspaceCwd({
-      thread,
-      projects: project ? [project] : [],
-    });
-    const refreshWorkspaceSnapshot = effectiveCwd
-      ? providerRegistry
-          .refreshWorkspaceSnapshot({ instanceId: desiredInstanceId, cwd: effectiveCwd })
-          .pipe(Effect.forkDetach)
-      : Effect.void;
-
-    const startProviderSession = (input?: {
-      readonly resumeCursor?: unknown;
-      readonly provider?: ProviderDriverKind;
-    }) =>
-      providerService
-        .startSession(threadId, {
-          threadId,
-          ...(preferredProvider ? { provider: preferredProvider } : {}),
-          providerInstanceId: desiredInstanceId,
-          ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
-          ...(thread.title ? { title: thread.title } : {}),
-          modelSelection: desiredModelSelection,
-          ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-          runtimeMode: desiredRuntimeMode,
-        })
-        .pipe(Effect.tap(() => refreshWorkspaceSnapshot));
-
-    const bindSessionToThread = (session: ProviderSession) =>
-      Effect.gen(function* () {
-        if (session.providerInstanceId === undefined) {
-          return yield* new ProviderAdapterRequestError({
-            provider: providerErrorLabel(session.provider),
-            method: "thread.turn.start",
-            detail: `Provider session '${session.threadId}' started without a provider instance id.`,
-          });
-        }
+      const currentInstanceId =
+        activeThreadSession !== null &&
+        activeSession !== undefined &&
+        activeSession.providerInstanceId !== undefined
+          ? activeSession.providerInstanceId
+          : thread.modelSelection.instanceId;
+      const desiredModelSelection = requestedModelSelection ?? thread.modelSelection;
+      const desiredInstanceId = desiredModelSelection.instanceId;
+      const currentInfo = yield* providerService.getInstanceInfo(currentInstanceId).pipe(
+        Effect.mapError(
+          () =>
+            new ProviderAdapterRequestError({
+              provider: providerErrorLabelFromInstanceHint({
+                instanceId: String(currentInstanceId),
+                modelSelectionInstanceId: String(thread.modelSelection.instanceId),
+                sessionProvider: thread.session?.providerName ?? undefined,
+              }),
+              method: "thread.turn.start",
+              detail: `Thread '${threadId}' references unknown provider instance '${currentInstanceId}'. The instance is not configured in this build.`,
+            }),
+        ),
+      );
+      const desiredInfo = yield* providerService.getInstanceInfo(desiredInstanceId).pipe(
+        Effect.mapError(
+          () =>
+            new ProviderAdapterRequestError({
+              provider: providerErrorLabelFromInstanceHint({
+                instanceId: String(desiredModelSelection.instanceId),
+              }),
+              method: "thread.turn.start",
+              detail: `Requested provider instance '${desiredInstanceId}' is not configured in this build.`,
+            }),
+        ),
+      );
+      const desiredDriverKind = desiredInfo.driverKind;
+      if (!isProviderDriverKind(desiredDriverKind)) {
+        return yield* new ProviderAdapterRequestError({
+          provider: providerErrorLabel(String(desiredDriverKind)),
+          method: "thread.turn.start",
+          detail: `Requested provider instance '${desiredInstanceId}' uses unknown provider driver '${desiredDriverKind}'. The driver is not installed in this build.`,
+        });
+      }
+      const preferredProvider: ProviderDriverKind = desiredDriverKind;
+      if (options?.pendingTurnStart === true && thread.session?.status !== "running") {
         yield* setThreadSession({
           threadId,
           session: {
             threadId,
-            status:
-              options?.pendingTurnStart === true && session.status === "ready"
-                ? "starting"
-                : mapProviderSessionStatusToOrchestrationStatus(session.status),
-            providerName: session.provider,
-            providerInstanceId: session.providerInstanceId,
+            status: "starting",
+            providerName: activeSession?.provider ?? preferredProvider,
+            providerInstanceId: activeSession?.providerInstanceId ?? desiredInstanceId,
             runtimeMode: desiredRuntimeMode,
-            // Provider turn ids are not orchestration turn ids.
             activeTurnId: null,
-            lastError: session.lastError ?? null,
-            updatedAt: session.updatedAt,
+            lastError: null,
+            updatedAt: createdAt,
           },
           createdAt,
         });
-      });
-
-    const existingSessionThreadId =
-      thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
-    if (existingSessionThreadId) {
-      const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
-      const cwdChanged = effectiveCwd !== activeSession?.cwd;
-      const sessionModelSwitch = (yield* providerService.getCapabilities(desiredInstanceId))
-        .sessionModelSwitch;
-      const modelChanged =
-        requestedModelSelection !== undefined &&
-        requestedModelSelection.model !== activeSession?.model;
-      const instanceChanged =
-        requestedModelSelection !== undefined &&
-        activeSession?.providerInstanceId !== requestedModelSelection.instanceId;
-      const shouldRestartForModelChange = modelChanged && sessionModelSwitch === "unsupported";
-      const previousModelSelection = threadModelSelections.get(threadId);
-      const shouldRestartForModelSelectionChange =
-        preferredProvider === "claudeAgent" &&
-        requestedModelSelection !== undefined &&
-        !Equal.equals(previousModelSelection, requestedModelSelection);
-
+      }
+      if (thread.session !== null) {
+        yield* rejectStartedThreadModelChangeIfRequired({
+          threadId,
+          currentModelSelection:
+            activeSession?.model !== undefined
+              ? {
+                  ...thread.modelSelection,
+                  instanceId: currentInstanceId,
+                  model: activeSession.model,
+                }
+              : thread.modelSelection,
+          requestedModelSelection,
+        });
+      }
       if (
-        !runtimeModeChanged &&
-        !cwdChanged &&
-        !instanceChanged &&
-        !shouldRestartForModelChange &&
-        !shouldRestartForModelSelectionChange
+        thread.session !== null &&
+        requestedModelSelection !== undefined &&
+        requestedModelSelection.instanceId !== currentInstanceId
       ) {
-        yield* refreshWorkspaceSnapshot;
-        return existingSessionThreadId;
+        if (currentInfo.driverKind !== desiredInfo.driverKind) {
+          return yield* new ProviderAdapterRequestError({
+            provider: preferredProvider,
+            method: "thread.turn.start",
+            detail: `Thread '${threadId}' is bound to driver '${currentInfo.driverKind}' and cannot switch to '${desiredInfo.driverKind}'.`,
+          });
+        }
+        if (
+          currentInfo.continuationIdentity.continuationKey !==
+          desiredInfo.continuationIdentity.continuationKey
+        ) {
+          return yield* new ProviderAdapterRequestError({
+            provider: preferredProvider,
+            method: "thread.turn.start",
+            detail: `Thread '${threadId}' cannot switch from instance '${currentInstanceId}' to '${desiredInstanceId}' because their provider resume state is incompatible.`,
+          });
+        }
+      }
+      const project = yield* resolveProject(thread.projectId);
+      const effectiveCwd = resolveThreadWorkspaceCwd({
+        thread,
+        projects: project ? [project] : [],
+      });
+      const refreshWorkspaceSnapshot = effectiveCwd
+        ? providerRegistry
+            .refreshWorkspaceSnapshot({ instanceId: desiredInstanceId, cwd: effectiveCwd })
+            .pipe(Effect.forkDetach)
+        : Effect.void;
+
+      const startProviderSession = (input?: {
+        readonly resumeCursor?: unknown;
+        readonly provider?: ProviderDriverKind;
+      }) =>
+        providerService
+          .startSession(threadId, {
+            threadId,
+            ...(preferredProvider ? { provider: preferredProvider } : {}),
+            providerInstanceId: desiredInstanceId,
+            ...(effectiveCwd ? { cwd: effectiveCwd } : {}),
+            ...(thread.title ? { title: thread.title } : {}),
+            modelSelection: desiredModelSelection,
+            ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
+            runtimeMode: desiredRuntimeMode,
+          })
+          .pipe(Effect.tap(() => refreshWorkspaceSnapshot));
+
+      const bindSessionToThread = (session: ProviderSession) =>
+        Effect.gen(function* () {
+          if (session.providerInstanceId === undefined) {
+            return yield* new ProviderAdapterRequestError({
+              provider: providerErrorLabel(session.provider),
+              method: "thread.turn.start",
+              detail: `Provider session '${session.threadId}' started without a provider instance id.`,
+            });
+          }
+          yield* setThreadSession({
+            threadId,
+            session: {
+              threadId,
+              status:
+                options?.pendingTurnStart === true && session.status === "ready"
+                  ? "starting"
+                  : mapProviderSessionStatusToOrchestrationStatus(session.status),
+              providerName: session.provider,
+              providerInstanceId: session.providerInstanceId,
+              runtimeMode: desiredRuntimeMode,
+              // Provider turn ids are not orchestration turn ids.
+              activeTurnId: null,
+              lastError: session.lastError ?? null,
+              updatedAt: session.updatedAt,
+            },
+            createdAt,
+          });
+        });
+
+      const existingSessionThreadId =
+        thread.session && thread.session.status !== "stopped" && activeSession ? thread.id : null;
+      if (existingSessionThreadId) {
+        const runtimeModeChanged = thread.runtimeMode !== activeSession?.runtimeMode;
+        const cwdChanged = effectiveCwd !== activeSession?.cwd;
+        const sessionModelSwitch = (yield* providerService.getCapabilities(desiredInstanceId))
+          .sessionModelSwitch;
+        const modelChanged =
+          requestedModelSelection !== undefined &&
+          requestedModelSelection.model !== activeSession?.model;
+        const instanceChanged =
+          requestedModelSelection !== undefined &&
+          activeSession?.providerInstanceId !== requestedModelSelection.instanceId;
+        const shouldRestartForModelChange = modelChanged && sessionModelSwitch === "unsupported";
+        const previousModelSelection = threadModelSelections.get(threadId);
+        const shouldRestartForModelSelectionChange =
+          preferredProvider === "claudeAgent" &&
+          requestedModelSelection !== undefined &&
+          !Equal.equals(previousModelSelection, requestedModelSelection);
+
+        if (
+          !runtimeModeChanged &&
+          !cwdChanged &&
+          !instanceChanged &&
+          !shouldRestartForModelChange &&
+          !shouldRestartForModelSelectionChange
+        ) {
+          yield* refreshWorkspaceSnapshot;
+          return existingSessionThreadId;
+        }
+
+        const sendingCommands: Array<Fiber.Fiber<void>> = [];
+        for (const pending of sessionCommands.get(threadId)?.pending ?? []) {
+          if (pending !== command && !pending.preparing && pending.fiber !== undefined)
+            sendingCommands.push(pending.fiber);
+        }
+        if (sendingCommands.length > 0) {
+          // Only replacements wait for earlier sends. Unchanged sessions still allow steering.
+          // Preparing commands can be waiting for this permit, so never wait on them here.
+          yield* Fiber.awaitAll(sendingCommands);
+          continue;
+        }
+
+        const resumeCursor = shouldRestartForModelChange
+          ? undefined
+          : (activeSession?.resumeCursor ?? undefined);
+        yield* Effect.logInfo("provider command reactor restarting provider session", {
+          threadId,
+          existingSessionThreadId,
+          currentProvider: activeSession?.provider,
+          currentInstanceId,
+          desiredInstanceId,
+          desiredProvider: desiredModelSelection.instanceId,
+          currentRuntimeMode: thread.session?.runtimeMode,
+          desiredRuntimeMode: thread.runtimeMode,
+          runtimeModeChanged,
+          previousCwd: activeSession?.cwd,
+          desiredCwd: effectiveCwd,
+          cwdChanged,
+          modelChanged,
+          instanceChanged,
+          shouldRestartForModelChange,
+          shouldRestartForModelSelectionChange,
+          hasResumeCursor: resumeCursor !== undefined,
+        });
+        const restartedSession = yield* startProviderSession(
+          resumeCursor !== undefined ? { resumeCursor } : undefined,
+        );
+        yield* Effect.logInfo("provider command reactor restarted provider session", {
+          threadId,
+          previousSessionId: existingSessionThreadId,
+          restartedSessionThreadId: restartedSession.threadId,
+          provider: restartedSession.provider,
+          runtimeMode: restartedSession.runtimeMode,
+          cwd: restartedSession.cwd,
+        });
+        yield* bindSessionToThread(restartedSession);
+        return restartedSession.threadId;
       }
 
-      const resumeCursor = shouldRestartForModelChange
-        ? undefined
-        : (activeSession?.resumeCursor ?? undefined);
-      yield* Effect.logInfo("provider command reactor restarting provider session", {
-        threadId,
-        existingSessionThreadId,
-        currentProvider: activeSession?.provider,
-        currentInstanceId,
-        desiredInstanceId,
-        desiredProvider: desiredModelSelection.instanceId,
-        currentRuntimeMode: thread.session?.runtimeMode,
-        desiredRuntimeMode: thread.runtimeMode,
-        runtimeModeChanged,
-        previousCwd: activeSession?.cwd,
-        desiredCwd: effectiveCwd,
-        cwdChanged,
-        modelChanged,
-        instanceChanged,
-        shouldRestartForModelChange,
-        shouldRestartForModelSelectionChange,
-        hasResumeCursor: resumeCursor !== undefined,
-      });
-      const restartedSession = yield* startProviderSession(
-        resumeCursor !== undefined ? { resumeCursor } : undefined,
-      );
-      yield* Effect.logInfo("provider command reactor restarted provider session", {
-        threadId,
-        previousSessionId: existingSessionThreadId,
-        restartedSessionThreadId: restartedSession.threadId,
-        provider: restartedSession.provider,
-        runtimeMode: restartedSession.runtimeMode,
-        cwd: restartedSession.cwd,
-      });
-      yield* bindSessionToThread(restartedSession);
-      return restartedSession.threadId;
+      const startedSession = yield* startProviderSession(undefined);
+      yield* bindSessionToThread(startedSession);
+      return startedSession.threadId;
     }
-
-    const startedSession = yield* startProviderSession(undefined);
-    yield* bindSessionToThread(startedSession);
-    return startedSession.threadId;
   });
 
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly messageText: string;
+    readonly command: PendingSessionCommand;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
     readonly interactionMode?: "default" | "plan";
@@ -918,7 +936,7 @@ const make = Effect.gen(function* () {
         new Error(`Thread '${input.threadId}' was not found in read model.`),
       );
     }
-    yield* ensureSessionForThread(input.threadId, input.createdAt, {
+    yield* ensureSessionForThread(input.threadId, input.createdAt, input.command, {
       ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
       pendingTurnStart: true,
     });
@@ -1560,15 +1578,22 @@ const make = Effect.gen(function* () {
           yield* ensureSessionForThread(
             event.payload.threadId,
             event.payload.createdAt,
+            command,
             event.payload.modelSelection !== undefined
               ? { modelSelection: event.payload.modelSelection, pendingTurnStart: true }
               : { pendingTurnStart: true },
-          ).pipe(preparation.withPermit);
-          compactionSessionEnsured = true;
-          if (event.payload.modelSelection !== undefined) {
-            threadModelSelections.set(event.payload.threadId, event.payload.modelSelection);
-          }
-          command.preparing = false;
+          ).pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                compactionSessionEnsured = true;
+                if (event.payload.modelSelection !== undefined) {
+                  threadModelSelections.set(event.payload.threadId, event.payload.modelSelection);
+                }
+                command.preparing = false;
+              }),
+            ),
+            preparation.withPermit,
+          );
           yield* Effect.uninterruptibleMask((restore) =>
             Effect.gen(function* () {
               yield* providerService
@@ -1620,17 +1645,23 @@ const make = Effect.gen(function* () {
         const sendTurnRequest = yield* buildSendTurnRequestForThread({
           threadId: event.payload.threadId,
           messageText: message.text,
+          command,
           ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
           ...(event.payload.modelSelection !== undefined
             ? { modelSelection: event.payload.modelSelection }
             : {}),
           interactionMode: event.payload.interactionMode,
           createdAt: event.payload.createdAt,
-        }).pipe(preparation.withPermit);
+        }).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              command.preparing = false;
+            }),
+          ),
+          preparation.withPermit,
+        );
 
-        // A cancelled send can already have reached the provider. Only preparation
-        // can be reported as a message that was never submitted.
-        command.preparing = false;
+        // Releasing preparation lets unchanged-session messages steer this send.
         yield* providerService.sendTurn(sendTurnRequest).pipe(
           Effect.flatMap((result) =>
             orchestrationEngine.dispatch({
@@ -2029,12 +2060,13 @@ const make = Effect.gen(function* () {
         if (!thread?.session || thread.session.status === "stopped") {
           return;
         }
-        yield* forkSessionCommand(event, (preparation) =>
+        yield* forkSessionCommand(event, (preparation, command) =>
           Effect.gen(function* () {
             const cachedModelSelection = threadModelSelections.get(event.payload.threadId);
             yield* ensureSessionForThread(
               event.payload.threadId,
               event.occurredAt,
+              command,
               cachedModelSelection !== undefined ? { modelSelection: cachedModelSelection } : {},
             );
           }).pipe(

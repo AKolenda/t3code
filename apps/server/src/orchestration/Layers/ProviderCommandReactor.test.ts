@@ -173,6 +173,7 @@ describe("ProviderCommandReactor", () => {
     readonly baseDir?: string;
     readonly threadModelSelection?: ModelSelection;
     readonly sessionModelSwitch?: "unsupported" | "in-session";
+    readonly beforeCapabilities?: () => Effect.Effect<void>;
     readonly requiresNewThreadForModelChange?: boolean;
     readonly unreadableHistory?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
@@ -263,7 +264,11 @@ describe("ProviderCommandReactor", () => {
       return (startSessionEffect?.(session) ?? Effect.succeed(session)).pipe(
         Effect.tap((startedSession) =>
           Effect.sync(() => {
-            runtimeSessions.push(startedSession);
+            const index = runtimeSessions.findIndex(
+              (session) => session.threadId === startedSession.threadId,
+            );
+            if (index < 0) runtimeSessions.push(startedSession);
+            else runtimeSessions[index] = startedSession;
           }),
         ),
       );
@@ -369,9 +374,9 @@ describe("ProviderCommandReactor", () => {
       stopSession: stopSession as ProviderServiceShape["stopSession"],
       listSessions: () => Effect.succeed(runtimeSessions),
       getCapabilities: (_provider) =>
-        Effect.succeed({
-          sessionModelSwitch: input?.sessionModelSwitch ?? "in-session",
-        }),
+        (input?.beforeCapabilities?.() ?? Effect.void).pipe(
+          Effect.as({ sessionModelSwitch: input?.sessionModelSwitch ?? "in-session" }),
+        ),
       assertConversationRollbackSupported: () => unsupported(),
       prepareConversationRollback: () => unsupported(),
       forkConversation: () => unsupported(),
@@ -788,6 +793,171 @@ describe("ProviderCommandReactor", () => {
           ]);
         }
         expect(thread?.pendingOperation).toBeNull();
+      }
+    }),
+  );
+
+  effectIt.effect.each([
+    ["runtime mode", "complete"],
+    ["runtime mode", "stop"],
+    ["runtime mode", "revert"],
+    ["message runtime mode", "complete"],
+    ["message runtime mode", "stop"],
+    ["model", "complete"],
+    ["model", "stop"],
+  ] as const)("waits for the earlier send before a %s replacement, then %s", ([change, outcome]) =>
+    Effect.gen(function* () {
+      const sent = yield* Deferred.make<void>();
+      const releaseSend = yield* Deferred.make<void>();
+      const sendJoined = yield* Deferred.make<void>();
+      const checked = yield* Deferred.make<void>();
+      const rechecked = yield* Deferred.make<void>();
+      const restarted = yield* Deferred.make<void>();
+      const stopped = yield* Deferred.make<void>();
+      const secondPreparing = yield* Deferred.make<void>();
+      const releaseSecond = yield* Deferred.make<void>();
+      let changing = false;
+      let checks = 0;
+      let sentSuccessfully = false;
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          sessionModelSwitch: "unsupported",
+          tryHandlePromptCommandEffect: ({ text }) =>
+            text === "second" && change === "message runtime mode"
+              ? Deferred.succeed(secondPreparing, undefined).pipe(
+                  Effect.andThen(Deferred.await(releaseSecond)),
+                  Effect.as(false),
+                )
+              : Effect.succeed(false),
+          beforeCapabilities: () =>
+            changing
+              ? Deferred.succeed(++checks === 1 ? checked : rechecked, undefined).pipe(
+                  Effect.asVoid,
+                )
+              : Effect.void,
+          startSessionEffect: (session) =>
+            Effect.gen(function* () {
+              if (changing) {
+                expect(sentSuccessfully).toBe(true);
+                yield* Deferred.succeed(restarted, undefined);
+              }
+              return session;
+            }),
+          sendTurnEffect: (input) =>
+            input.input === "first"
+              ? Effect.gen(function* () {
+                  yield* Deferred.succeed(sent, undefined);
+                  yield* Deferred.await(releaseSend);
+                  sentSuccessfully = true;
+                  const active = harness.runtimeSessions[0];
+                  if (active)
+                    harness.runtimeSessions[0] = {
+                      ...active,
+                      resumeCursor: { opaque: "after-first-send" },
+                    };
+                  return { threadId: input.threadId, turnId: asTurnId("first-turn") };
+                }).pipe(Effect.ensuring(Deferred.succeed(sendJoined, undefined)))
+              : Effect.succeed({ threadId: input.threadId, turnId: asTurnId("second-turn") }),
+          stopSessionEffect: () =>
+            Effect.gen(function* () {
+              expect(yield* Deferred.isDone(sendJoined)).toBe(true);
+              yield* Deferred.succeed(stopped, undefined);
+            }),
+        }),
+      );
+      yield* dispatchTestTurn(harness.engine, "replacement-first", "first");
+      yield* Deferred.await(sent);
+      changing = true;
+      if (change === "runtime mode") {
+        yield* harness.engine.dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("replace-runtime-mode"),
+          threadId: ThreadId.make("thread-1"),
+          runtimeMode: "full-access",
+          createdAt: "2026-01-01T00:00:01.000Z",
+        });
+      } else {
+        yield* harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("replace-model"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: MessageId.make("replacement-second"),
+            role: "user",
+            text: "second",
+            attachments: [],
+          },
+          ...(change === "model"
+            ? { modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" } }
+            : {}),
+          interactionMode: "default",
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:00:01.000Z",
+        });
+        if (change === "message runtime mode") {
+          yield* Deferred.await(secondPreparing);
+          yield* harness.engine.dispatch({
+            type: "thread.runtime-mode.set",
+            commandId: CommandId.make("message-replace-runtime-mode"),
+            threadId: ThreadId.make("thread-1"),
+            runtimeMode: "full-access",
+            createdAt: "2026-01-01T00:00:01.000Z",
+          });
+          yield* Deferred.succeed(releaseSecond, undefined);
+        }
+      }
+      yield* Deferred.await(checked);
+      yield* Effect.promise(harness.drain);
+      expect(harness.startSession).toHaveBeenCalledOnce();
+      expect(yield* Deferred.isDone(sendJoined)).toBe(false);
+
+      if (outcome === "stop") {
+        yield* harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("stop-replacement"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: "2026-01-01T00:00:02.000Z",
+        });
+        yield* Deferred.await(stopped);
+        yield* Effect.promise(harness.drain);
+        expect(harness.startSession).toHaveBeenCalledOnce();
+        expect(harness.sendTurn).toHaveBeenCalledOnce();
+      } else if (outcome === "revert") {
+        yield* harness.engine.dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("revert-runtime-mode"),
+          threadId: ThreadId.make("thread-1"),
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:00:02.000Z",
+        });
+        yield* Deferred.succeed(releaseSend, undefined);
+        yield* Deferred.await(rechecked);
+        yield* Effect.promise(harness.drain);
+        expect(harness.startSession).toHaveBeenCalledOnce();
+      } else {
+        yield* Deferred.succeed(releaseSend, undefined);
+        yield* Deferred.await(restarted);
+        expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject(
+          change !== "model"
+            ? { runtimeMode: "full-access", resumeCursor: { opaque: "after-first-send" } }
+            : { modelSelection: { model: "gpt-5.4" } },
+        );
+      }
+      const results = yield* harness.engine.readEvents(0).pipe(
+        Stream.filter((event) => event.type === "thread.activity-appended"),
+        Stream.map((event) => event.payload.operationResult),
+        Stream.runCollect,
+      );
+      expect(results.filter((result) => result?.requestId === "replacement-first")).toEqual([
+        {
+          requestId: "replacement-first",
+          outcome: outcome === "stop" ? "interrupted" : "completed",
+        },
+      ]);
+      if (outcome === "stop" && change !== "runtime mode") {
+        expect(results.filter((result) => result?.requestId === "replacement-second")).toEqual([
+          { requestId: "replacement-second", outcome: "interrupted" },
+        ]);
       }
     }),
   );
