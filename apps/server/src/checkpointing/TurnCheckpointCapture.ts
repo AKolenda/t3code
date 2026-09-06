@@ -275,14 +275,16 @@ export function make(): TurnCheckpointCapture["Service"] {
           ) {
             if (submission !== undefined) return;
             while (true) {
+              yield* awaitCapture(threadId);
               const state = threads.get(threadId);
+              if ((state?.pending.size ?? 0) > 0) continue;
               if (
                 state?.activeTurnId !== undefined &&
                 (state.activeTurnId !== turnId || state.activeInstanceId !== instanceId)
               ) {
                 prepare(threadId, state.activeTurnId, state.activeInstanceId);
+                continue;
               }
-              yield* awaitCapture(threadId);
               const blockers = [...(threads.get(threadId)?.submissions ?? [])].filter(
                 (active) =>
                   turnId === undefined ||

@@ -341,7 +341,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ProjectionSnapshotQuery.ProjectionSnapshotQuery,
   );
   const checkpointCapture = yield* TurnCheckpointCapture.TurnCheckpointCapture;
-  const pendingSends = new Map<ThreadId, Set<Fiber.Fiber<unknown, unknown>>>();
+  const pendingSends = new Map<ThreadId, Set<Deferred.Deferred<Fiber.Fiber<unknown, unknown>>>>();
   const blockedSends = new Map<ThreadId, Set<symbol>>();
 
   const withPendingSend = <A, E, R>(threadId: ThreadId, effect: Effect.Effect<A, E, R>) =>
@@ -353,18 +353,21 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             "This thread is stopping. Retry after it stops.",
           );
         }
-        const fiber = yield* effect.pipe(Effect.interruptible, Effect.forkChild);
-        const sends = pendingSends.get(threadId) ?? new Set<Fiber.Fiber<unknown, unknown>>();
+        const sends =
+          pendingSends.get(threadId) ?? new Set<Deferred.Deferred<Fiber.Fiber<unknown, unknown>>>();
+        const ready = Deferred.makeUnsafe<Fiber.Fiber<unknown, unknown>>();
         pendingSends.set(threadId, sends);
-        sends.add(fiber);
-        return { fiber, sends };
+        sends.add(ready);
+        const fiber = yield* effect.pipe(Effect.interruptible, Effect.forkChild);
+        yield* Deferred.succeed(ready, fiber);
+        return { fiber, ready, sends };
       }),
       ({ fiber }) => Fiber.await(fiber).pipe(Effect.flatMap((exit) => exit)),
-      ({ fiber, sends }) =>
+      ({ fiber, ready, sends }) =>
         Fiber.interrupt(fiber).pipe(
           Effect.andThen(
             Effect.sync(() => {
-              sends.delete(fiber);
+              sends.delete(ready);
               if (sends.size === 0) pendingSends.delete(threadId);
             }),
           ),
@@ -385,8 +388,15 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           const current = yield* Effect.fiber;
           // Parked adapter sends can hold setup locks needed by native cancellation.
           // Join their cleanup before attempting interruption or session teardown.
-          yield* Fiber.interruptAll(
-            [...(pendingSends.get(threadId) ?? [])].filter((fiber) => fiber !== current),
+          yield* Effect.forEach(
+            [...(pendingSends.get(threadId) ?? [])],
+            (ready) =>
+              Deferred.await(ready).pipe(
+                Effect.flatMap((fiber) =>
+                  fiber === current ? Effect.void : Fiber.interrupt(fiber),
+                ),
+              ),
+            { discard: true, concurrency: "unbounded" },
           );
           return yield* effect;
         }),
@@ -1537,8 +1547,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
                     provider: routed.adapter.provider,
                     method: "turn/start",
                     detail:
-                      "Native submission could not be confirmed. This thread stays reserved until native completion or confirmed teardown. " +
-                      Cause.pretty(sendExit.cause),
+                      "Native submission could not be confirmed. This thread stays reserved until native completion or confirmed teardown.",
                     cause: sendExit.cause,
                   });
                 }

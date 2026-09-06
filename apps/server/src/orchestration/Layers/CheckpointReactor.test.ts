@@ -307,6 +307,7 @@ describe("CheckpointReactor", () => {
     | CheckpointReactor
     | TurnCheckpointCapture.TurnCheckpointCapture
     | CheckpointStore.CheckpointStore
+    | TurnCheckpointCapture.TurnCheckpointCapture
     | ProjectionSnapshotQuery
     | RuntimeReceiptBus.RuntimeReceiptBus
     | SqlClient.SqlClient,
@@ -436,6 +437,9 @@ describe("CheckpointReactor", () => {
     const sql = await runtime.runPromise(Effect.service(SqlClient.SqlClient));
     const checkpointReverts = await testRuntime.runPromise(
       CheckpointRevertRecovery.CheckpointRevertRecovery,
+    );
+    const captures = await runtime.runPromise(
+      Effect.service(TurnCheckpointCapture.TurnCheckpointCapture),
     );
     const checkpointStore = await runtime.runPromise(
       Effect.service(CheckpointStore.CheckpointStore),
@@ -597,6 +601,7 @@ describe("CheckpointReactor", () => {
 
     return {
       engine,
+      captures,
       readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
       provider,
       cwd,
@@ -609,6 +614,61 @@ describe("CheckpointReactor", () => {
       pullRequestRefreshes,
     };
   }
+
+  effectIt.effect("captures late native edits after an earlier synthetic failure", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({ seedFilesystemCheckpoints: false }),
+      );
+      const threadId = ThreadId.make("thread-1");
+      const turnId = TurnId.make("late-native-turn");
+      const providerInstanceId = ProviderInstanceId.make("codex");
+      const submission = yield* harness.captures.trackSubmission(threadId, providerInstanceId);
+      yield* submission.beforeSubmit(turnId);
+      const started = {
+        type: "turn.started" as const,
+        eventId: EventId.make("late-native-started"),
+        provider: ProviderDriverKind.make("codex"),
+        providerInstanceId,
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        payload: {},
+      };
+      yield* harness.captures.observe(started);
+      harness.provider.emit(started);
+      expect(yield* harness.nextReceipt).toMatchObject({ type: "checkpoint.baseline.captured" });
+      NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "incomplete native work\n");
+      const synthetic = {
+        ...started,
+        type: "turn.completed" as const,
+        eventId: EventId.make("late-native-synthetic-failure"),
+        payload: { state: "failed" as const },
+      };
+      yield* harness.captures.observe(synthetic);
+      harness.provider.emit(synthetic);
+      yield* harness.captures.awaitCapture(threadId);
+      expect(gitRefExists(harness.cwd, checkpointRefForThreadTurn(threadId, 1))).toBe(false);
+
+      NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "finished native work\n");
+      yield* submission.nativeCompleted(turnId);
+      const confirmed = {
+        ...synthetic,
+        eventId: EventId.make("late-native-confirmed"),
+        payload: { state: "completed" as const },
+      };
+      yield* harness.captures.observe(confirmed);
+      harness.provider.emit(confirmed);
+      expect(yield* harness.nextReceipt).toMatchObject({
+        type: "checkpoint.diff.finalized",
+        turnId,
+      });
+      yield* harness.captures.awaitNativeCapture(threadId);
+      expect(
+        gitShowFileAtRef(harness.cwd, checkpointRefForThreadTurn(threadId, 1), "README.md"),
+      ).toBe("finished native work\n");
+    }),
+  );
 
   effectIt.effect("captures baseline and large turn summaries before completion receipts", () =>
     Effect.gen(function* () {

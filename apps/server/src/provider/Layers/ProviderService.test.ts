@@ -1005,6 +1005,124 @@ const routing = makeProviderServiceLayer();
 
 const admissionOrdering = makeProviderServiceLayer();
 admissionOrdering.layer("ProviderServiceLive native turn admission", (it) => {
+  it.effect(
+    "keeps the old provider binding and workspace until published native capture finishes",
+    () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const captures = yield* TurnCheckpointCapture.TurnCheckpointCapture;
+        const threadId = asThreadId("switch-after-native-capture");
+        const turnId = asTurnId("old-instance-turn");
+        const oldCwd = fixtureCwd("admission-old");
+        const newCwd = fixtureCwd("admission-new");
+        const sent = yield* Deferred.make<ProviderTurnStartOptions>();
+        admissionOrdering.codex.sendTurn.mockImplementationOnce((input, hooks) =>
+          Effect.gen(function* () {
+            if (hooks === undefined)
+              return yield* Effect.die("The real service must supply native admission.");
+            yield* hooks.beforeSubmit(turnId);
+            yield* Deferred.succeed(sent, hooks);
+            return { threadId: input.threadId, turnId };
+          }),
+        );
+        yield* provider.startSession(threadId, {
+          threadId,
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          cwd: oldCwd,
+          runtimeMode: "full-access",
+        });
+        yield* provider.sendTurn({ threadId, input: "old provider work" });
+        const replacement = yield* provider
+          .startSession(threadId, {
+            threadId,
+            provider: CLAUDE_AGENT_DRIVER,
+            providerInstanceId: claudeAgentInstanceId,
+            cwd: newCwd,
+            runtimeMode: "full-access",
+          })
+          .pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        assert.equal(replacement.pollUnsafe(), undefined);
+        const oldBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        assert.equal(oldBinding.providerInstanceId, codexInstanceId);
+        assert.containSubset(oldBinding.runtimePayload, { cwd: oldCwd });
+        const published =
+          yield* Deferred.make<Extract<ProviderRuntimeEvent, { type: "turn.completed" }>>();
+        yield* Stream.runForEach(provider.streamEvents, (event) =>
+          event.threadId === threadId && event.type === "turn.completed"
+            ? Deferred.succeed(published, event)
+            : Effect.void,
+        ).pipe(Effect.forkChild({ startImmediately: true }));
+        yield* (yield* Deferred.await(sent)).nativeCompleted(turnId);
+        admissionOrdering.codex.emit({
+          type: "turn.completed",
+          eventId: asEventId("switch-native-completed"),
+          threadId,
+          turnId,
+          provider: CODEX_DRIVER,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          payload: { state: "completed" },
+        });
+        const terminal = yield* Deferred.await(published);
+        assert.equal(terminal.providerInstanceId, codexInstanceId);
+        assert.equal(yield* captures.shouldCapture(terminal), true);
+        assert.equal(replacement.pollUnsafe(), undefined);
+        yield* captures.complete(terminal, "captured");
+        yield* Fiber.join(replacement);
+        const newBinding = Option.getOrThrow(yield* directory.getBinding(threadId));
+        assert.equal(newBinding.providerInstanceId, claudeAgentInstanceId);
+        assert.containSubset(newBinding.runtimePayload, { cwd: newCwd });
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("joins a parked native submission before stopping its session", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const captures = yield* TurnCheckpointCapture.TurnCheckpointCapture;
+      const threadId = asThreadId("stop-parked-native-send");
+      const beforeGate = yield* Deferred.make<void>();
+      const order: string[] = [];
+      const old = yield* captures.trackSubmission(threadId, codexInstanceId);
+      yield* provider.startSession(threadId, {
+        threadId,
+        provider: CODEX_DRIVER,
+        providerInstanceId: codexInstanceId,
+        runtimeMode: "full-access",
+      });
+      yield* old.beforeSubmit(asTurnId("old-reserved-turn"));
+      admissionOrdering.codex.sendTurn.mockImplementationOnce((input, hooks) =>
+        Effect.gen(function* () {
+          if (hooks === undefined) return yield* Effect.die("Missing native admission.");
+          yield* Deferred.succeed(beforeGate, undefined);
+          yield* hooks.beforeSubmit(asTurnId("parked-turn"));
+          order.push("native-submit");
+          return { threadId: input.threadId, turnId: asTurnId("parked-turn") };
+        }).pipe(
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              order.push("send-joined");
+            }),
+          ),
+        ),
+      );
+      admissionOrdering.codex.stopSession.mockImplementationOnce(() =>
+        Effect.sync(() => {
+          order.push("native-stop");
+        }),
+      );
+      const send = yield* provider
+        .sendTurn({ threadId, input: "park me" })
+        .pipe(Effect.exit, Effect.forkChild);
+      yield* Deferred.await(beforeGate);
+      yield* provider.stopSession({ threadId });
+      assert.equal(Exit.isFailure(yield* Fiber.join(send)), true);
+      assert.deepEqual(order, ["send-joined", "native-stop"]);
+      yield* old.notSubmitted;
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("waits when the previous terminal arrives during send preparation", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
