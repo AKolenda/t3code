@@ -97,7 +97,7 @@ const rollbackInput = {
   runtimeMode: "full-access" as const,
   modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-test"),
   resumeCursor: { threadId: rollbackSourceId },
-  numTurns: 1,
+  targetTurnId: asTurnId("native-turn-2"),
 };
 const rollbackGoal = {
   threadId: rollbackSourceId,
@@ -292,12 +292,75 @@ it.effect("retries a lost fork reply against the same saved boundary", () =>
   }),
 );
 
+it.effect("uses the checkpoint ID when native turns have no T3 checkpoint", () =>
+  Effect.gen(function* () {
+    const { client, state, request } = makeRollbackClient();
+    state.sourceTurnIds = [
+      "imported-turn",
+      "native-turn-1",
+      "failed-checkpoint-turn",
+      "native-turn-2",
+      "native-turn-3",
+      "external-turn",
+    ];
+    const target = yield* prepareCodexConversationRollback(
+      client,
+      rollbackInput,
+      rollbackInitialize,
+    );
+    state.forkTurnIds = state.sourceTurnIds.slice(0, 4);
+    yield* forkCodexConversationRollback(client, target, rollbackInitialize.userAgent);
+    NodeAssert.deepStrictEqual(target.retainedTurnIds, state.forkTurnIds);
+    NodeAssert.equal(target.firstRemovedTurnId, "native-turn-3");
+    const fork = request.mock.calls.find(([method]) => method === "thread/fork");
+    NodeAssert.partialDeepStrictEqual(fork?.[1], { lastTurnId: "native-turn-2" });
+  }),
+);
+
+it.effect("refuses a checkpoint whose native turn is missing", () =>
+  Effect.gen(function* () {
+    const { client, state, request } = makeRollbackClient();
+    // A compacted or replaced history must not fall back to a relative count.
+    state.sourceTurnIds = ["native-turn-3"];
+    const result = yield* prepareCodexConversationRollback(
+      client,
+      rollbackInput,
+      rollbackInitialize,
+    ).pipe(Effect.result);
+    NodeAssert.equal(result._tag, "Failure");
+    NodeAssert.deepStrictEqual(
+      request.mock.calls.map(([method]) => method),
+      ["thread/read"],
+    );
+  }),
+);
+
+it.effect.each([false, true])(
+  "forks an exact prefix with no later native turns, empty=%s",
+  (empty) =>
+    Effect.gen(function* () {
+      const { client, state } = makeRollbackClient();
+      if (empty) state.sourceTurnIds = [];
+      state.forkTurnIds = [...state.sourceTurnIds];
+      const target = yield* prepareCodexConversationRollback(
+        client,
+        { ...rollbackInput, targetTurnId: empty ? null : asTurnId("native-turn-3") },
+        rollbackInitialize,
+      );
+      NodeAssert.equal(target.firstRemovedTurnId, null);
+      NodeAssert.deepStrictEqual(
+        yield* forkCodexConversationRollback(client, target, rollbackInitialize.userAgent),
+        { threadId: "native-fork-1" },
+      );
+    }),
+);
+
 it.effect("creates a persistent empty-prefix fork without dropping the native goal", () =>
   Effect.gen(function* () {
     const { client, state, request } = makeRollbackClient();
     const target = yield* prepareCodexConversationRollback(
       client,
-      { ...rollbackInput, numTurns: 3 },
+      { ...rollbackInput, targetTurnId: null },
       rollbackInitialize,
     );
     state.forkTurnIds = [];

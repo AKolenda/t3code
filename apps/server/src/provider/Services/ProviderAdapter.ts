@@ -60,7 +60,7 @@ export interface ProviderAdapterShape<TError> {
   readonly conversationRollback?: {
     /** The adapter validates its saved target before each fork. */
     readonly prepare: (
-      input: ProviderSessionStartInput & { readonly numTurns: number },
+      input: ProviderSessionStartInput & { readonly targetTurnId: TurnId | null },
     ) => Effect.Effect<unknown, TError>;
     /** The original conversation is unchanged. Null means an empty history. */
     readonly fork: (target: unknown) => Effect.Effect<unknown | null, TError>;

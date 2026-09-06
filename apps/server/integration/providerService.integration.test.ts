@@ -1,5 +1,5 @@
 import type { ProviderRuntimeEvent } from "@t3tools/contracts";
-import { ProviderDriverKind, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId, ThreadId, TurnId } from "@t3tools/contracts";
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts/settings";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it, assert } from "@effect/vitest";
@@ -279,7 +279,7 @@ it.live("runs multi-turn tool/approval flow", () =>
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
-it.live("rolls back provider conversation state only", () =>
+it.live("rewinds an exact native turn even when no T3 checkpoints follow it", () =>
   Effect.gen(function* () {
     const fixture = yield* makeIntegrationFixture();
     const { join } = yield* Path.Path;
@@ -323,7 +323,8 @@ it.live("rolls back provider conversation state only", () =>
       const plan = yield* provider.prepareConversationRollback({
         threadId: session.threadId,
         cwd: fixture.cwd,
-        numTurns: 1,
+        numTurns: 0,
+        targetTurnId: TurnId.make("turn-1"),
       });
       const resumeCursor = yield* provider.forkConversation(plan);
       yield* provider.rollbackConversation({ plan, resumeCursor });

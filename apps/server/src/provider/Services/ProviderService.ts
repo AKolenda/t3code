@@ -25,6 +25,7 @@ import type {
   ProviderUploadFeedbackResult,
   MessageId,
   ThreadId,
+  TurnId,
   ProviderTurnStartResult,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -119,6 +120,8 @@ export interface ProviderServiceShape {
     readonly threadId: ThreadId;
     readonly cwd: string;
     readonly numTurns: number;
+    /** Retain this checkpoint's native turn. Null restores the empty baseline. */
+    readonly targetTurnId: TurnId | null;
   }) => Effect.Effect<ConversationRollbackPlan, ProviderServiceError>;
 
   /** Fork the saved native prefix without changing the thread's bound cursor. */

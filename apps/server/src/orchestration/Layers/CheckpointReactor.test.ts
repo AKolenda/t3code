@@ -1855,90 +1855,26 @@ describe("CheckpointReactor", () => {
     ).toBe(false);
   });
 
-  it("executes provider revert and emits thread.reverted for OpenCode sessions", async () => {
-    const harness = await createHarness({ providerName: ProviderDriverKind.make("opencode") });
-    const createdAt = "2026-01-01T00:00:00.000Z";
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.session.set",
-        commandId: CommandId.make("cmd-session-set-claude"),
-        threadId: ThreadId.make("thread-1"),
-        session: {
-          threadId: ThreadId.make("thread-1"),
-          status: "ready",
-          providerName: "opencode",
-          runtimeMode: "approval-required",
-          activeTurnId: null,
-          lastError: null,
-          updatedAt: createdAt,
-        },
-        createdAt,
-      }),
-    );
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.diff.complete",
-        commandId: CommandId.make("cmd-diff-claude-1"),
-        threadId: ThreadId.make("thread-1"),
-        turnId: asTurnId("turn-claude-1"),
-        completedAt: createdAt,
-        checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 1),
-        status: "ready",
-        files: [],
-        checkpointTurnCount: 1,
-        createdAt,
-      }),
-    );
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.turn.diff.complete",
-        commandId: CommandId.make("cmd-diff-claude-2"),
-        threadId: ThreadId.make("thread-1"),
-        turnId: asTurnId("turn-claude-2"),
-        completedAt: createdAt,
-        checkpointRef: checkpointRefForThreadTurn(ThreadId.make("thread-1"), 2),
-        status: "ready",
-        files: [],
-        checkpointTurnCount: 2,
-        createdAt,
-      }),
-    );
-
-    await Effect.runPromise(
-      harness.engine.dispatch({
-        type: "thread.checkpoint.revert",
-        commandId: CommandId.make("cmd-revert-request-claude"),
-        threadId: ThreadId.make("thread-1"),
-        turnCount: 1,
-        createdAt,
-      }),
-    );
-
-    await waitForEvent(harness.engine, (event) => event.type === "thread.reverted");
-    expect(harness.provider.rollbackConversation).toHaveBeenCalledTimes(1);
-    expect(harness.provider.rollbackConversation).toHaveBeenCalledWith({
-      plan: expect.objectContaining({
-        source: expect.objectContaining({ threadId: ThreadId.make("thread-1") }),
-        numTurns: 1,
-      }),
-      resumeCursor: { threadId: "forked-native-thread" },
-    });
-  });
-
   it("processes consecutive revert requests with deterministic rollback sequencing", async () => {
     const harness = await createHarness({ seedCheckpointSummaries: true });
+    NodeFS.writeFileSync(NodePath.join(harness.cwd, "README.md"), "unsaved changes\n");
+    await Effect.runPromise(
+      harness.revertAndWait(2, CommandId.make("cmd-sequenced-revert-request-2")),
+    );
+    expect(NodeFS.readFileSync(NodePath.join(harness.cwd, "README.md"), "utf8")).toBe("v3\n");
     await Effect.runPromise(
       harness.revertAndWait(1, CommandId.make("cmd-sequenced-revert-request-1")),
     );
     await Effect.runPromise(
       harness.revertAndWait(0, CommandId.make("cmd-sequenced-revert-request-0")),
     );
-    expect(harness.provider.rollbackConversation).toHaveBeenCalledTimes(2);
+    expect(harness.provider.rollbackConversation).toHaveBeenCalledTimes(3);
     expect(
       harness.provider.rollbackConversation.mock.calls.map(([input]) => input.plan.numTurns),
-    ).toEqual([1, 1]);
+    ).toEqual([0, 1, 1]);
+    expect(
+      harness.provider.prepareConversationRollback.mock.calls.map(([input]) => input.targetTurnId),
+    ).toEqual(["turn-2", "turn-1", null]);
   });
 
   effectIt.effect.each([

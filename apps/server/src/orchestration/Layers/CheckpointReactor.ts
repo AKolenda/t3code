@@ -753,12 +753,13 @@ const make = Effect.gen(function* () {
           (count, checkpoint) => Math.max(count, checkpoint.checkpointTurnCount),
           0,
         );
+        const targetCheckpoint = thread.checkpoints.find(
+          (checkpoint) => checkpoint.checkpointTurnCount === attempt.turnCount,
+        );
         const targetCheckpointRef =
           attempt.turnCount === 0
             ? checkpointRefForThreadTurn(attempt.threadId, 0)
-            : thread.checkpoints.find(
-                (checkpoint) => checkpoint.checkpointTurnCount === attempt.turnCount,
-              )?.checkpointRef;
+            : targetCheckpoint?.checkpointRef;
         if (!targetCheckpointRef || attempt.turnCount > currentTurnCount) {
           return yield* new CheckpointRevertRecovery.CheckpointRevertRecoveryError({
             threadId: attempt.threadId,
@@ -777,6 +778,7 @@ const make = Effect.gen(function* () {
           threadId: attempt.threadId,
           cwd,
           numTurns: currentTurnCount - attempt.turnCount,
+          targetTurnId: attempt.turnCount === 0 ? null : (targetCheckpoint?.turnId ?? null),
         });
         const planned = {
           ...attempt,
@@ -845,26 +847,24 @@ const make = Effect.gen(function* () {
           plan: attempt.rollbackPlan,
           resumeCursor: attempt.resumeCursor,
         });
-        if (attempt.rollbackPlan.numTurns > 0) {
-          yield* orchestrationEngine.dispatch({
-            type: "thread.session.set",
-            commandId: CommandId.make(`server:checkpoint-revert-session:${attempt.attemptId}`),
+        yield* orchestrationEngine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`server:checkpoint-revert-session:${attempt.attemptId}`),
+          threadId: attempt.threadId,
+          session: {
             threadId: attempt.threadId,
-            session: {
-              threadId: attempt.threadId,
-              status: "stopped",
-              providerName: attempt.rollbackPlan.source.provider ?? null,
-              ...(attempt.rollbackPlan.source.providerInstanceId !== undefined
-                ? { providerInstanceId: attempt.rollbackPlan.source.providerInstanceId }
-                : {}),
-              runtimeMode: attempt.rollbackPlan.source.runtimeMode,
-              activeTurnId: null,
-              lastError: null,
-              updatedAt: yield* nowIso,
-            },
-            createdAt: yield* nowIso,
-          });
-        }
+            status: "stopped",
+            providerName: attempt.rollbackPlan.source.provider ?? null,
+            ...(attempt.rollbackPlan.source.providerInstanceId !== undefined
+              ? { providerInstanceId: attempt.rollbackPlan.source.providerInstanceId }
+              : {}),
+            runtimeMode: attempt.rollbackPlan.source.runtimeMode,
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: yield* nowIso,
+          },
+          createdAt: yield* nowIso,
+        });
         const bound = { ...attempt, stage: "provider-complete" } as const;
         yield* checkpointReverts.save(bound);
         attempt = bound;

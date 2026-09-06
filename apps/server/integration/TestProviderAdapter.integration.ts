@@ -491,12 +491,21 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       prepare: Effect.fn("TestProviderAdapter.prepareRollback")(function* (input) {
         const state = sessions.get(input.threadId);
         if (!state) return yield* missingSessionEffect(provider, input.threadId);
+        const retainedTurnCount =
+          input.targetTurnId === null
+            ? 0
+            : state.snapshot.turns.findIndex((turn) => turn.id === input.targetTurnId) + 1;
+        if (input.targetTurnId !== null && retainedTurnCount === 0) {
+          return yield* new ProviderAdapterValidationError({
+            provider,
+            operation: "conversationRollback",
+            issue: "The checkpoint's native turn is missing.",
+          });
+        }
         return {
           threadId: input.threadId,
-          numTurns: input.numTurns,
-          retainedTurnIds: state.snapshot.turns
-            .slice(0, state.snapshot.turns.length - input.numTurns)
-            .map((turn) => turn.id),
+          numTurns: state.snapshot.turns.length - retainedTurnCount,
+          retainedTurnIds: state.snapshot.turns.slice(0, retainedTurnCount).map((turn) => turn.id),
         };
       }),
       fork: Effect.fn("TestProviderAdapter.forkConversation")(function* (rawTarget) {

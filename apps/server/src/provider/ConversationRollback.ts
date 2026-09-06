@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 // checkpoint revert commits so retries never derive a new relative boundary.
 export const ConversationRollbackPlan = Schema.Struct({
   source: ProviderSessionStartInput,
+  // T3 checkpoint count for telemetry, never a native conversation boundary.
   numTurns: NonNegativeInt,
   target: Schema.Unknown,
 });

@@ -5,6 +5,7 @@ import {
   type ProviderSessionStartInput,
   RuntimeMode,
   ThreadId,
+  type TurnId,
   TrimmedNonEmptyString,
 } from "@t3tools/contracts";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
@@ -37,7 +38,7 @@ export const CodexConversationRollbackTarget = Schema.Struct({
   runtimeMode: RuntimeMode,
   modelSelection: Schema.optional(ModelSelection),
   retainedTurnIds: Schema.Array(TrimmedNonEmptyString),
-  firstRemovedTurnId: TrimmedNonEmptyString,
+  firstRemovedTurnId: Schema.NullOr(TrimmedNonEmptyString),
   goal: Goal,
 });
 type RollbackTarget = typeof CodexConversationRollbackTarget.Type;
@@ -122,13 +123,10 @@ const readGoal = Effect.fn("CodexConversationRollback.readGoal")(function* (
 export const prepareCodexConversationRollback = Effect.fn("prepareCodexConversationRollback")(
   function* (
     client: RollbackClient,
-    input: ProviderSessionStartInput & { readonly numTurns: number },
+    input: ProviderSessionStartInput & { readonly targetTurnId: TurnId | null },
     initialize: { readonly codexHome: string; readonly userAgent: string },
   ) {
     yield* requireSafeForkVersion(initialize.userAgent);
-    if (!Number.isInteger(input.numTurns) || input.numTurns < 1) {
-      return yield* invalid("numTurns must be an integer >= 1.");
-    }
     if (!input.cwd || !input.providerInstanceId) {
       return yield* invalid(
         "A saved workspace and provider instance are required to rewind Codex.",
@@ -141,10 +139,14 @@ export const prepareCodexConversationRollback = Effect.fn("prepareCodexConversat
       Effect.mapError(() => invalid("A saved Codex conversation ID is required to rewind.")),
     );
     const turnIds = yield* readThread(client, cursor.threadId);
-    const retainedTurnCount = turnIds.length - input.numTurns;
-    const firstRemovedTurnId = turnIds[retainedTurnCount];
-    if (retainedTurnCount < 0 || firstRemovedTurnId === undefined) {
-      return yield* invalid("The requested rewind exceeds the saved Codex conversation history.");
+    // Failed checkpoints, imported history, and direct Codex input can make
+    // native turn counts differ from T3 checkpoint counts. Only the ID is exact.
+    const retainedTurnCount =
+      input.targetTurnId === null ? 0 : turnIds.indexOf(input.targetTurnId) + 1;
+    if (input.targetTurnId !== null && retainedTurnCount === 0) {
+      return yield* invalid(
+        "The checkpoint's turn is missing from the saved Codex conversation. Rewind stopped before changing files.",
+      );
     }
     const goal = yield* readGoal(client, cursor.threadId);
     return {
@@ -157,7 +159,7 @@ export const prepareCodexConversationRollback = Effect.fn("prepareCodexConversat
       runtimeMode: input.runtimeMode,
       ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
       retainedTurnIds: turnIds.slice(0, retainedTurnCount),
-      firstRemovedTurnId,
+      firstRemovedTurnId: turnIds[retainedTurnCount] ?? null,
       goal,
     } satisfies RollbackTarget;
   },
@@ -173,7 +175,7 @@ export const forkCodexConversationRollback = Effect.fn("forkCodexConversationRol
   const turnIds = yield* readThread(client, target.sourceThreadId);
   if (
     target.retainedTurnIds.some((turnId, index) => turnIds[index] !== turnId) ||
-    turnIds[target.retainedTurnIds.length] !== target.firstRemovedTurnId
+    (turnIds[target.retainedTurnIds.length] ?? null) !== target.firstRemovedTurnId
   ) {
     return yield* invalid("The saved Codex rewind boundary no longer matches the source history.");
   }
@@ -195,7 +197,11 @@ export const forkCodexConversationRollback = Effect.fn("forkCodexConversationRol
         : undefined,
     }),
     threadId: target.sourceThreadId,
-    ...(lastTurnId ? { lastTurnId } : { beforeTurnId: target.firstRemovedTurnId }),
+    ...(lastTurnId
+      ? { lastTurnId }
+      : target.firstRemovedTurnId
+        ? { beforeTurnId: target.firstRemovedTurnId }
+        : {}),
     ephemeral: false,
     deferGoalContinuation: true,
     config: { "features.goals": true },
