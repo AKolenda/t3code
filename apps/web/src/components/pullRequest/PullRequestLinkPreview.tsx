@@ -3,9 +3,8 @@ import type { EnvironmentId, PullRequestRef } from "@t3tools/contracts";
 import { cloneElement, useState, type ComponentPropsWithoutRef, type ReactElement } from "react";
 
 import { formatRelativeTimeLabel } from "~/timestampFormat";
-import { pullRequestEnvironment } from "~/state/pullRequests";
+import { pullRequestEnvironment, usePullRequestDetail } from "~/state/pullRequests";
 import { useAtomQueryRunner } from "~/state/use-atom-query-runner";
-import { useEnvironmentQuery } from "~/state/query";
 
 import { PreviewCard, PreviewCardPopup, PreviewCardTrigger } from "../ui/preview-card";
 import { PullRequestActorAvatar, resolvePullRequestState } from "./pullRequestPresentation";
@@ -34,14 +33,7 @@ export function PullRequestLinkPreview({
 }) {
   const [open, setOpen] = useState(false);
   const [resolvingClick, setResolvingClick] = useState(false);
-  const detailQuery = useEnvironmentQuery(
-    open
-      ? pullRequestEnvironment.detail({
-          environmentId: target.environmentId,
-          input: target.input,
-        })
-      : null,
-  );
+  const detailQuery = usePullRequestDetail(open ? target : null);
   const readDetail = useAtomQueryRunner(pullRequestEnvironment.detail, {
     reportFailure: false,
     reportDefect: false,

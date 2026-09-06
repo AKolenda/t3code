@@ -36,9 +36,7 @@ import {
   PULL_REQUEST_DETAIL_SNAPSHOT_MAX_ENTRIES,
   readableFailure,
   readPullRequestDetailSnapshot,
-  resolveDisplayedPullRequestDetail,
   resolvePullRequestPrimaryControl,
-  shouldRefreshPullRequestActivity,
   resolveBaseFreshness,
   buildPullRequestTimeline,
   editPullRequestThreadComment,
@@ -88,32 +86,6 @@ const TIMELINE_SOURCE: Pick<
   closedAt: null,
 };
 
-describe("pull request activity refresh", () => {
-  const first = {
-    key: "project:acme/web#7",
-    updatedAt: "2026-08-13T13:00:00Z",
-  };
-
-  it("refreshes activity only after the same pull request changes", () => {
-    expect(
-      shouldRefreshPullRequestActivity(first, {
-        ...first,
-        updatedAt: "2026-08-13T13:01:00Z",
-      }),
-    ).toBe(true);
-  });
-
-  it("does not duplicate the first activity read or carry a revision across pull requests", () => {
-    expect(shouldRefreshPullRequestActivity(null, first)).toBe(false);
-    expect(shouldRefreshPullRequestActivity(first, first)).toBe(false);
-    expect(
-      shouldRefreshPullRequestActivity(first, {
-        key: "project:acme/web#8",
-        updatedAt: "2026-08-13T13:01:00Z",
-      }),
-    ).toBe(false);
-  });
-});
 describe("review thread comment pages", () => {
   it("appends new comments once and keeps refreshed base comments", () => {
     expect(
@@ -1620,26 +1592,6 @@ describe("cached pull request detail", () => {
     );
     expect(readPullRequestDetailSnapshot(storage, "env-1", reference)).toBeNull();
     expect(storage.entries().filter(([key]) => key.startsWith(snapshotPrefix))).toHaveLength(0);
-  });
-
-  it("keeps a cached tab painted while the live read replaces the counts", () => {
-    const cached = detail();
-    const live = detail({ additions: 40, deletions: 9, title: "Cache the title" });
-    expect(resolveDisplayedPullRequestDetail({ live, cached, reference })?.additions).toBe(40);
-    expect(resolveDisplayedPullRequestDetail({ live: null, cached, reference })?.additions).toBe(
-      12,
-    );
-  });
-
-  it("does not paint another change request's snapshot", () => {
-    expect(
-      resolveDisplayedPullRequestDetail({
-        live: null,
-        cached: detail({ number: 8 }),
-        reference,
-      }),
-    ).toBeNull();
-    expect(readPullRequestDetailSnapshot(makeStorage(), "env-2", reference)).toBeNull();
   });
 
   it("tolerates corrupt, denied, missing, and non-evictable storage", () => {

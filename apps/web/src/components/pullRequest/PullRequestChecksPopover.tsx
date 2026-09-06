@@ -8,8 +8,7 @@ import type {
 
 import { useOpenLink } from "~/browser/useOpenLink";
 import { cn } from "~/lib/utils";
-import { pullRequestEnvironment } from "~/state/pullRequests";
-import { useEnvironmentQuery } from "~/state/query";
+import { usePullRequestDetail } from "~/state/pullRequests";
 
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -35,9 +34,7 @@ function LazyChecksBody({
   reference: PullRequestRef;
   threadRef: ScopedThreadRef | null;
 }) {
-  const detailQuery = useEnvironmentQuery(
-    pullRequestEnvironment.detail({ environmentId, input: reference }),
-  );
+  const detailQuery = usePullRequestDetail({ environmentId, input: reference });
   if (detailQuery.error !== null) {
     return <p className="text-muted-foreground text-xs">{detailQuery.error}</p>;
   }

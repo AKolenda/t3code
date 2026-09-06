@@ -60,12 +60,10 @@ import {
   rankPullRequestMatches,
   sortPullRequestGroups,
   pullRequestEnvironmentSetKey,
-  readPullRequestListSnapshot,
   resolveProjectScope,
   resolveQueryEnvironmentIds,
   resolveSelectedEnvironmentId,
   withDiffStat,
-  writePullRequestListSnapshot,
   scorePullRequestMatch,
   pullRequestStatsRefreshBatches,
   pullRequestStatsRequestBatches,
@@ -76,7 +74,6 @@ import {
   type PullRequestStatsBatch,
   type PullRequestStatsPolicy,
   type PullRequestStatsScope,
-  type PullRequestPartitionsSnapshot,
 } from "../components/pullRequest/pullRequestList.logic";
 import {
   pullRequestListPreferences,
@@ -134,6 +131,9 @@ import { useAllEnvironmentShellsBootstrapped, useProjects } from "../state/entit
 import { useEnvironments } from "../state/environments";
 import {
   pullRequestEnvironment,
+  refreshPullRequestFromHost,
+  useObservedPullRequestEntries,
+  useRetainedPullRequestList,
   usePullRequestList,
   usePullRequestListStats,
   usePullRequestTurnRefreshes,
@@ -193,6 +193,7 @@ const SORT_OPTIONS = [
 
 /** Long enough that a keystroke does not become a request, short enough to feel answered. */
 const SEARCH_DEBOUNCE_MS = 250;
+const EMPTY_ENTRIES: ReadonlyArray<EnvironmentPullRequestEntry> = [];
 /** What `scorePullRequestMatch` gives a row none of whose own fields carry the search text. */
 const MATCHED_ELSEWHERE_SCORE = 10;
 /**
@@ -802,10 +803,6 @@ function PullRequestsRouteView() {
   // The header's refresh punches through the server's cache before re-reading; the error and
   // empty states retry plainly, because a failure is never cached.
   const invalidate = useAtomCommand(pullRequestEnvironment.invalidate, { reportFailure: false });
-  // What the reader pressed refresh for is everything they can see, not the one query that
-  // happens to be theirs: the list, the counts beside its rows, and whatever the panel is
-  // showing. The panel owns its own reads, so it is told to redo them rather than reached into.
-  const [detailRefreshToken, setDetailRefreshToken] = useState(0);
   // The queries only go pending once the invalidation has come back, so refreshing is tracked
   // from the first moment rather than the second: a button that stays live through the slow half
   // of its own work is a button that gets pressed again, and buys the whole cascade twice.
@@ -835,22 +832,19 @@ function PullRequestsRouteView() {
       setStatsTargetState({ key: requestedStatsScope.key, batches });
       statsQuery.refresh(batches.map(({ environmentId, input }) => ({ environmentId, input })));
     }
-    if (includeDetail) setDetailRefreshToken((token) => token + 1);
+    if (includeDetail && panelEnvironmentId !== null && renderedPullRequestSurface !== null) {
+      void refreshPullRequestFromHost({
+        environmentId: panelEnvironmentId,
+        input: {
+          projectId: renderedPullRequestSurface.projectId as ProjectId,
+          repository: renderedPullRequestSurface.repository,
+          number: renderedPullRequestSurface.number,
+        },
+      });
+    }
   };
   const refreshing = invalidating || listQuery.isPending;
 
-  // Every page size and every search is its own query, and a new one starts empty. The last
-  // answer for these filters is held so the page grows and narrows in place rather than blanking
-  // out: a longer page reads as growth, and a search shows the rows it already has, narrowed
-  // here, until the hosts answer for themselves.
-  const [loaded, setLoaded] = useState<{
-    environmentKey: string;
-    scope: string;
-    query: string;
-    data: MergedPullRequestList;
-    /** The priority groups' own answers, carried so a cold start has whole groups too. */
-    partitions?: PullRequestPartitionsSnapshot;
-  } | null>(null);
   // A longer page is the same list with more on the end, so the rows already read stay where
   // they were read: each answer is merged onto the last rather than replacing it, and anything
   // new lands at the bottom. Only a different question — other filters, another search — starts
@@ -860,98 +854,16 @@ function PullRequestsRouteView() {
     key: string;
     entries: ReadonlyArray<EnvironmentPullRequestEntry>;
   } | null>(null);
-  // A reload recreates the registry the queries live in, so with nothing held the page would
-  // cold-start into skeletons even though almost every row is unchanged. The last answer for
-  // this set of environments is kept across reloads and hydrated here as the carried rows: they
-  // render at once — narrowed to the current filters like any carried answer — and the live read
-  // reconciles them in place by key rather than replacing them with ghosts.
-  useEffect(() => {
-    if (environmentKey.length === 0) return;
-    setLoaded((current) => {
-      // Rows read from a different set of environments cannot even be narrowed — one of them may
-      // no longer be connected at all — so that set's own snapshot beats holding them.
-      if (current !== null && current.environmentKey === environmentKey) return current;
-      const snapshot = readPullRequestListSnapshot(
-        typeof window === "undefined" ? undefined : window.localStorage,
-        environmentKey,
-      );
-      if (snapshot === null) return null;
-      return {
-        environmentKey,
-        scope: snapshot.scope,
-        query: "",
-        data: snapshot.data,
-        ...(snapshot.partitions === undefined ? {} : { partitions: snapshot.partitions }),
-      };
-    });
-  }, [environmentKey]);
-  useEffect(() => {
-    // Only once this query has settled. While a search is being swapped in or out the text has
-    // already changed and the data has not, so recording them together would file the previous
-    // answer under the new question — which is how a search's answer came to speak for the
-    // workspace after the search was cleared.
-    if (!listQuery.data || listQuery.isPending) return;
-    const data = listQuery.data;
-    setLoaded((current) => {
-      // The partitions arrive on their own clock, so this records whichever have landed by
-      // now and runs again when the rest do. Until then the ones already held for this scope
-      // stay — hydrated or previously answered — rather than being dropped for a feed that
-      // merely settled first.
-      const partitions =
-        partitionsWanted && authoredQuery.data !== null && reviewingQuery.data !== null
-          ? { authored: authoredQuery.data.entries, reviewing: reviewingQuery.data.entries }
-          : current !== null &&
-              current.environmentKey === environmentKey &&
-              current.scope === scopeKey
-            ? current.partitions
-            : undefined;
-      // A search's answer is the search's, not the workspace's, so only unsearched lists
-      // persist. Written here where the held partitions are in reach, so a feed settling
-      // ahead of them cannot overwrite a stored snapshot that already had both groups.
-      //
-      // What is written is what the reader is actually looking at, not this round's own
-      // answer: a continuation only asks the environments still paging, so its answer alone is
-      // missing both the rows read on earlier pages and the hosts of whichever environment had
-      // already run out of cursors. `ordered` carries the accumulated rows, and the baseline
-      // read — which never drops an environment for lack of a cursor — carries the full hosts.
-      if (environmentKey.length > 0 && sentQuery.length === 0) {
-        const accumulatedEntries = ordered?.key === filterKey ? ordered.entries : data.entries;
-        writePullRequestListSnapshot(
-          typeof window === "undefined" ? undefined : window.localStorage,
-          environmentKey,
-          {
-            scope: scopeKey,
-            data: {
-              ...data,
-              entries: accumulatedEntries,
-              viewers: baselineQuery.data?.viewers ?? data.viewers,
-              providers: baselineQuery.data?.providers ?? data.providers,
-            },
-            ...(partitions === undefined ? {} : { partitions }),
-          },
-        );
-      }
-      return {
-        environmentKey,
-        scope: scopeKey,
-        query: sentQuery,
-        data: { ...data, entries: ordered?.key === filterKey ? ordered.entries : data.entries },
-        ...(partitions === undefined ? {} : { partitions }),
-      };
-    });
-  }, [
+  const loaded = useRetainedPullRequestList({
     environmentKey,
-    scopeKey,
-    sentQuery,
-    listQuery.data,
-    listQuery.isPending,
-    partitionsWanted,
-    authoredQuery.data,
-    reviewingQuery.data,
-    ordered,
-    filterKey,
-    baselineQuery.data,
-  ]);
+    scope: scopeKey,
+    query: sentQuery,
+    live: listQuery,
+    baseline: baselineQuery.data,
+    orderedEntries: ordered?.key === filterKey ? ordered.entries : null,
+    authored: partitionsWanted ? authoredQuery.data : null,
+    reviewing: partitionsWanted ? reviewingQuery.data : null,
+  });
   // Changing a filter asks a question nothing has answered yet, and the page is already holding
   // perfectly good rows for the last one. Rather than blank out for the round trip, those rows
   // are narrowed to the new filters and stay until the answer lands — a subset of it, never a
@@ -1144,8 +1056,15 @@ function PullRequestsRouteView() {
     [baselineQuery.data?.providers, listData?.providers],
   );
 
+  const observedEntries = useObservedPullRequestEntries(
+    ordered?.key === filterKey ? ordered.entries : (listData?.entries ?? EMPTY_ENTRIES),
+  );
   const entries = useMemo(() => {
-    const known = ordered?.key === filterKey ? ordered.entries : (listData?.entries ?? []);
+    const known = narrowPullRequestsToFilters(observedEntries, {
+      state: search.state,
+      projectId: scopedProjectId,
+      host: search.host,
+    });
     const involvementEntries = filterPullRequestsByInvolvement(known, viewers, search.involvement);
     // The hosts search more than the row shows — a body, a review, a commit message — so once
     // their answer is in, narrowing it again here would throw away matches the reader asked for.
@@ -1175,13 +1094,14 @@ function PullRequestsRouteView() {
         matchesPullRequestQuery(entry, typedParsed.text),
     );
   }, [
-    filterKey,
     hasLocalFilters,
     localFilters,
-    listData,
-    ordered,
+    observedEntries,
     querySettled,
     search.involvement,
+    search.state,
+    search.host,
+    scopedProjectId,
     searchingHosts,
     showingCarried,
     typedParsed.text,
@@ -1211,46 +1131,52 @@ function PullRequestsRouteView() {
    * listing leaves them out and they arrive a moment later, into rows that already draw without
    * them. Keyed by the rows being shown, so scrolling further asks only about what is new.
    */
+  const heldPartitions =
+    loaded !== null && loaded.environmentKey === environmentKey && loaded.scope === scopeKey
+      ? loaded.partitions
+      : undefined;
+  const authoredEntries = partitionsWanted
+    ? (authoredQuery.data?.entries ?? heldPartitions?.authored)
+    : undefined;
+  const reviewingEntries = partitionsWanted
+    ? (reviewingQuery.data?.entries ?? heldPartitions?.reviewing)
+    : undefined;
+  const observedAuthored = useObservedPullRequestEntries(authoredEntries ?? EMPTY_ENTRIES);
+  const observedReviewing = useObservedPullRequestEntries(reviewingEntries ?? EMPTY_ENTRIES);
   const groups = useMemo(() => {
     if (search.involvement !== "all") return [{ key: "others" as const, label: "", entries }];
-    // Until both partitions have answered, the snapshot's stand in — they are yesterday's
-    // groups, but whole ones, where grouping the feed's first page locally loses every
-    // authored row older than it. Once the live reads land they take over; with neither,
-    // the local grouping is still better than nothing.
-    const held =
-      loaded !== null && loaded.environmentKey === environmentKey && loaded.scope === scopeKey
-        ? loaded.partitions
-        : undefined;
-    // The priority reads answer the same question the feed does, so they take the same local
-    // narrowing: a host that cannot filter for itself would otherwise put rows into Authored
-    // that the filters above just took out of the feed.
-    const narrow = (rows: ReadonlyArray<EnvironmentPullRequestEntry> | undefined) =>
-      rows === undefined || !hasLocalFilters
-        ? rows
-        : rows.filter((entry) =>
-            matchesPullRequestFilters(entry, localFilters, pullRequestEntryViewer(entry, viewers)),
-          );
-    const authored = narrow(
-      partitionsWanted ? (authoredQuery.data?.entries ?? held?.authored) : undefined,
-    );
-    const reviewing = narrow(
-      partitionsWanted ? (reviewingQuery.data?.entries ?? held?.reviewing) : undefined,
-    );
-    if (authored === undefined || reviewing === undefined) {
+    if (authoredEntries === undefined || reviewingEntries === undefined) {
       return groupPullRequestsByInvolvement(entries, viewers);
     }
-    return partitionPullRequestsWithPriority(entries, authored, reviewing);
+    const narrow = (rows: ReadonlyArray<EnvironmentPullRequestEntry>) => {
+      const scoped = narrowPullRequestsToFilters(rows, {
+        state: search.state,
+        projectId: scopedProjectId,
+        host: search.host,
+      });
+      return hasLocalFilters
+        ? scoped.filter((entry) =>
+            matchesPullRequestFilters(entry, localFilters, pullRequestEntryViewer(entry, viewers)),
+          )
+        : scoped;
+    };
+    return partitionPullRequestsWithPriority(
+      entries,
+      narrow(observedAuthored),
+      narrow(observedReviewing),
+    );
   }, [
+    authoredEntries,
+    reviewingEntries,
     hasLocalFilters,
     localFilters,
-    authoredQuery.data?.entries,
     entries,
-    environmentKey,
-    loaded,
-    partitionsWanted,
-    reviewingQuery.data?.entries,
-    scopeKey,
+    observedAuthored,
+    observedReviewing,
+    scopedProjectId,
     search.involvement,
+    search.state,
+    search.host,
     viewers,
   ]);
 
@@ -1937,7 +1863,6 @@ function PullRequestsRouteView() {
                   pullRequestListEntryId(renderedPullRequestSurface),
                 ) ?? null
               }
-              refreshToken={detailRefreshToken}
               // Host actions can change both readiness and diff size, so refresh the counts
               // alongside the list. The panel already refreshes itself after each action.
               onActed={() => {

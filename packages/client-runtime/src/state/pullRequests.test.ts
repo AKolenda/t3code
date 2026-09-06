@@ -133,7 +133,13 @@ it.effect("refreshes pull request activity after a comment is updated", () =>
       const update = yield* Effect.promise(() =>
         atoms.updateComment.run(registry, {
           environmentId: TARGET.environmentId,
-          input: { ...reference, commentId: "comment-1", kind: "issue-comment", body: "updated" },
+          input: {
+            ...reference,
+            repository: "Acme/WEB",
+            commentId: "comment-1",
+            kind: "issue-comment",
+            body: "updated",
+          },
         }),
       );
 

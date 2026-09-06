@@ -54,8 +54,7 @@ import { ScrollArea } from "~/components/ui/scroll-area";
 import { PanelTabCloseButton } from "~/components/ui/panel-tab-close-button";
 import { faviconUrlForOrigin } from "~/lib/favicon";
 import { useTheme } from "~/hooks/useTheme";
-import { pullRequestEnvironment } from "~/state/pullRequests";
-import { useEnvironmentQuery } from "~/state/query";
+import { usePullRequestDetail } from "~/state/pullRequests";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
 import { PreviewPanelShell, type PreviewPanelMode } from "./preview/PreviewPanelShell";
@@ -699,17 +698,17 @@ function PullRequestSurfaceIcon({
 }) {
   const resolvedEnvironmentId =
     (surface.environmentId as EnvironmentId | undefined) ?? environmentId;
-  const detail = useEnvironmentQuery(
+  const detail = usePullRequestDetail(
     resolvedEnvironmentId === null
       ? null
-      : pullRequestEnvironment.detail({
+      : {
           environmentId: resolvedEnvironmentId,
           input: {
             projectId: surface.projectId as ProjectId,
             repository: surface.repository,
             number: surface.number,
           },
-        }),
+        },
   ).data;
   // Only state and draft reach the tab. A list seed cannot know mergeability, so feeding the
   // full detail would flip an open tab to the conflict glyph the moment its read lands.

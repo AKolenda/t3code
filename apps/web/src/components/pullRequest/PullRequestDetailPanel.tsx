@@ -8,7 +8,6 @@ import {
   type PullRequestListEntry,
   type PullRequestUpdateMethod,
   type PullRequestRef,
-  type PullRequestState,
   resolveEnvironmentMachineKind,
   type ScopedThreadRef,
 } from "@t3tools/contracts";
@@ -67,7 +66,9 @@ import { useLiveRefresh } from "~/hooks/useLiveRefresh";
 import {
   pullRequestEnvironment,
   usePullRequestTurnRefresh,
-  useSharedPullRequestSummary,
+  usePullRequestDetail,
+  refreshPullRequest,
+  refreshPullRequestFromHost,
 } from "~/state/pullRequests";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { vcsEnvironment } from "~/state/vcs";
@@ -126,13 +127,9 @@ import {
   pullRequestFindingKey,
   pullRequestHandoffLabels,
   readableFailure,
-  readPullRequestDetailSnapshot,
-  resolveDisplayedPullRequestDetail,
   resolvePullRequestPrimaryControl,
   resolveBaseFreshness,
   type PullRequestFinding,
-  shouldRefreshPullRequestActivity,
-  writePullRequestDetailSnapshot,
 } from "./pullRequestDetail.logic";
 import { canEditPullRequestChangeRequest } from "./pullRequestEditing.logic";
 import {
@@ -451,10 +448,8 @@ export function PullRequestDetailPanel({
   threadRef = null,
   reference,
   listEntry = null,
-  refreshToken: forcedRefreshToken = 0,
   onActed,
   onClose,
-  onStateChange,
   context = "page",
   composerDraftTarget,
 }: {
@@ -470,20 +465,12 @@ export function PullRequestDetailPanel({
   /** Row fields already loaded by the pull-request list, used while richer detail arrives. */
   listEntry?: PullRequestListEntry | null;
   /**
-   * Bumped by whatever holds the panel when a reader asks for everything on screen to be read
-   * again. The panel owns its own reads, so the page cannot refresh them for it — it says when,
-   * and this says it.
-   */
-  refreshToken?: number;
-  /**
    * An action changed this pull request on the host, so a list showing it is now out of date.
    * Told rather than assumed: only the page knows whether it is showing one.
    */
   onActed?: () => void;
   /** Page-owned detail columns use this to clear the selected pull request. */
   onClose?: () => void;
-  /** Keeps surrounding inferred thread state in step with refreshed host state. */
-  onStateChange?: (status: { repository: string; number: number; state: PullRequestState }) => void;
   /**
    * Beside a thread, the checkout affordance disappears: the panel is showing that thread's
    * own pull request, so the branch is already under the reader's feet — and checking it out
@@ -574,73 +561,21 @@ export function PullRequestDetailPanel({
   // Which handoff is preparing, keyed so a per-finding button can say "Preparing..." on itself
   // alone. One at a time whatever the key: they all check the same pull request out.
   const [handoff, setHandoff] = useState<string | null>(null);
-  const detailQuery = useEnvironmentQuery(
-    pullRequestEnvironment.detail({ environmentId, input: reference }),
+  const target = useMemo(
+    () => ({
+      environmentId,
+      input: {
+        projectId: reference.projectId,
+        repository: reference.repository.toLowerCase(),
+        number: reference.number,
+      },
+    }),
+    [environmentId, reference.projectId, reference.repository, reference.number],
   );
-  const activityQuery = useEnvironmentQuery(
-    pullRequestEnvironment.activity({ environmentId, input: reference }),
-  );
+  const detailQuery = usePullRequestDetail(target);
+  const activityQuery = useEnvironmentQuery(pullRequestEnvironment.activity(target));
   const turnRefresh = usePullRequestTurnRefresh(environmentId);
-  const [cachedDetail, setCachedDetail] = useState(() =>
-    readPullRequestDetailSnapshot(
-      typeof window === "undefined" ? undefined : window.localStorage,
-      environmentId,
-      reference,
-    ),
-  );
-  useEffect(() => {
-    setCachedDetail(
-      readPullRequestDetailSnapshot(
-        typeof window === "undefined" ? undefined : window.localStorage,
-        environmentId,
-        reference,
-      ),
-    );
-  }, [environmentId, pullRequestKey, reference.projectId, reference.repository, reference.number]);
-  useEffect(() => {
-    if (detailQuery.data === null) return;
-    writePullRequestDetailSnapshot(
-      typeof window === "undefined" ? undefined : window.localStorage,
-      environmentId,
-      reference,
-      detailQuery.data,
-    );
-    setCachedDetail(detailQuery.data);
-  }, [
-    detailQuery.data,
-    environmentId,
-    pullRequestKey,
-    reference.projectId,
-    reference.repository,
-    reference.number,
-  ]);
-  const resolvedCoreDetail = resolveDisplayedPullRequestDetail({
-    live: detailQuery.data,
-    cached: cachedDetail,
-    reference,
-  });
-  const sharedSummary = useSharedPullRequestSummary(environmentId, reference, resolvedCoreDetail);
-  const coreDetail = useMemo(
-    () =>
-      resolvedCoreDetail === null || sharedSummary === null || sharedSummary === resolvedCoreDetail
-        ? resolvedCoreDetail
-        : {
-            ...resolvedCoreDetail,
-            ...sharedSummary,
-            closedAt:
-              sharedSummary.closedAt === undefined
-                ? resolvedCoreDetail.closedAt
-                : sharedSummary.closedAt,
-            mergedAt:
-              sharedSummary.mergedAt === undefined
-                ? resolvedCoreDetail.mergedAt
-                : sharedSummary.mergedAt,
-            // A summary may come from an older server that does not report draft state. Keep the
-            // detail's required value instead of making the complete detail shape partial.
-            isDraft: sharedSummary.isDraft ?? resolvedCoreDetail.isDraft,
-          },
-    [resolvedCoreDetail, sharedSummary],
-  );
+  const coreDetail = detailQuery.data;
   const activity = activityQuery.data;
   const detail = useMemo(
     () =>
@@ -696,32 +631,8 @@ export function PullRequestDetailPanel({
     isStackedPullRequestBase(detail.baseBranch, branchRefsQuery.data?.refs ?? []);
   const activityPending = activityQuery.isPending && activity === null;
   const activityError = activity === null ? activityQuery.error : null;
-  const refreshDetail = useCallback(() => {
-    detailQuery.refresh();
-    activityQuery.refresh();
-  }, [activityQuery.refresh, detailQuery.refresh]);
-  const [refreshToken, setRefreshToken] = useState(0);
-  const codeRefreshToken = refreshToken + (turnRefresh ?? 0);
-  const activityRevision = useRef<{ readonly key: string; readonly updatedAt: string } | null>(
-    null,
-  );
-  useEffect(() => {
-    if (!coreDetail) return;
-    const next = { key: tabScopeKey, updatedAt: coreDetail.updatedAt };
-    if (shouldRefreshPullRequestActivity(activityRevision.current, next)) {
-      activityQuery.refresh();
-      setRefreshToken((token) => token + 1);
-    }
-    activityRevision.current = next;
-  }, [activityQuery.refresh, coreDetail, tabScopeKey]);
-  useLayoutEffect(() => {
-    if (!resolvedCoreDetail) return;
-    onStateChange?.({
-      repository: resolvedCoreDetail.repository,
-      number: resolvedCoreDetail.number,
-      state: resolvedCoreDetail.state,
-    });
-  }, [onStateChange, resolvedCoreDetail]);
+  const refreshDetail = useCallback(() => refreshPullRequest(target), [target]);
+  const codeRefreshToken = detailQuery.revision + (turnRefresh ?? 0);
   // Reuse activity and diff until core detail reports a changed revision. Keyed by
   // the pull request rather than by the panel, because this one panel shows a different pull
   // request every time it is opened.
@@ -731,29 +642,15 @@ export function PullRequestDetailPanel({
     },
     { key: `pull-request:${environmentId}:${pullRequestKey}` },
   );
-  // The button, on the other hand, goes around the server's cache rather than through it: it is
-  // the answer for a reader who can see that what they are looking at is behind. The
-  // invalidation goes first so the re-reads miss that cache; if it fails, the reads still run
-  // and at worst answer from it.
-  const invalidate = useAtomCommand(pullRequestEnvironment.invalidate, { reportFailure: false });
   const [isInvalidating, setIsInvalidating] = useState(false);
   const refreshFromHost = useCallback(async () => {
     setIsInvalidating(true);
     try {
-      await invalidate({ environmentId, input: { reference } });
-      refreshDetail();
-      setRefreshToken((token) => token + 1);
+      await refreshPullRequestFromHost(target);
     } finally {
       setIsInvalidating(false);
     }
-  }, [environmentId, invalidate, reference, refreshDetail]);
-  // A refresh asked for by the page: the detail, and through the token below, the diff with it.
-  const appliedForcedToken = useRef(forcedRefreshToken);
-  useEffect(() => {
-    if (appliedForcedToken.current === forcedRefreshToken) return;
-    appliedForcedToken.current = forcedRefreshToken;
-    void refreshFromHost();
-  }, [forcedRefreshToken, refreshFromHost]);
+  }, [target]);
   const runAction = useAtomCommand(pullRequestEnvironment.runAction, { reportFailure: false });
   const postComment = useAtomCommand(pullRequestEnvironment.comment, { reportFailure: false });
   // Which action is in flight, not merely that one is: every control here is disabled while any

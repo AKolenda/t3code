@@ -117,6 +117,7 @@ import { useDesktopUpdateState } from "../state/desktopUpdate";
 import { useThreadActions } from "../hooks/useThreadActions";
 import { projectEnvironment } from "../state/projects";
 import { useEnvironmentQuery } from "../state/query";
+import { useSharedThreadPullRequest } from "../state/pullRequests";
 import { threadEnvironment, useEnvironmentThread } from "../state/threads";
 import { vcsEnvironment } from "../state/vcs";
 import { useEnvironment, useEnvironments, usePrimaryEnvironmentId } from "../state/environments";
@@ -482,10 +483,13 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
       : JSON.stringify([thread.environmentId, thread.linkedPullRequest]),
     linkedPullRequestStatus,
   );
-  const pr =
+  const pr = useSharedThreadPullRequest(
+    thread.environmentId,
+    thread.projectId,
     thread.linkedPullRequest == null
       ? resolveThreadPr({ threadBranch: thread.branch, gitStatus: visibleGitStatus })
-      : (visibleLinkedPullRequestStatus?.pr ?? null);
+      : (visibleLinkedPullRequestStatus?.pr ?? null),
+  );
   const prStatus = prStatusIndicator(
     pr,
     visibleLinkedPullRequestStatus?.sourceControlProvider ??

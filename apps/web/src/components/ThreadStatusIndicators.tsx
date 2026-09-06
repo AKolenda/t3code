@@ -18,7 +18,11 @@ import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
 import { useProject } from "../state/entities";
 import { useEnvironmentQuery } from "../state/query";
-import { linkedPullRequestDetailAtom, useSharedPullRequestSummary } from "../state/pullRequests";
+import {
+  linkedPullRequestDetailAtom,
+  useSharedPullRequestSummary,
+  useSharedThreadPullRequest,
+} from "../state/pullRequests";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { vcsEnvironment } from "../state/vcs";
 import { useUiStateStore } from "../uiStateStore";
@@ -573,10 +577,13 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
         })
       : null,
   );
-  const pr =
+  const pr = useSharedThreadPullRequest(
+    thread.environmentId,
+    thread.projectId,
     thread.linkedPullRequest == null
       ? resolveThreadPr({ threadBranch: thread.branch, gitStatus: gitStatus.data })
-      : (linkedPullRequest?.pr ?? null);
+      : (linkedPullRequest?.pr ?? null),
+  );
   const prStatus = prStatusIndicator(
     pr,
     linkedPullRequest?.sourceControlProvider ?? gitStatus.data?.sourceControlProvider,

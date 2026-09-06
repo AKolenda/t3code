@@ -1,6 +1,8 @@
 import {
   WS_METHODS,
+  type EnvironmentId,
   type PullRequestDetail,
+  type PullRequestRef,
   type PullRequestDiffInput,
   type PullRequestSummary,
   type VcsStatusResult,
@@ -45,12 +47,29 @@ function createPullRequestRefreshAtomFamily<R, E>(
   });
 }
 
+type PullRequestTarget = { readonly environmentId: EnvironmentId; readonly input: PullRequestRef };
+
+/** Extra URL/list fields and repository case must not split reads for the same PR. */
+function normalizePullRequestTarget({
+  environmentId,
+  input,
+}: PullRequestTarget): PullRequestTarget {
+  return {
+    environmentId,
+    input: {
+      projectId: input.projectId,
+      repository: input.repository.toLowerCase(),
+      number: input.number,
+    },
+  };
+}
+
 /** Refresh only the live fields a linked thread renders. */
 export function createLinkedPullRequestSummaryAtomFamily<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, E>,
   refreshes = createPullRequestRefreshAtomFamily(runtime),
 ) {
-  return createEnvironmentRpcQueryAtomFamily(runtime, {
+  const query = createEnvironmentRpcQueryAtomFamily(runtime, {
     label: "environment-data:pull-requests:linked-summary",
     tag: WS_METHODS.pullRequestsSummary,
     staleTimeMs: 60_000,
@@ -58,6 +77,7 @@ export function createLinkedPullRequestSummaryAtomFamily<R, E>(
     idleTtlMs: LINKED_PULL_REQUEST_IDLE_TTL_MS,
     refreshTrigger: ({ environmentId }) => refreshes({ environmentId, input: {} }),
   });
+  return (target: PullRequestTarget) => query(normalizePullRequestTarget(target));
 }
 
 export function pullRequestDetailToVcsStatus(
@@ -89,9 +109,16 @@ export function createPullRequestEnvironmentAtoms<R, E>(
     mode: "serial",
     key: ({ environmentId }: { readonly environmentId: string }) => environmentId,
   } as const;
-  const activity = createEnvironmentRpcQueryAtomFamily(runtime, {
+  const activityQuery = createEnvironmentRpcQueryAtomFamily(runtime, {
     label: "environment-data:pull-requests:activity",
     tag: WS_METHODS.pullRequestsActivity,
+    staleTimeMs: 60_000,
+    refreshTrigger: ({ environmentId }) => refreshes({ environmentId, input: {} }),
+  });
+  const activity = (target: PullRequestTarget) => activityQuery(normalizePullRequestTarget(target));
+  const detailQuery = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:pull-requests:detail",
+    tag: WS_METHODS.pullRequestsDetail,
     staleTimeMs: 60_000,
     refreshTrigger: ({ environmentId }) => refreshes({ environmentId, input: {} }),
   });
@@ -116,12 +143,7 @@ export function createPullRequestEnvironmentAtoms<R, E>(
       staleTimeMs: 60_000,
       refreshTrigger: ({ environmentId }) => refreshes({ environmentId, input: {} }),
     }),
-    detail: createEnvironmentRpcQueryAtomFamily(runtime, {
-      label: "environment-data:pull-requests:detail",
-      tag: WS_METHODS.pullRequestsDetail,
-      staleTimeMs: 60_000,
-      refreshTrigger: ({ environmentId }) => refreshes({ environmentId, input: {} }),
-    }),
+    detail: (target: PullRequestTarget) => detailQuery(normalizePullRequestTarget(target)),
     activity,
     threadComments: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:pull-requests:thread-comments",

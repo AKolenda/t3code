@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 
 import {
   PullRequestDetail,
+  PullRequestSummary,
   type PullRequestAction,
   type PullRequestActor,
   type PullRequestBaseComparison,
@@ -91,13 +92,6 @@ export function pullRequestCheckoutCommand(
   }
 }
 
-/** Activity changes only when the same host resource reports a newer revision. */
-export function shouldRefreshPullRequestActivity(
-  previous: { readonly key: string; readonly updatedAt: string } | null,
-  next: { readonly key: string; readonly updatedAt: string },
-): boolean {
-  return previous !== null && previous.key === next.key && previous.updatedAt !== next.updatedAt;
-}
 /** Appends fetched pages without replacing fresher comments already in the activity response. */
 export function mergePullRequestThreadComments<T extends { readonly id: string }>(
   base: ReadonlyArray<T>,
@@ -1076,14 +1070,19 @@ const pullRequestDetailSnapshotKey = (
     reference.number,
   ])}`;
 
-const decodeDetailSnapshot = Schema.decodeUnknownOption(PullRequestDetail);
+const PullRequestDetailSnapshot = Schema.Struct({
+  ...PullRequestDetail.fields,
+  observedSummary: Schema.optional(PullRequestSummary),
+});
+type PullRequestDetailSnapshot = typeof PullRequestDetailSnapshot.Type;
+const decodeDetailSnapshot = Schema.decodeUnknownOption(PullRequestDetailSnapshot);
 
 /** Hydrates one recent detail after a reload while the live query refreshes it. */
 export function readPullRequestDetailSnapshot(
   storage: SnapshotStorage | undefined,
   environmentId: string,
   reference: PullRequestDetailSnapshotRef,
-): PullRequestDetail | null {
+): PullRequestDetailSnapshot | null {
   try {
     if (!storage) return null;
     const key = pullRequestDetailSnapshotKey(environmentId, reference);
@@ -1114,7 +1113,7 @@ export function writePullRequestDetailSnapshot(
   storage: SnapshotStorage | undefined,
   environmentId: string,
   reference: PullRequestDetailSnapshotRef,
-  detail: PullRequestDetail,
+  detail: PullRequestDetailSnapshot,
 ): void {
   try {
     // Stores without eviction support remain readable but cannot grow this cache.
@@ -1160,22 +1159,4 @@ export function writePullRequestDetailSnapshot(
   } catch {
     // Quota or denied storage: the next open can still use the live query.
   }
-}
-
-/** Live host state wins; a snapshot is only the same change request, never a neighbour's. */
-export function resolveDisplayedPullRequestDetail(input: {
-  readonly live: PullRequestDetail | null;
-  readonly cached: PullRequestDetail | null;
-  readonly reference: PullRequestDetailSnapshotRef;
-}): PullRequestDetail | null {
-  if (input.live !== null) return input.live;
-  if (
-    input.cached !== null &&
-    input.cached.projectId === input.reference.projectId &&
-    input.cached.repository.toLowerCase() === input.reference.repository.toLowerCase() &&
-    input.cached.number === input.reference.number
-  ) {
-    return input.cached;
-  }
-  return null;
 }

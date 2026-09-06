@@ -125,6 +125,7 @@ import { environmentServerConfigsAtom, primaryServerKeybindingsAtom } from "../s
 import { vcsEnvironment } from "../state/vcs";
 import { threadEnvironment } from "../state/threads";
 import { useEnvironmentQuery } from "../state/query";
+import { useSharedThreadPullRequest } from "../state/pullRequests";
 import { useAtomCommand } from "../state/use-atom-command";
 import {
   buildThreadRouteParams,
@@ -871,14 +872,18 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     gitStatus.data,
   );
   const retainTerminalOnBranchMismatch = thread.worktreePath === null;
-  const pr = resolveDisplayedThreadPr({
-    threadBranch: thread.branch,
-    gitStatus: visibleGitStatus,
-    snapshot: changeRequestSnapshot,
-    retainTerminalOnBranchMismatch,
-    linkedPullRequest: thread.linkedPullRequest,
-    linkedPullRequestStatus,
-  });
+  const pr = useSharedThreadPullRequest(
+    thread.environmentId,
+    thread.projectId,
+    resolveDisplayedThreadPr({
+      threadBranch: thread.branch,
+      gitStatus: visibleGitStatus,
+      snapshot: changeRequestSnapshot,
+      retainTerminalOnBranchMismatch,
+      linkedPullRequest: thread.linkedPullRequest,
+      linkedPullRequestStatus,
+    }),
+  );
 
   // Same semantics as the legacy sidebar (never-visited counts as read):
   // switching sidebars must not light up every historical thread as unread.
@@ -991,9 +996,15 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       linkedPullRequestStatus,
     });
     if (nextSnapshot === undefined) return;
-    onChangeRequestSnapshot(threadKey, nextSnapshot);
+    onChangeRequestSnapshot(
+      threadKey,
+      nextSnapshot !== null && pr !== null && nextSnapshot.pr.url === pr.url
+        ? { ...nextSnapshot, pr }
+        : nextSnapshot,
+    );
   }, [
     changeRequestSnapshot,
+    pr,
     visibleGitStatus,
     linkedPullRequestStatus,
     onChangeRequestSnapshot,
