@@ -1738,6 +1738,25 @@ describe("CheckpointReactor", () => {
             checkpointTurnCount: turnCount,
             createdAt,
           });
+          yield* harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make(`cmd-unsupported-rewind-ready-${turnCount}`),
+            threadId,
+            session: {
+              threadId,
+              status: "ready",
+              providerName: ProviderDriverKind.make(providerName),
+              runtimeMode: "approval-required",
+              activeTurnId: null,
+              lastError: null,
+              updatedAt: createdAt,
+            },
+            operationResult: {
+              requestId: MessageId.make(`message-unsupported-rewind-${turnCount}`),
+              outcome: "completed",
+            },
+            createdAt,
+          });
         }
         const before = (yield* Effect.promise(() => harness.readModel())).threads.find(
           (thread) => thread.id === threadId,
