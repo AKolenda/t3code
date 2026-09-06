@@ -1074,16 +1074,108 @@ describe("ProviderCommandReactor", () => {
     engine: OrchestrationEngineService["Service"],
     id: string,
     text: string,
+    sourceProposedPlan?: { threadId: ThreadId; planId: string },
   ) =>
     engine.dispatch({
       type: "thread.turn.start",
       commandId: CommandId.make(`cmd-${id}`),
+      ...(sourceProposedPlan ? { sourceProposedPlan } : {}),
       threadId: ThreadId.make("thread-1"),
       message: { messageId: MessageId.make(id), role: "user", text, attachments: [] },
       runtimeMode: "approval-required",
       interactionMode: "default",
       createdAt: "2026-01-01T00:00:00.000Z",
     });
+
+  effectIt.effect.each(["accepted", "interrupted"] as const)(
+    "clears only the request returned by an %s send",
+    (outcome) =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() => createHarness());
+        const createdAt = "2026-01-01T00:00:00.000Z";
+        yield* harness.engine.dispatch({
+          type: "thread.proposed-plan.upsert",
+          commandId: CommandId.make("plan-for-send"),
+          threadId: ThreadId.make("thread-1"),
+          proposedPlan: {
+            id: "source-plan",
+            turnId: null,
+            planMarkdown: "# Plan",
+            implementedAt: null,
+            implementationThreadId: null,
+            createdAt,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        });
+        const sendStarted = yield* Deferred.make<void>();
+        const finishSend = yield* Deferred.make<void>();
+        harness.sendTurn.mockImplementation(() =>
+          Effect.gen(function* () {
+            yield* Deferred.succeed(sendStarted, undefined);
+            yield* Deferred.await(finishSend);
+            if (outcome === "interrupted") return yield* Effect.interrupt;
+            return { threadId: ThreadId.make("thread-1"), turnId: TurnId.make("returned-turn") };
+          }),
+        );
+        const events = yield* harness.engine.subscribeDomainEvents;
+        const result = yield* events.pipe(
+          Stream.filter(
+            (event) =>
+              (event.type === "thread.activity-appended" &&
+                event.payload.operationResult?.requestId === "correlated-send") ||
+              (event.type === "thread.proposed-plan-upserted" &&
+                event.payload.proposedPlan.implementedAt !== null),
+          ),
+          Stream.take(outcome === "accepted" ? 2 : 1),
+          Stream.runCollect,
+          Effect.forkChild,
+        );
+        yield* dispatchTestTurn(harness.engine, "correlated-send", "hello", {
+          threadId: ThreadId.make("thread-1"),
+          planId: "source-plan",
+        });
+        yield* Deferred.await(sendStarted);
+        expect(
+          (yield* Effect.promise(() => harness.readModel())).threads[0]?.pendingOperation,
+        ).toEqual({ kind: "turn", requestId: "correlated-send" });
+        expect(
+          (yield* Effect.promise(() => harness.readModel())).threads[0]?.proposedPlans[0]
+            ?.implementedAt,
+        ).toBeNull();
+        yield* Deferred.succeed(finishSend, undefined);
+        const receipts = yield* Fiber.join(result);
+        expect(receipts[0]).toMatchObject({
+          payload: {
+            operationResult: {
+              requestId: "correlated-send",
+              outcome: outcome === "accepted" ? "completed" : "interrupted",
+            },
+            activity: { payload: { timelineBypass: true } },
+          },
+        });
+        expect(
+          (yield* Effect.promise(() => harness.readModel())).threads[0]?.pendingOperation,
+        ).toBeNull();
+        expect(
+          (yield* Effect.promise(() => harness.readModel())).threads[0]?.proposedPlans[0]
+            ?.implementedAt,
+        ).toBe(outcome === "accepted" ? createdAt : null);
+        if (outcome === "accepted") {
+          expect(receipts[0]).toMatchObject({
+            payload: {
+              activity: {
+                payload: {
+                  requestId: "correlated-send",
+                  turnId: "returned-turn",
+                  requestedAt: "2026-01-01T00:00:00.000Z",
+                },
+              },
+            },
+          });
+        }
+      }),
+  );
 
   const readyAfterTestTurn = (engine: OrchestrationEngineService["Service"], requestId: string) =>
     engine.dispatch({
@@ -1307,6 +1399,10 @@ describe("ProviderCommandReactor", () => {
             type: "thread.session.set",
             commandId: CommandId.make("terminal-before-queued-restore"),
             threadId: ThreadId.make("thread-1"),
+            operationResult: {
+              requestId: MessageId.make("queued-restore"),
+              outcome: terminalStatus === "error" ? "failed" : "interrupted",
+            },
             session: {
               threadId: ThreadId.make("thread-1"),
               status: terminalStatus,

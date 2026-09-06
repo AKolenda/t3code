@@ -47,6 +47,115 @@ const baseThread: OrchestrationThread = {
 };
 
 describe("applyThreadDetailEvent", () => {
+  it.each([true, false])(
+    "keeps request bindings when acceptance precedes start: %s",
+    (beforeStart) => {
+      let thread: OrchestrationThread = { ...baseThread, pendingOperation: null };
+      const fields = {
+        ...baseEventFields,
+        sequence: 1,
+        occurredAt: baseThread.createdAt,
+        aggregateKind: "thread" as const,
+        aggregateId: baseThread.id,
+      };
+      let sequence = 0;
+      const apply = (event: OrchestrationEvent) => {
+        const result = applyThreadDetailEvent(thread, { ...event, sequence: ++sequence });
+        if (result.kind !== "updated") throw new Error("Expected a thread update");
+        thread = result.thread;
+      };
+      const start = (id: string) =>
+        apply({
+          ...fields,
+          type: "thread.turn-start-requested",
+          payload: {
+            threadId: thread.id,
+            messageId: MessageId.make(id),
+            operation: "turn",
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: fields.occurredAt,
+          },
+        });
+      const accept = (id: string) =>
+        apply({
+          ...fields,
+          type: "thread.activity-appended",
+          payload: {
+            threadId: thread.id,
+            operationResult: { requestId: MessageId.make(id), outcome: "completed" },
+            activity: {
+              id: EventId.make(`accepted-${id}`),
+              kind: "provider.turn.start.accepted",
+              tone: "info",
+              summary: "Provider accepted the request",
+              turnId: TurnId.make("turn-a"),
+              createdAt: fields.occurredAt,
+              payload: {
+                requestId: id,
+                turnId: "turn-a",
+                requestedAt: fields.occurredAt,
+                timelineBypass: true,
+                sourceProposedPlan: { threadId: thread.id, planId: `plan-${id}` },
+              },
+            },
+          },
+        });
+      const session = (status: "running" | "interrupted") =>
+        apply({
+          ...fields,
+          type: "thread.session-set",
+          payload: {
+            threadId: thread.id,
+            operationResult: null,
+            session: {
+              threadId: thread.id,
+              status,
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: status === "running" ? TurnId.make("turn-a") : null,
+              lastError: null,
+              updatedAt: fields.occurredAt,
+            },
+          },
+        });
+      start("a");
+      if (beforeStart) {
+        accept("a");
+        expect(thread.latestTurn).toBeNull();
+      }
+      session("running");
+      start("b");
+      session("interrupted");
+      if (!beforeStart) accept("a");
+      expect(thread.pendingOperation).toEqual({ kind: "turn", requestId: "b" });
+      expect(thread.latestTurn).toMatchObject({
+        requestId: "a",
+        state: "interrupted",
+        sourceProposedPlan: { planId: "plan-a" },
+      });
+      const completedAt = thread.latestTurn?.completedAt;
+      // A second request can steer the same provider turn without replacing its start metadata.
+      accept("b");
+      expect(thread.pendingOperation).toBeNull();
+      expect(thread.latestTurn).toMatchObject({
+        requestId: "a",
+        state: "interrupted",
+        completedAt,
+        sourceProposedPlan: { planId: "plan-a" },
+      });
+      session("running");
+      expect(thread.latestTurn?.sourceProposedPlan?.planId).toBe("plan-a");
+
+      thread = { ...baseThread, pendingOperation: null };
+      start("a");
+      start("b");
+      accept("b");
+      accept("a");
+      session("running");
+      expect(thread.latestTurn?.requestId).toBe("b");
+    },
+  );
   it("tracks compaction by request identity without message history or timestamps", () => {
     let thread: OrchestrationThread = { ...baseThread, pendingOperation: null };
     const fields = {
@@ -115,7 +224,7 @@ describe("applyThreadDetailEvent", () => {
         },
       },
     });
-    expect(thread.latestTurn?.requestId).toBe("first");
+    expect(thread.latestTurn?.requestId).toBeUndefined();
     expect(getThreadPendingOperation({ ...thread, messages: [], activities: [] })).toEqual(first);
     result(null);
     expect(thread.pendingOperation).toEqual(first);

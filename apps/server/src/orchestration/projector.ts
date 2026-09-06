@@ -4,6 +4,9 @@ import {
   isImportedAgentSessionMessageId,
   getThreadPendingOperation,
   pendingOperationAfterEvent,
+  bindAcceptedTurn,
+  bindTurnFromActivities,
+  turnStartAcceptance,
   ThreadTurnStartRequestedPayload,
   OrchestrationCheckpointSummary,
   OrchestrationMessage,
@@ -673,15 +676,23 @@ export function projectEvent(
           threads: updateThread(nextBase.threads, payload.threadId, {
             session,
             pendingOperation: pendingOperationAfterEvent(getThreadPendingOperation(thread), event),
-            latestTurn:
+            latestTurn: bindTurnFromActivities(
               session.status === "running" && session.activeTurnId !== null
                 ? {
                     turnId: session.activeTurnId,
                     requestId:
                       thread.latestTurn?.turnId === session.activeTurnId
                         ? (thread.latestTurn.requestId ??
-                          getThreadPendingOperation(thread)?.requestId)
-                        : getThreadPendingOperation(thread)?.requestId,
+                          (event.payload.operationResult === undefined
+                            ? getThreadPendingOperation(thread)?.requestId
+                            : undefined))
+                        : event.payload.operationResult === undefined
+                          ? getThreadPendingOperation(thread)?.requestId
+                          : undefined,
+                    ...(thread.latestTurn?.turnId === session.activeTurnId &&
+                    thread.latestTurn.sourceProposedPlan
+                      ? { sourceProposedPlan: thread.latestTurn.sourceProposedPlan }
+                      : {}),
                     state: "running",
                     requestedAt:
                       thread.latestTurn?.turnId === session.activeTurnId
@@ -709,6 +720,8 @@ export function projectEvent(
                       completedAt: session.updatedAt,
                     }
                   : thread.latestTurn,
+              thread.activities,
+            ),
             updatedAt: event.occurredAt,
           }),
         };
@@ -893,17 +906,24 @@ export function projectEvent(
             return nextBase;
           }
 
+          const activity =
+            payload.activity.kind === "provider.turn.start.accepted"
+              ? { ...payload.activity, sequence: event.sequence }
+              : payload.activity;
           const activities = retainThreadActivities(
-            [
-              ...thread.activities.filter((entry) => entry.id !== payload.activity.id),
-              payload.activity,
-            ].toSorted(compareThreadActivities),
+            [...thread.activities.filter((entry) => entry.id !== activity.id), activity].toSorted(
+              compareThreadActivities,
+            ),
           );
 
           return {
             ...nextBase,
             threads: updateThread(nextBase.threads, payload.threadId, {
               activities,
+              latestTurn: bindAcceptedTurn(
+                thread.latestTurn,
+                turnStartAcceptance(payload.activity),
+              ),
               pendingOperation: pendingOperationAfterEvent(
                 getThreadPendingOperation(thread),
                 event,

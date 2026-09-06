@@ -249,6 +249,24 @@ it.effect("decodes thread.turn.start defaults for provider and runtime mode", ()
   }),
 );
 
+it.effect("does not accept a client operation override for turn input", () =>
+  Effect.gen(function* () {
+    for (const decode of [decodeClientOrchestrationCommand, decodeThreadTurnStartCommand]) {
+      const command = yield* decode({
+        type: "thread.turn.start",
+        commandId: "cmd-turn-operation-override",
+        threadId: "thread-1",
+        operation: "compact",
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        message: { messageId: "msg-1", role: "user", text: "hello", attachments: [] },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      assert.strictEqual("operation" in command, false);
+    }
+  }),
+);
+
 it.effect("accepts inline images, uploaded images, and uploaded files from clients", () =>
   Effect.gen(function* () {
     const command = yield* decodeClientOrchestrationCommand({

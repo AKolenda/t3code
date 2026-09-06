@@ -1,12 +1,15 @@
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { MessageId } from "./baseSchemas.ts";
+import { IsoDateTime, MessageId, TurnId } from "./baseSchemas.ts";
+import { SourceProposedPlanReference } from "./orchestration.ts";
 import type {
   OrchestrationEvent,
   OrchestrationOperationResult,
   OrchestrationPendingOperation,
   OrchestrationThread,
+  OrchestrationLatestTurn,
+  OrchestrationThreadActivity,
 } from "./orchestration.ts";
 
 type CommandMessage = {
@@ -25,6 +28,52 @@ export function isContextCompactionMessage(message: CommandMessage): boolean {
 }
 
 const decodeLegacyRequest = Schema.decodeUnknownOption(Schema.Struct({ requestId: MessageId }));
+
+export const OrchestrationTurnStartAcceptance = Schema.Struct({
+  requestId: MessageId,
+  turnId: TurnId,
+  requestedAt: IsoDateTime,
+  sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+});
+export type OrchestrationTurnStartAcceptance = typeof OrchestrationTurnStartAcceptance.Type;
+const decodeTurnStartAcceptance = Schema.decodeUnknownOption(OrchestrationTurnStartAcceptance);
+
+/** Reads the request binding returned by sendTurn, not a provider lifecycle guess. */
+export function turnStartAcceptance(activity: OrchestrationThreadActivity) {
+  return activity.kind === "provider.turn.start.accepted"
+    ? Option.getOrNull(decodeTurnStartAcceptance(activity.payload))
+    : null;
+}
+
+/** Keeps original turn metadata when steering reuses an already accepted turn. */
+export function bindAcceptedTurn(
+  turn: OrchestrationLatestTurn | null,
+  accepted: OrchestrationTurnStartAcceptance | null,
+): OrchestrationLatestTurn | null {
+  if (!turn || !accepted || turn.turnId !== accepted.turnId || turn.requestId !== undefined) {
+    return turn;
+  }
+  return {
+    ...turn,
+    requestId: accepted.requestId,
+    requestedAt: accepted.requestedAt,
+    ...(accepted.sourceProposedPlan ? { sourceProposedPlan: accepted.sourceProposedPlan } : {}),
+  };
+}
+
+/** Acceptance can precede turn.started, so replay retains it in the hidden activity. */
+export function bindTurnFromActivities(
+  turn: OrchestrationLatestTurn | null,
+  activities: ReadonlyArray<OrchestrationThreadActivity>,
+): OrchestrationLatestTurn | null {
+  if (!turn || turn.requestId !== undefined) return turn;
+  for (const activity of activities) {
+    if (activity.turnId !== turn.turnId) continue;
+    const accepted = turnStartAcceptance(activity);
+    if (accepted) return bindAcceptedTurn(turn, accepted);
+  }
+  return turn;
+}
 
 function operationResultForEvent(
   pending: OrchestrationPendingOperation,
@@ -88,9 +137,12 @@ export function pendingOperationAfterEvent(
       }
       if (event.type === "thread.session-set") {
         const session = event.payload.session;
+        // A stopped session ends all requests. Other modern lifecycle updates
+        // can belong to an older turn and cannot identify the pending request.
+        if (session.status === "stopped") return null;
+        if (event.payload.operationResult !== undefined) return pending;
         if (
           session.status === "error" ||
-          session.status === "stopped" ||
           session.status === "interrupted" ||
           (pending.kind === "turn" && session.status === "running" && session.activeTurnId !== null)
         ) {

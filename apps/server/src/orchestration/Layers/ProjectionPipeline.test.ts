@@ -11,6 +11,7 @@ import {
   TurnId,
   ProviderInstanceId,
   type OrchestrationPendingOperation,
+  turnStartAcceptance,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -4229,6 +4230,157 @@ engineLayer("OrchestrationProjectionPipeline via engine dispatch", (it) => {
 });
 
 engineLayer("pending operation facts", (it) => {
+  it.effect(
+    "binds accepted requests without letting old lifecycle updates consume a newer request",
+    () =>
+      Effect.gen(function* () {
+        const engine = yield* OrchestrationEngineService;
+        const snapshots = yield* ProjectionSnapshotQuery;
+        const sql = yield* SqlClient.SqlClient;
+        const threadId = ThreadId.make("thread-acceptance");
+        const projectId = ProjectId.make("project-acceptance");
+        const now = "2026-09-05T00:00:00.000Z";
+        yield* engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("acceptance-project"),
+          projectId,
+          title: "Acceptance",
+          workspaceRoot: "/tmp/acceptance",
+          createdAt: now,
+        });
+        yield* engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("acceptance-thread"),
+          threadId,
+          projectId,
+          title: "Acceptance",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+        });
+        const start = (id: string) =>
+          engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(`acceptance-start-${id}`),
+            threadId,
+            message: {
+              messageId: MessageId.make(id),
+              role: "user",
+              text: "hello",
+              attachments: [],
+            },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: now,
+          });
+        let next = 0;
+        const session = (
+          status: "running" | "ready" | "error" | "interrupted",
+          turnId: string | null,
+        ) =>
+          engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make(`acceptance-session-${next++}`),
+            threadId,
+            session: {
+              threadId,
+              status,
+              providerName: "codex",
+              runtimeMode: "full-access",
+              activeTurnId: turnId === null ? null : TurnId.make(turnId),
+              lastError: null,
+              updatedAt: now,
+            },
+            createdAt: now,
+          });
+        const accept = (id: string, turnId: string) =>
+          engine.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(`acceptance-${id}`),
+            threadId,
+            operationResult: { requestId: MessageId.make(id), outcome: "completed" },
+            activity: {
+              id: EventId.make(`acceptance-${id}`),
+              kind: "provider.turn.start.accepted",
+              tone: "info",
+              summary: "Provider accepted the request",
+              turnId: TurnId.make(turnId),
+              createdAt: now,
+              payload: { requestId: id, turnId, requestedAt: now, timelineBypass: true },
+            },
+            createdAt: now,
+          });
+        const check = Effect.fn("checkAcceptance")(function* (
+          pendingId: string | null,
+          requestId: string | undefined,
+        ) {
+          const detail = Option.getOrThrow(yield* snapshots.getThreadDetailById(threadId));
+          let replay = createEmptyReadModel(now);
+          for (const event of yield* Stream.runCollect(engine.readEvents(0))) {
+            if (event.aggregateId === threadId) replay = yield* projectEvent(replay, event);
+          }
+          const expected = pendingId === null ? null : { kind: "turn", requestId: pendingId };
+          assert.deepEqual(detail.pendingOperation, expected);
+          assert.deepEqual(replay.threads[0]?.pendingOperation, expected);
+          assert.equal(detail.latestTurn?.requestId, requestId);
+          assert.equal(replay.threads[0]?.latestTurn?.requestId, requestId);
+          assert.equal(replay.threads[0]?.latestTurn?.state, detail.latestTurn?.state);
+        });
+
+        yield* start("a");
+        yield* start("b");
+        yield* session("running", "turn-a");
+        yield* check("b", undefined);
+        for (const status of ["error", "interrupted", "ready"] as const) {
+          yield* session(status, null);
+          yield* check("b", undefined);
+        }
+        // A finished before its send response arrived. It must stay finished.
+        yield* accept("a", "turn-a");
+        yield* check("b", "a");
+        assert.equal(
+          Option.getOrThrow(yield* snapshots.getThreadDetailById(threadId)).latestTurn?.state,
+          "error",
+        );
+
+        // B's response arrives before turn.started. No public running state is invented.
+        yield* accept("b", "turn-b");
+        yield* check(null, "a");
+        const waiting =
+          yield* sql`SELECT state, started_at FROM projection_turns WHERE thread_id = ${threadId} AND turn_id = 'turn-b'`;
+        assert.deepEqual(waiting, [{ state: "pending", started_at: null }]);
+        yield* session("running", "turn-b");
+        yield* check(null, "b");
+
+        // Steering can return the same turn without another turn.started event.
+        yield* start("steer");
+        yield* accept("steer", "turn-b");
+        yield* check(null, "b");
+        const bindings =
+          yield* sql`SELECT turn_id, pending_message_id FROM projection_turns WHERE thread_id = ${threadId} ORDER BY turn_id`;
+        assert.deepEqual(bindings, [
+          { turn_id: "turn-a", pending_message_id: "a" },
+          { turn_id: "turn-b", pending_message_id: "b" },
+        ]);
+        // First accepted wins even if both replies arrive before the same turn starts.
+        yield* start("c");
+        yield* start("d");
+        yield* accept("d", "turn-c");
+        yield* accept("c", "turn-c");
+        const reconnect = Option.getOrThrow(yield* snapshots.getThreadDetailById(threadId));
+        assert.deepEqual(
+          reconnect.activities
+            .filter((activity) => activity.turnId === "turn-c")
+            .map((activity) => turnStartAcceptance(activity)?.requestId),
+          ["d", "c"],
+        );
+        yield* session("running", "turn-c");
+        yield* check(null, "d");
+      }),
+  );
   it.effect("keeps SQL snapshots and event replay consistent for delayed compaction results", () =>
     Effect.gen(function* () {
       const engine = yield* OrchestrationEngineService;
@@ -4408,6 +4560,7 @@ engineLayer("pending operation facts", (it) => {
         type: "thread.session.set",
         commandId: CommandId.make("operation-interrupted"),
         threadId,
+        operationResult: { requestId: MessageId.make("second-compact"), outcome: "interrupted" },
         session: { ...session, status: "interrupted" },
         createdAt: now,
       });

@@ -8,6 +8,7 @@ import {
   isContextCompactionMessage,
   type MessageId,
   type OrchestrationOperationResult,
+  type OrchestrationTurnStartAcceptance,
   type ModelSelection,
   type OrchestrationEvent,
   ProviderDriverKind,
@@ -411,7 +412,7 @@ const make = Effect.gen(function* () {
           createdAt: input.createdAt,
         }),
       ),
-      Effect.catchTag("OrchestrationOperationSupersededError", () => Effect.void),
+      Effect.catchTags({ OrchestrationOperationSupersededError: () => Effect.void }),
     );
 
   const setThreadSessionErrorOnTurnStartFailure = Effect.fnUntraced(function* (input: {
@@ -1190,6 +1191,28 @@ const make = Effect.gen(function* () {
     processThreadTitleRegenerationSafely,
   );
 
+  const markAcceptedSourcePlan = Effect.fn("markAcceptedSourcePlan")(function* (
+    event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
+  ) {
+    const source = event.payload.sourceProposedPlan;
+    if (!source) return;
+    const sourceThread = yield* resolveThreadDetail(source.threadId);
+    const sourcePlan = sourceThread?.proposedPlans.find((plan) => plan.id === source.planId);
+    if (!sourcePlan || sourcePlan.implementedAt !== null) return;
+    yield* orchestrationEngine.dispatch({
+      type: "thread.proposed-plan.upsert",
+      commandId: CommandId.make(`server:source-plan-accepted:${event.eventId}`),
+      threadId: source.threadId,
+      proposedPlan: {
+        ...sourcePlan,
+        implementedAt: event.payload.createdAt,
+        implementationThreadId: event.payload.threadId,
+        updatedAt: event.payload.createdAt,
+      },
+      createdAt: event.payload.createdAt,
+    });
+  });
+
   const processTurnStartRequested = Effect.fn("processTurnStartRequested")(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
   ) {
@@ -1248,7 +1271,24 @@ const make = Effect.gen(function* () {
 
     const handleTurnStartFailure = (cause: Cause.Cause<unknown>) => {
       if (Cause.hasInterruptsOnly(cause)) {
-        return Effect.void;
+        return orchestrationEngine
+          .dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(`server:turn-start-interrupted:${event.eventId}`),
+            threadId: event.payload.threadId,
+            operationResult: { requestId: event.payload.messageId, outcome: "interrupted" },
+            activity: {
+              id: EventId.make(`turn-start-interrupted:${event.eventId}`),
+              kind: "provider.turn.start.interrupted",
+              tone: "info",
+              summary: "Provider request interrupted",
+              payload: { timelineBypass: true },
+              turnId: null,
+              createdAt: event.payload.createdAt,
+            },
+            createdAt: event.payload.createdAt,
+          })
+          .pipe(Effect.asVoid);
       }
       const detail = formatFailureDetail(cause);
       return setThreadSessionErrorOnTurnStartFailure({
@@ -1509,9 +1549,48 @@ const make = Effect.gen(function* () {
 
     if (Option.isNone(sendTurnRequest)) return;
 
-    yield* providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.asVoid, Effect.catchCause(recoverTurnStartFailure), Effect.forkScoped);
+    yield* providerService.sendTurn(sendTurnRequest.value).pipe(
+      Effect.flatMap((result) =>
+        orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`server:turn-start-accepted:${event.eventId}`),
+          threadId: event.payload.threadId,
+          operationResult: { requestId: event.payload.messageId, outcome: "completed" },
+          activity: {
+            id: EventId.make(`turn-start-accepted:${event.eventId}`),
+            kind: "provider.turn.start.accepted",
+            tone: "info",
+            summary: "Provider accepted the request",
+            payload: {
+              timelineBypass: true,
+              ...({
+                requestId: event.payload.messageId,
+                turnId: result.turnId,
+                requestedAt: event.payload.createdAt,
+                ...(event.payload.sourceProposedPlan
+                  ? { sourceProposedPlan: event.payload.sourceProposedPlan }
+                  : {}),
+              } satisfies OrchestrationTurnStartAcceptance),
+            },
+            turnId: result.turnId,
+            createdAt: event.payload.createdAt,
+          },
+          createdAt: event.payload.createdAt,
+        }),
+      ),
+      Effect.andThen(
+        markAcceptedSourcePlan(event).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("provider command reactor failed to mark source plan", {
+              cause: Cause.pretty(cause),
+            }),
+          ),
+        ),
+      ),
+      Effect.asVoid,
+      Effect.catchCause(recoverTurnStartFailure),
+      Effect.forkScoped,
+    );
   });
 
   const processTurnInterruptRequested = Effect.fn("processTurnInterruptRequested")(function* (

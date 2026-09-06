@@ -4,6 +4,7 @@ import {
   isImportedAgentSessionMessageId,
   isContextCompactionMessage,
   pendingOperationAfterEvent,
+  turnStartAcceptance,
   type ChatAttachment,
   type OrchestrationEvent,
   type OrchestrationSessionStatus,
@@ -1113,9 +1114,11 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             kind: event.payload.activity.kind,
             summary: event.payload.activity.summary,
             payload: event.payload.activity.payload,
-            ...(event.payload.activity.sequence !== undefined
-              ? { sequence: event.payload.activity.sequence }
-              : {}),
+            ...(event.payload.activity.kind === "provider.turn.start.accepted"
+              ? { sequence: event.sequence }
+              : event.payload.activity.sequence !== undefined
+                ? { sequence: event.payload.activity.sequence }
+                : {}),
             createdAt: event.payload.activity.createdAt,
           });
           return;
@@ -1232,6 +1235,36 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.activity-appended": {
+          const accepted = turnStartAcceptance(event.payload.activity);
+          if (accepted) {
+            const current = yield* projectionTurnRepository.getByTurnId({
+              threadId: event.payload.threadId,
+              turnId: accepted.turnId,
+            });
+            if (Option.isNone(current) || current.value.pendingMessageId === null) {
+              yield* projectionTurnRepository.upsertByTurnId({
+                ...(Option.isSome(current)
+                  ? current.value
+                  : {
+                      turnId: accepted.turnId,
+                      threadId: event.payload.threadId,
+                      assistantMessageId: null,
+                      state: "pending" as const,
+                      startedAt: null,
+                      completedAt: null,
+                      checkpointTurnCount: null,
+                      checkpointRef: null,
+                      checkpointStatus: null,
+                      checkpointFiles: [],
+                    }),
+                operation: "turn",
+                pendingMessageId: accepted.requestId,
+                requestedAt: accepted.requestedAt,
+                sourceProposedPlanThreadId: accepted.sourceProposedPlan?.threadId ?? null,
+                sourceProposedPlanId: accepted.sourceProposedPlan?.planId ?? null,
+              });
+            }
+          }
           if (event.payload.operationResult === null) return;
           const existing = yield* projectionTurnRepository.getPendingTurnStartByThreadId(
             event.payload,
@@ -1245,15 +1278,18 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         }
 
         case "thread.session-set": {
-          const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
+          const pending = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
             threadId: event.payload.threadId,
           });
-          if (Option.isSome(pendingTurnStart)) {
-            const pending = yield* resolvePendingOperation(pendingTurnStart.value);
-            if (pendingOperationAfterEvent(pending, event) === null) {
+          if (Option.isSome(pending)) {
+            const operation = yield* resolvePendingOperation(pending.value);
+            if (pendingOperationAfterEvent(operation, event) === null) {
               yield* projectionTurnRepository.deletePendingTurnStartByThreadId(event.payload);
             }
           }
+          // Only old logs infer a request binding from the next running session.
+          const pendingTurnStart =
+            event.payload.operationResult === undefined ? pending : Option.none();
           const turnId = event.payload.session.activeTurnId;
           if (turnId === null || event.payload.session.status !== "running") {
             // Leaving the "running" session status is the turn-end signal:

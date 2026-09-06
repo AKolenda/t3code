@@ -16,6 +16,9 @@ import {
   isImportedAgentSessionMessageId,
   getThreadPendingOperation,
   pendingOperationAfterEvent,
+  bindAcceptedTurn,
+  bindTurnFromActivities,
+  turnStartAcceptance,
 } from "@t3tools/contracts";
 import { compareDateTimeStrings } from "@t3tools/shared/dateTime";
 
@@ -426,40 +429,52 @@ export function applyThreadDetailEvent(
       const settledTurnState = settledTurnStateForSessionStatus(event.payload.session.status);
       const latestTurn = reuseLatestTurn(
         thread.latestTurn,
-        event.payload.session.status === "running" && event.payload.session.activeTurnId !== null
-          ? {
-              turnId: event.payload.session.activeTurnId,
-              requestId:
-                thread.latestTurn?.turnId === event.payload.session.activeTurnId
-                  ? (thread.latestTurn.requestId ?? getThreadPendingOperation(thread)?.requestId)
-                  : getThreadPendingOperation(thread)?.requestId,
-              state: "running",
-              requestedAt:
-                thread.latestTurn?.turnId === event.payload.session.activeTurnId
-                  ? thread.latestTurn.requestedAt
-                  : event.payload.session.updatedAt,
-              startedAt:
-                thread.latestTurn?.turnId === event.payload.session.activeTurnId
-                  ? (thread.latestTurn.startedAt ?? event.payload.session.updatedAt)
-                  : event.payload.session.updatedAt,
-              completedAt: null,
-              assistantMessageId:
-                thread.latestTurn?.turnId === event.payload.session.activeTurnId
-                  ? thread.latestTurn.assistantMessageId
-                  : null,
-            }
-          : thread.latestTurn !== null &&
-              thread.latestTurn.state === "running" &&
-              settledTurnState !== null
+        bindTurnFromActivities(
+          event.payload.session.status === "running" && event.payload.session.activeTurnId !== null
             ? {
-                ...thread.latestTurn,
-                state: settledTurnState,
-                // A running turn's completedAt can only hold a mid-turn
-                // placeholder checkpoint timestamp — the session leaving
-                // "running" is the authoritative turn end.
-                completedAt: event.payload.session.updatedAt,
+                turnId: event.payload.session.activeTurnId,
+                requestId:
+                  thread.latestTurn?.turnId === event.payload.session.activeTurnId
+                    ? (thread.latestTurn.requestId ??
+                      (event.payload.operationResult === undefined
+                        ? getThreadPendingOperation(thread)?.requestId
+                        : undefined))
+                    : event.payload.operationResult === undefined
+                      ? getThreadPendingOperation(thread)?.requestId
+                      : undefined,
+                ...(thread.latestTurn?.turnId === event.payload.session.activeTurnId &&
+                thread.latestTurn.sourceProposedPlan
+                  ? { sourceProposedPlan: thread.latestTurn.sourceProposedPlan }
+                  : {}),
+                state: "running",
+                requestedAt:
+                  thread.latestTurn?.turnId === event.payload.session.activeTurnId
+                    ? thread.latestTurn.requestedAt
+                    : event.payload.session.updatedAt,
+                startedAt:
+                  thread.latestTurn?.turnId === event.payload.session.activeTurnId
+                    ? (thread.latestTurn.startedAt ?? event.payload.session.updatedAt)
+                    : event.payload.session.updatedAt,
+                completedAt: null,
+                assistantMessageId:
+                  thread.latestTurn?.turnId === event.payload.session.activeTurnId
+                    ? thread.latestTurn.assistantMessageId
+                    : null,
               }
-            : thread.latestTurn,
+            : thread.latestTurn !== null &&
+                thread.latestTurn.state === "running" &&
+                settledTurnState !== null
+              ? {
+                  ...thread.latestTurn,
+                  state: settledTurnState,
+                  // A running turn's completedAt can only hold a mid-turn
+                  // placeholder checkpoint timestamp — the session leaving
+                  // "running" is the authoritative turn end.
+                  completedAt: event.payload.session.updatedAt,
+                }
+              : thread.latestTurn,
+          thread.activities,
+        ),
       );
 
       return {
@@ -620,8 +635,12 @@ export function applyThreadDetailEvent(
 
     // ── Activities ──────────────────────────────────────────────────
     case "thread.activity-appended": {
-      const activity = event.payload.activity;
+      const activity =
+        event.payload.activity.kind === "provider.turn.start.accepted"
+          ? { ...event.payload.activity, sequence: event.sequence }
+          : event.payload.activity;
       const pendingOperation = pendingOperationAfterEvent(getThreadPendingOperation(thread), event);
+      const latestTurn = bindAcceptedTurn(thread.latestTurn, turnStartAcceptance(activity));
       // A resolvable context-window update supersedes earlier resolvable ones
       // for the same turn: consumers only read the latest value (walking the
       // array backwards), and providers stream these updates continuously, so
@@ -652,6 +671,7 @@ export function applyThreadDetailEvent(
           thread: {
             ...thread,
             activities,
+            latestTurn,
             pendingOperation,
             updatedAt: event.occurredAt,
           },
@@ -675,7 +695,13 @@ export function applyThreadDetailEvent(
 
       return {
         kind: "updated",
-        thread: { ...thread, activities, pendingOperation, updatedAt: event.occurredAt },
+        thread: {
+          ...thread,
+          activities,
+          latestTurn,
+          pendingOperation,
+          updatedAt: event.occurredAt,
+        },
       };
     }
 

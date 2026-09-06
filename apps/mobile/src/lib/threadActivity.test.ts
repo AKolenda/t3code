@@ -302,6 +302,30 @@ function makeThread(
 }
 
 describe("buildThreadFeed", () => {
+  it.each(["provider.turn.start.accepted", "provider.turn.start.interrupted"])(
+    "hides the internal %s activity",
+    (kind) => {
+      const thread = makeThread({
+        id: ThreadId.make("thread-acceptance"),
+        projectId: ProjectId.make("project-1"),
+        title: "Acceptance",
+        activities: [
+          makeActivity({
+            id: EventId.make(kind),
+            kind,
+            summary: "Provider request",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            payload: { timelineBypass: true },
+          }),
+        ],
+      });
+      expect(
+        buildThreadFeed(thread).flatMap((entry) =>
+          entry.type === "activity-group" ? entry.activities : [],
+        ),
+      ).toEqual([]);
+    },
+  );
   it("reuses unchanged feed and presentation rows during an assistant text update", () => {
     const completedTurnId = TurnId.make("completed-turn");
     const activeTurnId = TurnId.make("active-turn");

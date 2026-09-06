@@ -2299,17 +2299,20 @@ describe("deriveWorkLogEntries quiet-timeline guarantee", () => {
     expect(entries[0]!.agentSpawn?.agentTaskIds).toEqual(["child-1", "child-2"]);
   });
 
-  it("timelineBypass non-agent rows (background shells) stay suppressed", () => {
-    const entries = deriveWorkLogEntries([
-      makeActivity({
-        kind: "task.progress",
-        summary: "stall",
-        tone: "info",
-        payload: { taskId: "sh-1", taskType: "local_bash", timelineBypass: true },
-      }),
-    ]);
-    expect(entries).toHaveLength(0);
-  });
+  it.each(["task.progress", "provider.turn.start.accepted", "provider.turn.start.interrupted"])(
+    "hides the internal %s activity",
+    (kind) => {
+      const entries = deriveWorkLogEntries([
+        makeActivity({
+          kind,
+          summary: "stall",
+          tone: "info",
+          payload: { taskId: "sh-1", taskType: "local_bash", timelineBypass: true },
+        }),
+      ]);
+      expect(entries).toHaveLength(0);
+    },
+  );
 
   it("drops task.updated and tool.progress from the work log (fold input only)", () => {
     const entries = deriveWorkLogEntries([

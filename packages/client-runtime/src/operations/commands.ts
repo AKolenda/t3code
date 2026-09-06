@@ -1,6 +1,5 @@
 import {
   CommandId,
-  isContextCompactionMessage,
   ORCHESTRATION_WS_METHODS,
   type ClientOrchestrationCommand,
 } from "@t3tools/contracts";
@@ -271,7 +270,6 @@ export const startThreadTurn: (input: StartThreadTurnInput) => CommandEffect = E
   return yield* dispatch({
     ...input,
     type: "thread.turn.start",
-    operation: input.operation ?? (isContextCompactionMessage(input.message) ? "compact" : "turn"),
     commandId: metadata.commandId,
     createdAt: metadata.createdAt,
   });
