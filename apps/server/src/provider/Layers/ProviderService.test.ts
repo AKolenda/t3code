@@ -60,7 +60,10 @@ import {
   ProviderWorkspaceMissingError,
   type ProviderAdapterError,
 } from "../Errors.ts";
-import type { ProviderAdapterShape, ProviderTurnStartOptions } from "../Services/ProviderAdapter.ts";
+import type {
+  ProviderAdapterShape,
+  ProviderTurnStartOptions,
+} from "../Services/ProviderAdapter.ts";
 import * as ProviderAdapterRegistry from "../Services/ProviderAdapterRegistry.ts";
 import * as ProviderService from "../Services/ProviderService.ts";
 import * as ProviderSessionDirectory from "../Services/ProviderSessionDirectory.ts";
@@ -1027,7 +1030,9 @@ admissionOrdering.layer("ProviderServiceLive native turn admission", (it) => {
         providerInstanceId: codexInstanceId,
         runtimeMode: "full-access",
       });
-      const send = yield* provider.sendTurn({ threadId, input: "next message" }).pipe(Effect.forkChild);
+      const send = yield* provider
+        .sendTurn({ threadId, input: "next message" })
+        .pipe(Effect.forkChild);
       yield* Deferred.await(prepared);
       const terminal = {
         type: "turn.completed",
@@ -2924,10 +2929,11 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
   it.effect("keeps subscriber delivery ordered and isolates failing subscribers", () =>
     Effect.gen(function* () {
       const provider = yield* ProviderService.ProviderService;
-      const session = yield* provider.startSession(asThreadId("thread-1"), {
+      const threadId = asThreadId("fanout-subscriber-isolation");
+      const session = yield* provider.startSession(threadId, {
         provider: ProviderDriverKind.make("codex"),
         providerInstanceId: codexInstanceId,
-        threadId: asThreadId("thread-1"),
+        threadId,
         runtimeMode: "full-access",
       });
 

@@ -1,9 +1,15 @@
-import { EventId, ProviderDriverKind, ThreadId, TurnId } from "@t3tools/contracts";
+import {
+  EventId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+  TurnId,
+} from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 
-import { layer, TurnCheckpointCapture } from "./TurnCheckpointCapture.ts";
+import { layer, make, TurnCheckpointCapture } from "./TurnCheckpointCapture.ts";
 
 const threadId = ThreadId.make("thread-1");
 const started = {
@@ -150,3 +156,174 @@ it.layer(layer)("TurnCheckpointCapture", (it) => {
     }),
   );
 });
+
+const instanceId = ProviderInstanceId.make("codex");
+const nativeTerminal = { ...completed, providerInstanceId: instanceId };
+
+it.effect.each(["captured", "skipped", "failed"] as const)(
+  "waits for native completion and its exact %s capture outcome",
+  (outcome) =>
+    Effect.gen(function* () {
+      const captures = make();
+      const submission = yield* captures.trackSubmission(threadId, instanceId);
+      yield* submission.beforeSubmit(nativeTerminal.turnId);
+      const next = yield* captures.trackSubmission(threadId, instanceId);
+      const waiting = yield* next.beforeSubmit(TurnId.make("next")).pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      assert.equal(waiting.pollUnsafe(), undefined);
+      yield* submission.nativeCompleted(nativeTerminal.turnId);
+      yield* captures.observe(nativeTerminal);
+      assert.equal(yield* captures.shouldCapture(nativeTerminal), true);
+      assert.equal(waiting.pollUnsafe(), undefined);
+      yield* captures.complete(nativeTerminal, outcome);
+      yield* Fiber.join(waiting);
+      yield* next.notSubmitted;
+    }),
+);
+
+it.effect("does not reuse a synthetic failure capture after native completion", () =>
+  Effect.gen(function* () {
+    const captures = make();
+    const submission = yield* captures.trackSubmission(threadId, instanceId);
+    yield* submission.beforeSubmit(nativeTerminal.turnId);
+    yield* captures.observe(nativeTerminal);
+    assert.equal(yield* captures.shouldCapture(nativeTerminal), false);
+    yield* captures.complete(nativeTerminal, "skipped");
+    yield* submission.nativeCompleted(nativeTerminal.turnId);
+    const waiting = yield* captures.awaitNativeCapture(threadId).pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    assert.equal(waiting.pollUnsafe(), undefined);
+    const confirmed = { ...nativeTerminal, eventId: EventId.make("confirmed") };
+    yield* captures.observe(confirmed);
+    assert.equal(yield* captures.shouldCapture(confirmed), true);
+    yield* captures.complete(confirmed, "captured");
+    yield* Fiber.join(waiting);
+  }),
+);
+
+it.effect("does not release a fresh native capture through an older grouped event", () =>
+  Effect.gen(function* () {
+    const captures = make();
+    const submission = yield* captures.trackSubmission(threadId, instanceId);
+    yield* submission.beforeSubmit(nativeTerminal.turnId);
+    yield* captures.observe(nativeTerminal);
+    yield* submission.nativeCompleted(nativeTerminal.turnId);
+    const confirmed = { ...nativeTerminal, eventId: EventId.make("confirmed-after-synthetic") };
+    yield* captures.observe(confirmed);
+    const waiting = yield* captures.awaitNativeCapture(threadId).pipe(Effect.forkChild);
+    yield* captures.complete(nativeTerminal, "skipped");
+    yield* Effect.yieldNow;
+    assert.equal(waiting.pollUnsafe(), undefined);
+    yield* captures.complete(confirmed, "captured");
+    yield* Fiber.join(waiting);
+  }),
+);
+
+it.effect("keeps each same-turn steering request until its native reply and final capture", () =>
+  Effect.gen(function* () {
+    const captures = make();
+    const first = yield* captures.trackSubmission(threadId, instanceId);
+    const steer = yield* captures.trackSubmission(threadId, instanceId);
+    yield* first.beforeSubmit(nativeTerminal.turnId);
+    yield* steer.beforeSubmit(nativeTerminal.turnId);
+    yield* first.nativeCompleted(nativeTerminal.turnId);
+    yield* captures.observe(nativeTerminal);
+    assert.equal(yield* captures.shouldCapture(nativeTerminal), false);
+    yield* captures.complete(nativeTerminal, "skipped");
+    yield* steer.nativeCompleted(nativeTerminal.turnId);
+    const confirmed = { ...nativeTerminal, eventId: EventId.make("steering-final") };
+    yield* captures.observe(confirmed);
+    assert.equal(yield* captures.shouldCapture(confirmed), true);
+    yield* captures.complete(confirmed, "captured");
+    yield* captures.awaitNativeCapture(threadId);
+  }),
+);
+
+it.effect("binds early Codex receipts only from the exact send response", () =>
+  Effect.gen(function* () {
+    const captures = make();
+    const submission = yield* captures.trackSubmission(threadId, instanceId);
+    yield* submission.beforeSubmit();
+    yield* submission.nativeCompleted(nativeTerminal.turnId);
+    yield* captures.observe(nativeTerminal);
+    yield* captures.complete(nativeTerminal, "captured");
+    const waiting = yield* captures.awaitNativeCapture(threadId).pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    assert.equal(waiting.pollUnsafe(), undefined);
+    yield* captures.observe({
+      ...started,
+      providerInstanceId: instanceId,
+      turnId: TurnId.make("unrelated"),
+    });
+    assert.equal((yield* submission.outcome)._tag, "UnknownSubmission");
+    yield* submission.accept(nativeTerminal.turnId);
+    yield* Fiber.join(waiting);
+  }),
+);
+
+it.effect("does not release ownership on generic exit or another provider instance", () =>
+  Effect.gen(function* () {
+    const captures = make();
+    const submission = yield* captures.trackSubmission(threadId, instanceId);
+    yield* submission.beforeSubmit(nativeTerminal.turnId);
+    yield* submission.nativeCompleted(nativeTerminal.turnId);
+    const foreign = { ...nativeTerminal, providerInstanceId: ProviderInstanceId.make("other") };
+    yield* captures.observe(foreign);
+    yield* captures.complete(foreign, "captured");
+    yield* captures.observe({
+      ...started,
+      providerInstanceId: instanceId,
+      type: "session.exited",
+      payload: {},
+    });
+    const waiting = yield* captures.awaitNativeCapture(threadId).pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    assert.equal(waiting.pollUnsafe(), undefined);
+    yield* captures.observe(nativeTerminal);
+    yield* captures.complete(nativeTerminal, "captured");
+    yield* Fiber.join(waiting);
+  }),
+);
+
+it.effect("releases only a rejected call and permits that call to retry", () =>
+  Effect.gen(function* () {
+    const captures = make();
+    const first = yield* captures.trackSubmission(threadId, instanceId);
+    const retry = yield* captures.trackSubmission(threadId, instanceId);
+    yield* first.beforeSubmit(nativeTerminal.turnId);
+    yield* retry.beforeSubmit(nativeTerminal.turnId);
+    yield* retry.notSubmitted;
+    assert.equal((yield* retry.outcome)._tag, "NotSubmitted");
+    const waiting = yield* retry.beforeSubmit(TurnId.make("retry")).pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    assert.equal(waiting.pollUnsafe(), undefined);
+    yield* first.nativeCompleted(nativeTerminal.turnId);
+    yield* captures.observe(nativeTerminal);
+    yield* captures.complete(nativeTerminal, "captured");
+    yield* Fiber.join(waiting);
+    assert.equal((yield* retry.outcome)._tag, "UnknownSubmission");
+    yield* retry.notSubmitted;
+  }),
+);
+
+it.effect("requires a fresh capture after known-turn native teardown", () =>
+  Effect.gen(function* () {
+    const captures = make();
+    const submission = yield* captures.trackSubmission(threadId, instanceId);
+    yield* submission.beforeSubmit(nativeTerminal.turnId);
+    yield* captures.observe(nativeTerminal);
+    yield* captures.complete(nativeTerminal, "skipped");
+    yield* submission.nativeStopped;
+    const waiting = yield* captures.awaitNativeCapture(threadId).pipe(Effect.forkChild);
+    yield* Effect.yieldNow;
+    assert.equal(waiting.pollUnsafe(), undefined);
+    const stopped = { ...nativeTerminal, eventId: EventId.make("confirmed-stop") };
+    yield* captures.observe(stopped);
+    yield* captures.complete(stopped, "captured");
+    yield* Fiber.join(waiting);
+    const unknown = yield* captures.trackSubmission(threadId, instanceId);
+    yield* unknown.beforeSubmit();
+    yield* unknown.nativeStopped;
+    yield* captures.awaitNativeCapture(threadId);
+  }),
+);

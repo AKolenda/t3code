@@ -981,6 +981,7 @@ const make = Effect.gen(function* () {
 
   const processTurnCompletion = Effect.fn("processTurnCompletion")(
     function* (event: Extract<ProviderRuntimeEvent, { type: "turn.completed" | "turn.aborted" }>) {
+      if (!(yield* checkpointCapture.shouldCapture(event))) return "skipped" as const;
       const turnId = toTurnId(event.turnId);
       const thread = yield* resolveThreadDetail(event.threadId);
       const startedTurnId = startedTurns.get(event.threadId);
