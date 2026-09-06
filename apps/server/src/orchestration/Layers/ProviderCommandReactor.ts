@@ -1563,30 +1563,35 @@ const make = Effect.gen(function* () {
             threadModelSelections.set(event.payload.threadId, event.payload.modelSelection);
           }
           command.preparing = false;
-          yield* providerService
-            .compactThread(
-              event.payload.threadId,
-              event.payload.modelSelection,
-              event.payload.messageId,
-            )
-            .pipe(
-              Effect.andThen(
-                restoreCompaction(
+          yield* Effect.uninterruptibleMask((restore) =>
+            Effect.gen(function* () {
+              yield* providerService
+                .compactThread(
                   event.payload.threadId,
-                  { requestId: event.payload.messageId, outcome: "completed" },
-                  true,
-                ),
-              ),
-              Effect.catchCause(recoverCompactionFailure),
-              Effect.ensuring(
-                Effect.sync(() => {
-                  if (!stoppingThreadIds.has(event.payload.threadId))
-                    compactingThreads.delete(event.payload.threadId);
-                }),
-              ),
-              Effect.forkScoped,
-            );
-          compactionStarted = true;
+                  event.payload.modelSelection,
+                  event.payload.messageId,
+                )
+                .pipe(
+                  Effect.andThen(
+                    restoreCompaction(
+                      event.payload.threadId,
+                      { requestId: event.payload.messageId, outcome: "completed" },
+                      true,
+                    ),
+                  ),
+                  Effect.catchCause(recoverCompactionFailure),
+                  Effect.ensuring(
+                    Effect.sync(() => {
+                      if (!stoppingThreadIds.has(event.payload.threadId))
+                        compactingThreads.delete(event.payload.threadId);
+                    }),
+                  ),
+                  restore,
+                  Effect.forkScoped,
+                );
+              compactionStarted = true;
+            }),
+          );
         }).pipe(
           Effect.catchCause(recoverCompactionFailure),
           Effect.ensuring(
