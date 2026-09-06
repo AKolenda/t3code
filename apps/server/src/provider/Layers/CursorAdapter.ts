@@ -148,6 +148,7 @@ interface CursorSessionContext {
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
   lastPlanFingerprint: string | undefined;
+  lastStartedTurnId: TurnId | undefined;
   activeTurnId: TurnId | undefined;
   cursorSkillNames: ReadonlySet<string> | undefined;
   /** Number of sendTurn prompts currently in flight or being prepared.
@@ -380,6 +381,13 @@ export function makeCursorAdapter(
 
     const offerRuntimeEvent = (event: ProviderRuntimeEvent) =>
       Effect.gen(function* () {
+        if (event.type === "turn.started") {
+          const context = sessions.get(event.threadId);
+          if (context) {
+            context.lastStartedTurnId = event.turnId;
+            context.lastPlanFingerprint = undefined;
+          }
+        }
         if (event.type === "turn.completed") {
           const context = sessions.get(event.threadId);
           if (context) {
@@ -829,6 +837,7 @@ export function makeCursorAdapter(
             pendingUserInputs,
             turns: [],
             lastPlanFingerprint: undefined,
+            lastStartedTurnId: undefined,
             activeTurnId: undefined,
             cursorSkillNames: undefined,
             promptsInFlight: 0,
@@ -1008,16 +1017,15 @@ export function makeCursorAdapter(
                         mapAcpToAdapterError(PROVIDER, input.threadId, method, cause),
                     });
                     ctx.activeTurnId = turnId;
-                    if (steeringTurnId === undefined) {
-                      ctx.lastPlanFingerprint = undefined;
-                    }
                     ctx.session = {
                       ...ctx.session,
                       activeTurnId: turnId,
                       updatedAt: yield* nowIso,
                     };
 
-                    if (steeringTurnId === undefined) {
+                    // An earlier prompt can fail configuration after reserving
+                    // this turn. The first prepared prompt must still start it.
+                    if (ctx.lastStartedTurnId !== turnId) {
                       yield* offerRuntimeEvent({
                         type: "turn.started",
                         ...(yield* makeEventStamp()),

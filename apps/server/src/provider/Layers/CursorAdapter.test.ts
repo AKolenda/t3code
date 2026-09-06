@@ -163,12 +163,19 @@ const cursorAdapterTestLayer = it.layer(
 );
 
 cursorAdapterTestLayer("CursorAdapterLive", (it) => {
-  for (const preparation of ["configuration", "attachment", "failure"] as const) {
+  for (const preparation of [
+    "configuration",
+    "attachment",
+    "configuration failure",
+    "attachment failure",
+  ] as const) {
     it.effect(`keeps prompt order while Cursor ${preparation} preparation is pending`, () =>
       Effect.gen(function* () {
         const threadId = ThreadId.make("cursor-steer-during-configuration");
         const fileSystem = yield* FileSystem.FileSystem;
-        const failPreparation = preparation === "failure";
+        const failConfiguration = preparation === "configuration failure";
+        const failAttachment = preparation === "attachment failure";
+        const failPreparation = failConfiguration || failAttachment;
         let promptStarts = 0;
         const isPromptStart = Schema.is(
           Schema.Struct({
@@ -201,7 +208,10 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         );
         const requestLog = NodePath.join(directory, "requests.ndjson");
         const wrapperPath = yield* Effect.promise(() =>
-          makeMockAgentWrapper({ T3_ACP_REQUEST_LOG_PATH: requestLog }),
+          makeMockAgentWrapper({
+            T3_ACP_REQUEST_LOG_PATH: requestLog,
+            ...(failConfiguration ? { T3_ACP_FAIL_SET_CONFIG_OPTION: "1" } : {}),
+          }),
         );
         const adapter = yield* makeCursorAdapter(
           decodeCursorSettings({ binaryPath: wrapperPath }),
@@ -253,7 +263,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         yield* adapter.startSession({
           threadId,
           cwd: process.cwd(),
-          runtimeMode: "full-access",
+          runtimeMode: failConfiguration ? "approval-required" : "full-access",
           modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
         });
         holdConfiguration = true;
@@ -261,7 +271,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
           .sendTurn({
             threadId,
             input: "first",
-            attachments: failPreparation
+            attachments: failAttachment
               ? [
                   {
                     type: "image",
@@ -313,6 +323,7 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
         assert.equal(completed.turnId, steer.turnId);
         assert.equal(completed.payload.state, "completed");
         assert.lengthOf(started, 1);
+        assert.equal(started[0]?.turnId, steer.turnId);
         yield* adapter.stopSession(threadId);
         const requests = yield* Effect.promise(() => readJsonLines(requestLog));
         const decodePromptRequest = Schema.decodeUnknownEffect(
