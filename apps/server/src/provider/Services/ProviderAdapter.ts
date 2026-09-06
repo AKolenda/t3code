@@ -52,6 +52,8 @@ export interface ProviderThreadSnapshot {
 export interface ProviderTurnStartOptions {
   /** Call after preparation, directly before native prompt submission. */
   readonly beforeSubmit: (turnId?: TurnId) => Effect.Effect<void>;
+  /** Release only this send when the adapter proves native submission never occurred. */
+  readonly notSubmitted: Effect.Effect<void>;
   /** Only a native terminal response can confirm that submitted work has finished. */
   readonly nativeCompleted: (turnId: TurnId) => Effect.Effect<void>;
 }
