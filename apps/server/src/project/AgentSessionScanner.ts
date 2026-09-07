@@ -71,9 +71,16 @@ const MAX_METADATA_OPERATIONS_PER_SOURCE = MAX_TRANSCRIPTS_PER_SOURCE * 4;
 const MAX_METADATA_RECORDS_PER_SOURCE = 100_000;
 const MAX_METADATA_RECORDS_PER_TRANSCRIPT = 1_000;
 const RECENT_THREAD_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
-const MAX_IMPORTED_TRANSCRIPT_BYTES = 16 * 1024 * 1024;
+/**
+ * Large tool results (especially screenshots) can make an otherwise ordinary
+ * Codex transcript several GiB. The importer streams those files and discards
+ * records too large to retain safely, so this is an I/O guard rather
+ * than an allocation guard.
+ */
+const MAX_IMPORTED_TRANSCRIPT_BYTES = 4 * 1024 * 1024 * 1024;
+const MAX_IMPORTED_RECORD_BYTES = 1024 * 1024;
 const MAX_IMPORTED_MESSAGES = 200;
-const MAX_IMPORT_BYTES = 64 * 1024 * 1024;
+const MAX_IMPORT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORT_TRANSCRIPTS = 100;
 const MAX_IMPORT_RECORDS = 100_000;
 
@@ -95,6 +102,7 @@ const CodexTurnMetadata = Schema.Struct({
 const TranscriptRecord = Schema.Struct({
   type: Schema.optional(Schema.String),
   timestamp: Schema.optional(Schema.String),
+  cwd: Schema.optional(Schema.String),
   sessionId: Schema.optional(Schema.String),
   aiTitle: Schema.optional(Schema.String),
   isSidechain: Schema.optional(Schema.Boolean),
@@ -109,6 +117,7 @@ const TranscriptRecord = Schema.Struct({
       role: Schema.optional(Schema.String),
       message: Schema.optional(Schema.String),
       model: Schema.optional(Schema.String),
+      cwd: Schema.optional(Schema.String),
       content: Schema.optional(Schema.Array(TranscriptContentBlock)),
       internal_chat_message_metadata_passthrough: Schema.optional(Schema.Unknown),
     }),
@@ -119,6 +128,15 @@ const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
 const decodeTranscriptRecord = Schema.decodeUnknownOption(Schema.fromJsonString(TranscriptRecord));
 const decodeCodexTurnMetadata = Schema.decodeUnknownOption(CodexTurnMetadata);
+
+type DecodedTranscriptRecord = typeof TranscriptRecord.Type;
+
+interface AgentSessionTranscriptMetadata {
+  readonly source: AgentSessionSource;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly fallbackSessionId: string;
+  readonly lastActiveAtMs: number;
+}
 
 export interface AgentSessionThreadMessage {
   readonly role: "user" | "assistant";
@@ -254,16 +272,20 @@ function codexTurnId(metadata: unknown): string | null {
 
 /** Keep visible user and assistant text while ignoring tools, reasoning, and malformed records. */
 export function parseAgentSessionTranscript(
-  input: {
+  input: AgentSessionTranscriptMetadata & {
     readonly contents: string;
-    readonly source: AgentSessionSource;
-    readonly providerInstanceId: ProviderInstanceId;
-    readonly fallbackSessionId: string;
-    readonly lastActiveAtMs: number;
   },
   lines = splitTranscriptRecords(input.contents, MAX_IMPORT_RECORDS + 1),
 ): AgentSessionThread | null {
   if (lines.length > MAX_IMPORT_RECORDS) return null;
+  const records = lines.flatMap((line) => Option.toArray(decodeTranscriptRecord(line)));
+  return parseAgentSessionRecords(input, records);
+}
+
+function parseAgentSessionRecords(
+  input: AgentSessionTranscriptMetadata,
+  records: ReadonlyArray<DecodedTranscriptRecord>,
+): AgentSessionThread | null {
   const fallbackTimestamp = DateTime.formatIso(DateTime.makeUnsafe(input.lastActiveAtMs));
   // Claude filenames are session IDs. Codex rollout filenames include extra
   // timestamp text, so only transcript metadata can provide a resumable ID.
@@ -275,13 +297,6 @@ export function parseAgentSessionTranscript(
   let firstUserMessage:
     | (AgentSessionThreadMessage & { readonly codexResponseUser: boolean })
     | undefined;
-  function* decodedRecords() {
-    for (const line of lines) {
-      const decoded = decodeTranscriptRecord(line);
-      if (Option.isSome(decoded)) yield decoded.value;
-    }
-  }
-
   // A Codex response item can include generated setup text beside the real
   // prompt. Suppress response-user records only when the shared turn ID and a
   // verbatim event copy prove which prompt the user submitted.
@@ -308,7 +323,7 @@ export function parseAgentSessionTranscript(
   };
   if (input.source === "codex") {
     let recordIndex = -1;
-    for (const record of decodedRecords()) {
+    for (const record of records) {
       recordIndex += 1;
       if (
         record.type === "response_item" &&
@@ -365,7 +380,7 @@ export function parseAgentSessionTranscript(
   };
 
   let recordIndex = -1;
-  for (const record of decodedRecords()) {
+  for (const record of records) {
     recordIndex += 1;
     if (input.source === "claudeAgent") {
       if (
@@ -476,6 +491,35 @@ export function parseAgentSessionTranscript(
     updatedAt: fallbackTimestamp,
     messages: retainedMessages,
   };
+}
+
+function extractDecodedCwd(record: DecodedTranscriptRecord): string | null {
+  const cwd = record.cwd?.trim() || record.payload?.cwd?.trim();
+  return cwd && cwd.length > 0 ? cwd : null;
+}
+
+function shouldRetainDecodedRecord(
+  source: AgentSessionSource,
+  record: DecodedTranscriptRecord,
+): boolean {
+  if (extractDecodedCwd(record) !== null) return true;
+  if (source === "claudeAgent") {
+    return (
+      record.type === "user" ||
+      record.type === "assistant" ||
+      record.sessionId !== undefined ||
+      record.aiTitle !== undefined ||
+      record.message?.model !== undefined
+    );
+  }
+  return (
+    record.type === "session_meta" ||
+    record.type === "turn_context" ||
+    (record.type === "event_msg" && record.payload?.type === "user_message") ||
+    (record.type === "response_item" &&
+      record.payload?.type === "message" &&
+      (record.payload.role === "user" || record.payload.role === "assistant"))
+  );
 }
 
 /**
@@ -692,10 +736,17 @@ export const make = Effect.gen(function* () {
     ).pipe(Effect.orElseSucceed(() => null));
   });
 
-  /** Check the open file before and after reading, without reading past its reserved byte budget. */
+  /**
+   * Check the open file before and after reading, and retain only decoded
+   * records small enough to become useful imported history. Tool payloads can
+   * contain multi-megabyte images; buffering the whole JSONL file made their
+   * file size indistinguishable from actual import complexity.
+   */
   const readTranscript = Effect.fn("AgentSessionScanner.readTranscript")(function* (
     filePath: string,
     expected: ReturnType<typeof transcriptIdentity>,
+    recordLimit: number,
+    source: AgentSessionSource,
   ) {
     if (expected.size > MAX_IMPORTED_TRANSCRIPT_BYTES) return null;
 
@@ -706,9 +757,45 @@ export const make = Effect.gen(function* () {
             if (!sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))) {
               return null;
             }
-            const decoder = new TextDecoder();
-            let contents = "";
+            const records: Array<DecodedTranscriptRecord> = [];
+            let recordChunks: Array<Uint8Array> = [];
+            let recordBytes = 0;
+            let recordCount = 0;
+            let recordTooLarge = false;
             let bytesRead = 0;
+            const decoder = new TextDecoder();
+
+            const appendRecordChunk = (chunk: Uint8Array) => {
+              recordBytes += chunk.byteLength;
+              if (recordTooLarge) return;
+              if (recordBytes > MAX_IMPORTED_RECORD_BYTES) {
+                recordChunks = [];
+                recordTooLarge = true;
+                return;
+              }
+              if (chunk.byteLength > 0) recordChunks.push(chunk);
+            };
+
+            const finishRecord = () => {
+              recordCount += 1;
+              if (recordCount > recordLimit) return false;
+              if (!recordTooLarge && recordBytes > 0) {
+                const bytes = new Uint8Array(recordBytes);
+                let offset = 0;
+                for (const chunk of recordChunks) {
+                  bytes.set(chunk, offset);
+                  offset += chunk.byteLength;
+                }
+                const decoded = decodeTranscriptRecord(decoder.decode(bytes));
+                if (Option.isSome(decoded) && shouldRetainDecodedRecord(source, decoded.value)) {
+                  records.push(decoded.value);
+                }
+              }
+              recordChunks = [];
+              recordBytes = 0;
+              recordTooLarge = false;
+              return true;
+            };
 
             while (bytesRead < expected.size) {
               const next = yield* file.readAlloc(
@@ -719,11 +806,22 @@ export const make = Effect.gen(function* () {
               }
 
               bytesRead += next.value.byteLength;
-              contents += decoder.decode(next.value, { stream: true });
+              let start = 0;
+              while (start < next.value.byteLength) {
+                const newline = next.value.indexOf(10, start);
+                if (newline === -1) {
+                  appendRecordChunk(next.value.subarray(start));
+                  break;
+                }
+                appendRecordChunk(next.value.subarray(start, newline));
+                if (!finishRecord()) return null;
+                start = newline + 1;
+              }
             }
 
+            if (recordBytes > 0 && !finishRecord()) return null;
             return sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))
-              ? contents + decoder.decode()
+              ? { records, recordCount }
               : null;
           }),
         ),
@@ -1238,20 +1336,21 @@ export const make = Effect.gen(function* () {
           // Reserve the whole file even if its read or parse fails.
           transcriptsRemaining -= 1;
           bytesRemaining -= identity.size;
-          const contents = yield* readTranscript(transcript.filePath, identity);
-          if (contents === null) {
+          const snapshot = yield* readTranscript(
+            transcript.filePath,
+            identity,
+            recordsRemaining,
+            candidate.source,
+          );
+          if (snapshot === null) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
-          const lines = splitTranscriptRecords(contents, recordsRemaining + 1);
-          if (lines.length > recordsRemaining) {
-            return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
-          }
-          recordsRemaining -= lines.length;
+          recordsRemaining -= snapshot.recordCount;
 
           // A stable replacement file can belong to a different project than the cached candidate.
           let snapshotCwd: string | null = null;
-          for (const line of lines) {
-            snapshotCwd = extractCwd(line);
+          for (const record of snapshot.records) {
+            snapshotCwd = extractDecodedCwd(record);
             if (snapshotCwd !== null) break;
           }
           if (snapshotCwd === null) {
@@ -1265,15 +1364,14 @@ export const make = Effect.gen(function* () {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
           }
 
-          const parsedThread = parseAgentSessionTranscript(
+          const parsedThread = parseAgentSessionRecords(
             {
-              contents,
               source: candidate.source,
               providerInstanceId: candidate.providerInstanceId,
               fallbackSessionId: path.basename(transcript.filePath, ".jsonl"),
               lastActiveAtMs: transcript.mtimeMs,
             },
-            lines,
+            snapshot.records,
           );
           if (parsedThread === null) {
             return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
