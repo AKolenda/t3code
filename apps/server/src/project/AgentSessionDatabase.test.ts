@@ -190,7 +190,7 @@ describe("OpenCode history", () => {
       updatedAtMs,
       updatedAtMs + 1,
     );
-    expect(discoverOpenCodeSessions(filePath, 10).map((s) => s.sessionId)).toEqual([
+    expect(discoverOpenCodeSessions(filePath, 2).map((s) => s.sessionId)).toEqual([
       "selected",
       "other",
     ]);

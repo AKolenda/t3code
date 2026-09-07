@@ -411,7 +411,14 @@ export function discoverOpenCodeSessions(filePath: string, limit: number) {
   return withDatabase(filePath, (db) =>
     db
       .prepare(
-        "SELECT id, directory, title, time_created, time_updated FROM session WHERE parent_id IS NULL ORDER BY time_updated DESC, id LIMIT ?",
+        // Match metadata field types before LIMIT so malformed rows cannot
+        // displace valid older sessions from the discovery allowance.
+        `SELECT id, directory, title, time_created, time_updated FROM session
+          WHERE parent_id IS NULL AND typeof(id) = 'text'
+            AND typeof(directory) = 'text' AND typeof(title) = 'text'
+            AND typeof(time_created) IN ('integer', 'real')
+            AND typeof(time_updated) IN ('integer', 'real')
+          ORDER BY time_updated DESC, id LIMIT ?`,
       )
       .all(limit)
       .flatMap((row): Array<DatabaseSession> => {
