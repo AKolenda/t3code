@@ -238,7 +238,7 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
                     ? { threadId: thread.providerSessionId }
                     : thread.source === "claudeAgent"
                       ? { threadId, resume: thread.providerSessionId }
-                      : { sessionId: thread.providerSessionId },
+                      : { schemaVersion: 1, sessionId: thread.providerSessionId },
               runtimePayload: { cwd: workspaceRoot },
             },
             { onConflict: "ignore" },

@@ -217,6 +217,8 @@ describe("OpenCode history", () => {
         content: [
           { type: "reasoning", text: "Hidden" },
           { type: "text", text: "Fixed" },
+          { type: "text", text: "Generated context", synthetic: true },
+          { type: "text", text: "Ignored context", ignored: true },
         ],
       }),
     );
@@ -275,7 +277,7 @@ describe("Cursor desktop history", () => {
   }
   it("reads ordered editor bubbles without loading tool payloads or abandoned replies", () => {
     const { filePath, db } = fixture();
-    const sessions = discoverCursorDesktopSessions(filePath, 100);
+    const { sessions } = discoverCursorDesktopSessions(filePath, 100);
     expect(sessions).toHaveLength(1);
     const snapshot = readCursorDesktopThread(sessions[0]!, instanceId, {
       bytesRemaining: 4096,
@@ -293,6 +295,74 @@ describe("Cursor desktop history", () => {
     expect(snapshot.thread.messages[0]!.createdAt).toBe("2026-09-06T09:59:59.000Z");
     db.close();
   });
+  it("finds older valid sessions after newer unusable composers", () => {
+    const { filePath, db, put, composer } = fixture();
+    for (const [index, extra] of [
+      { subagentInfo: { parentComposerId: "parent" } },
+      { workspaceIdentifier: { uri: { scheme: "vscode-remote", path: "/remote" } } },
+      { workspaceIdentifier: undefined },
+      { createdAt: "invalid" },
+    ].entries()) {
+      put(`composerData:newer-${index}`, {
+        ...composer,
+        ...extra,
+        composerId: `newer-${index}`,
+        lastUpdatedAt: updatedAtMs + index + 1,
+      });
+    }
+    expect(discoverCursorDesktopSessions(filePath, 1).sessions).toMatchObject([
+      { sessionId: "desktop" },
+    ]);
+    db.close();
+  });
+  it.each(["composer", "bubble"])("enforces UTF-8 byte limits on desktop %s JSON", (location) => {
+    const { filePath, db, put, composer } = fixture();
+    const text = "界".repeat(1000);
+    if (location === "composer") {
+      put("composerData:desktop", {
+        ...composer,
+        fullConversationHeadersOnly: [],
+        conversation: [{ bubbleId: "user", type: 1, text }],
+      });
+    } else {
+      put("bubbleId:desktop:answer", { bubbleId: "answer", type: 2, text });
+    }
+    const session = discoverCursorDesktopSessions(filePath, 1).sessions[0]!;
+    const budget = { bytesRemaining: 2048, recordsRemaining: 10 };
+    expect(() => readCursorDesktopThread(session, instanceId, budget)).toThrow(
+      `Missing or oversized Cursor ${location}`,
+    );
+    expect(budget.bytesRemaining).toBeGreaterThanOrEqual(0);
+    db.close();
+  });
+  it("omits thought and summary bubbles whose flags only exist in their stored bodies", () => {
+    const { filePath, db, put, composer } = fixture();
+    put("composerData:desktop", {
+      ...composer,
+      fullConversationHeadersOnly: [
+        ...composer.fullConversationHeadersOnly,
+        { bubbleId: "thought", type: 2 },
+        { bubbleId: "summary", type: 2 },
+      ],
+    });
+    put("bubbleId:desktop:thought", {
+      bubbleId: "thought",
+      type: 2,
+      text: "Hidden thought",
+      isThought: true,
+    });
+    put("bubbleId:desktop:summary", {
+      bubbleId: "summary",
+      type: 2,
+      text: "Hidden summary",
+      isSummary: true,
+    });
+    const session = discoverCursorDesktopSessions(filePath, 1).sessions[0]!;
+    expect(
+      readCursorDesktopThread(session, instanceId)?.thread.messages.map((m) => m.text),
+    ).toEqual(["Fix desktop history", "Fixed"]);
+    db.close();
+  });
   it("skips empty drafts, subagents, and remote workspaces", () => {
     const { filePath, db, put, composer } = fixture();
     for (const extra of [
@@ -301,13 +371,16 @@ describe("Cursor desktop history", () => {
       { workspaceIdentifier: { uri: { scheme: "vscode-remote", path: "/project" } } },
     ]) {
       put("composerData:desktop", { ...composer, ...extra });
-      expect(discoverCursorDesktopSessions(filePath, 100)).toEqual([]);
+      expect(discoverCursorDesktopSessions(filePath, 100)).toEqual({
+        sessions: [],
+        truncated: false,
+      });
     }
     db.close();
   });
   it("rechecks project ownership and rejects incomplete or oversized visible history", () => {
     const { filePath, db, put, composer } = fixture();
-    const session = discoverCursorDesktopSessions(filePath, 100)[0]!;
+    const session = discoverCursorDesktopSessions(filePath, 100).sessions[0]!;
     put("composerData:desktop", {
       ...composer,
       workspaceIdentifier: { uri: { scheme: "file", fsPath: "/moved" } },
@@ -330,13 +403,25 @@ describe("Cursor desktop history", () => {
       conversation: [
         { bubbleId: "user", type: 1, text: "Old question" },
         { bubbleId: "reply", type: 2, text: "Old answer" },
+        {
+          bubbleId: "simulated-user",
+          type: 1,
+          text: "Generated prompt",
+          grouping: { isSimulatedMsg: true },
+        },
+        {
+          bubbleId: "simulated-answer",
+          type: 2,
+          text: "Generated answer",
+          grouping: { isSimulatedMsg: true },
+        },
       ],
     });
     db.prepare("INSERT INTO composerHeaders VALUES (?, ?)").run(
       "desktop",
       JSON.stringify({ composerId: "desktop", name: "Renamed", lastUpdatedAt: updatedAtMs + 1000 }),
     );
-    const session = discoverCursorDesktopSessions(filePath, 100)[0]!;
+    const session = discoverCursorDesktopSessions(filePath, 100).sessions[0]!;
     expect(session.updatedAtMs).toBe(updatedAtMs + 1000);
     expect(readCursorDesktopThread(session, instanceId)?.thread).toMatchObject({
       title: "Renamed",

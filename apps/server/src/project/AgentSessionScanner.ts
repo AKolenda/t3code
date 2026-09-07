@@ -1348,10 +1348,11 @@ export const make = Effect.gen(function* () {
             }
           }
 
-          const sessions = yield* Effect.try(() =>
+          const discovery = yield* Effect.try(() =>
             discoverCursorDesktopSessions(desktopFile, remaining + 1, roots),
-          ).pipe(Effect.orElseSucceed(() => []));
-          truncated ||= sessions.length > remaining;
+          ).pipe(Effect.orElseSucceed(() => ({ sessions: [], truncated: false })));
+          const { sessions } = discovery;
+          truncated ||= discovery.truncated || sessions.length > remaining;
           for (const session of sessions.slice(0, remaining)) add(session);
           remaining -= Math.min(remaining, sessions.length);
         }

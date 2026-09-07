@@ -7,6 +7,7 @@ import * as NodeURL from "node:url";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -203,6 +204,67 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       expect(requests.filter((r) => r.method === "session/new")).toHaveLength(1);
       expect(requests.filter((r) => r.method === "session/load")).toHaveLength(1);
       const prompts = requests.filter((r) => r.method === "session/prompt");
+      const historyPart = { type: "text", text: importedHistory };
+      expect(prompts[0]).toMatchObject({
+        params: { prompt: expect.arrayContaining([historyPart]) },
+      });
+      expect(prompts[1]).not.toMatchObject({
+        params: { prompt: expect.arrayContaining([historyPart]) },
+      });
+    }),
+  );
+
+  it.effect("sends imported context only once for concurrent initial prompts", () =>
+    Effect.gen(function* () {
+      const crypto = yield* Crypto.Crypto;
+      const bothStarted = yield* Deferred.make<void>();
+      let startingTurns = false;
+      let turnIdsRequested = 0;
+      const adapter = yield* makeCursorAdapter(decodeCursorSettings({}), {
+        resolveSettings: yield* makeResolveCursorSettings,
+      }).pipe(
+        Effect.provideService(Crypto.Crypto, {
+          ...crypto,
+          randomUUIDv4: Effect.gen(function* () {
+            // Make both calls enter their initial-turn path before either configures ACP.
+            if (startingTurns && turnIdsRequested++ < 2) {
+              if (turnIdsRequested === 2) yield* Deferred.succeed(bothStarted, undefined);
+              yield* Deferred.await(bothStarted);
+            }
+            return yield* crypto.randomUUIDv4;
+          }),
+        }),
+      );
+      const settings = yield* ServerSettingsService;
+      const workspace = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-import-concurrent-test-")),
+      );
+      const requestLogPath = NodePath.join(workspace, "requests.ndjson");
+      const binaryPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, NodePath.join(workspace, "argv.txt")),
+      );
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath } } });
+      const threadId = ThreadId.make("import:cursor:concurrent-session");
+      const importedHistory = "user: Explain the project\nassistant: A sample app";
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: workspace,
+        runtimeMode: "full-access",
+        resumeCursor: { schemaVersion: 1, importedHistory },
+      });
+      startingTurns = true;
+      yield* Effect.all(
+        [
+          adapter.sendTurn({ threadId, input: "Continue", attachments: [] }),
+          adapter.sendTurn({ threadId, input: "Add tests", attachments: [] }),
+        ],
+        { concurrency: "unbounded" },
+      );
+      yield* adapter.stopSession(threadId);
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const prompts = requests.filter((r) => r.method === "session/prompt");
+      expect(prompts).toHaveLength(2);
       const historyPart = { type: "text", text: importedHistory };
       expect(prompts[0]).toMatchObject({
         params: { prompt: expect.arrayContaining([historyPart]) },

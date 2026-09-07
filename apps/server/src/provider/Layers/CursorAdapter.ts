@@ -146,6 +146,7 @@ interface CursorSessionContext {
    * >0 means a turn is actively running, so a new sendTurn is a steer that
    * continues it, and only the last remaining prompt settles the turn. */
   promptsInFlight: number;
+  importedHistoryInFlight: boolean;
   assistantReply: CursorTransportFailure;
   stopped: boolean;
 }
@@ -782,6 +783,7 @@ export function makeCursorAdapter(
             activeTurnId: undefined,
             cursorSkillNames: undefined,
             promptsInFlight: 0,
+            importedHistoryInFlight: false,
             assistantReply: new CursorTransportFailure(),
             stopped: false,
           };
@@ -931,6 +933,7 @@ export function makeCursorAdapter(
         // resolving from here on does not settle the turn; the matching
         // decrement is the `ensuring` below.
         ctx.promptsInFlight += 1;
+        let importedHistory: string | undefined;
 
         return yield* Effect.gen(function* () {
           const turnModelSelection =
@@ -1042,10 +1045,13 @@ export function makeCursorAdapter(
             });
           }
 
-          const importedHistory =
-            steeringTurnId === undefined
+          importedHistory =
+            steeringTurnId === undefined && !ctx.importedHistoryInFlight
               ? Option.getOrUndefined(decodeCursorResume(ctx.session.resumeCursor))?.importedHistory
               : undefined;
+          // Claim synchronously before prompting so concurrent initial sends cannot
+          // duplicate the context. A failed prompt releases it for the next retry.
+          if (importedHistory) ctx.importedHistoryInFlight = true;
           // ACP has no system-message field; keep runtime context separate from the user's text.
           const result = yield* ctx.acp
             .prompt({
@@ -1121,6 +1127,7 @@ export function makeCursorAdapter(
         }).pipe(
           Effect.ensuring(
             Effect.sync(() => {
+              if (importedHistory) ctx.importedHistoryInFlight = false;
               ctx.promptsInFlight = Math.max(0, ctx.promptsInFlight - 1);
             }),
           ),

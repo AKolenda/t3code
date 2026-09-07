@@ -216,7 +216,7 @@ export function readCursorDesktopWorkspaceIndex(filePath: string): ReadonlyArray
   return withDatabase(filePath, (db) => {
     const row = db
       .prepare(
-        "SELECT value FROM ItemTable WHERE key = 'composer.composerData' AND length(value) <= ?",
+        "SELECT value FROM ItemTable WHERE key = 'composer.composerData' AND length(CAST(value AS BLOB)) <= ?",
       )
       .get(MAX_METADATA_BYTES);
     if (typeof row?.value !== "string") return [];
@@ -262,7 +262,9 @@ function desktopMetadata(db: NodeSqlite.DatabaseSync, id: string, fallbackCwd?: 
       .get()
   ) {
     const row = db
-      .prepare("SELECT value FROM composerHeaders WHERE composerId = ? AND length(value) <= ?")
+      .prepare(
+        "SELECT value FROM composerHeaders WHERE composerId = ? AND length(CAST(value AS BLOB)) <= ?",
+      )
       .get(id, MAX_METADATA_BYTES);
     if (typeof row?.value === "string") header = { ...metadata, ...decodeDesktopHeader(row.value) };
   }
@@ -279,7 +281,7 @@ export function discoverCursorDesktopSessions(
   filePath: string,
   limit: number,
   roots: ReadonlyMap<string, string> = new Map(),
-): Array<DatabaseSession> {
+): { sessions: Array<DatabaseSession>; truncated: boolean } {
   return withDatabase(filePath, (db) => {
     const rows = db
       .prepare(
@@ -287,26 +289,30 @@ export function discoverCursorDesktopSessions(
           AND (coalesce(json_array_length(value, '$.fullConversationHeadersOnly'), 0) > 0 OR coalesce(json_array_length(value, '$.conversation'), 0) > 0)
           ORDER BY coalesce(json_extract(value, '$.lastUpdatedAt'), json_extract(value, '$.createdAt')) DESC, key LIMIT ?`,
       )
-      .all(limit);
-    return rows.flatMap(({ id }) => {
-      if (typeof id !== "string") return [];
+      .iterate(MAX_RECORDS + 1);
+    const sessions: Array<DatabaseSession> = [];
+    let inspected = 0;
+    for (const { id } of rows) {
+      // Invalid rows must not consume the valid-session limit, but still bound
+      // metadata work and let the caller report an incomplete scan.
+      if (++inspected > MAX_RECORDS) return { sessions, truncated: true };
+      if (sessions.length >= limit) return { sessions, truncated: true };
+      if (typeof id !== "string") continue;
       try {
         const metadata = desktopMetadata(db, id, roots.get(id));
-        return metadata === null
-          ? []
-          : [
-              {
-                format: "cursor-desktop" as const,
-                filePath,
-                sessionId: id,
-                cwd: metadata.cwd,
-                updatedAtMs: metadata.updatedAtMs,
-              },
-            ];
+        if (metadata === null) continue;
+        sessions.push({
+          format: "cursor-desktop",
+          filePath,
+          sessionId: id,
+          cwd: metadata.cwd,
+          updatedAtMs: metadata.updatedAtMs,
+        });
       } catch {
-        return [];
+        continue;
       }
-    });
+    }
+    return { sessions, truncated: false };
   });
 }
 
@@ -324,7 +330,7 @@ export function readCursorDesktopThread(
         'modelConfig', coalesce(json_extract(value, '$.modelConfig'), json('{}')),
         'fullConversationHeadersOnly', coalesce(json_extract(value, '$.fullConversationHeadersOnly'), json('[]')),
         'conversation', coalesce(json_extract(value, '$.conversation'), json('[]'))
-      ) AS value FROM cursorDiskKV WHERE key = ?) WHERE length(value) <= ?`)
+      ) AS value FROM cursorDiskKV WHERE key = ?) WHERE length(CAST(value AS BLOB)) <= ?`)
       .get(`composerData:${session.sessionId}`, budget.bytesRemaining);
     if (typeof row?.value !== "string") throw new Error("Missing or oversized Cursor composer");
     budget.bytesRemaining -= Buffer.byteLength(row.value);
@@ -335,6 +341,7 @@ export function readCursorDesktopThread(
         (bubble.type !== 1 && bubble.type !== 2) ||
         bubble.isThought ||
         bubble.isSummary ||
+        bubble.grouping?.isSimulatedMsg ||
         !bubble.text?.trim()
       )
         return;
@@ -350,8 +357,11 @@ export function readCursorDesktopThread(
       'bubbleId', json_extract(value, '$.bubbleId'),
       'type', json_extract(value, '$.type'),
       'text', coalesce(json_extract(value, '$.text'), ''),
-      'createdAt', coalesce(json_extract(value, '$.createdAt'), '')
-    ) AS value FROM cursorDiskKV WHERE key = ?) WHERE length(value) <= ?`);
+      'createdAt', coalesce(json_extract(value, '$.createdAt'), ''),
+      'isThought', json(CASE WHEN json_extract(value, '$.isThought') = 1 THEN 'true' ELSE 'false' END),
+      'isSummary', json(CASE WHEN json_extract(value, '$.isSummary') = 1 THEN 'true' ELSE 'false' END),
+      'grouping', coalesce(json_extract(value, '$.grouping'), json('{}'))
+    ) AS value FROM cursorDiskKV WHERE key = ?) WHERE length(CAST(value AS BLOB)) <= ?`);
     if (composer.fullConversationHeadersOnly?.length) {
       for (const header of composer.fullConversationHeadersOnly) {
         if (--budget.recordsRemaining < 0) throw new Error("Cursor history record limit");
@@ -556,7 +566,7 @@ export function readOpenCodeThread(
           data.type === "user"
             ? (data.text ?? "")
             : (data.content ?? [])
-                .filter((part) => part.type === "text")
+                .filter((part) => part.type === "text" && !part.synthetic && !part.ignored)
                 .map((part) => part.text ?? "")
                 .join("\n");
         append(data, text, entry.time_created);

@@ -3247,7 +3247,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery imported sources", (it) => {
             null,
             {},
             { ...imported.source, size: -1 },
-            { ...imported.source, provider: "cursor" },
+            { ...imported.source, provider: "unsupported-provider" },
             { ...imported.source, providerInstanceId: "wrong-instance" },
             { ...imported.source, providerSessionId: "wrong-session" },
             imported.source,

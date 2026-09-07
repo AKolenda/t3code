@@ -332,7 +332,7 @@ it.layer(NodeServices.layer)("AgentSessionImporter", (it) => {
                       schemaVersion: 1,
                       importedHistory: expect.stringContaining(thread.messages[0]!.text),
                     }
-                  : { sessionId: `${source}-session` },
+                  : { schemaVersion: 1, sessionId: `${source}-session` },
               runtimePayload: { cwd: WORKSPACE_ROOT },
             },
           ]);
