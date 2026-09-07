@@ -416,11 +416,14 @@ export function discoverOpenCodeSessions(filePath: string, limit: number) {
         `SELECT id, directory, title, time_created, time_updated FROM session
           WHERE parent_id IS NULL AND typeof(id) = 'text'
             AND typeof(directory) = 'text' AND typeof(title) = 'text'
+            AND length(CAST(id AS BLOB)) <= ?
+            AND length(CAST(directory AS BLOB)) <= ?
+            AND length(CAST(title AS BLOB)) <= ?
             AND typeof(time_created) IN ('integer', 'real')
             AND typeof(time_updated) IN ('integer', 'real')
           ORDER BY time_updated DESC, id LIMIT ?`,
       )
-      .all(limit)
+      .all(MAX_METADATA_BYTES, MAX_METADATA_BYTES, MAX_METADATA_BYTES, limit)
       .flatMap((row): Array<DatabaseSession> => {
         const decoded = decodeOpenCodeSessionOption(row);
         if (Option.isNone(decoded)) return [];

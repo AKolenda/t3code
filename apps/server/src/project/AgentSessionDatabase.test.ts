@@ -196,6 +196,26 @@ describe("OpenCode history", () => {
     ]);
     db.close();
   });
+  it("skips oversized OpenCode metadata before applying the session limit", () => {
+    const { db, filePath } = fixture();
+    const oversized = "界".repeat(400_000);
+    for (const [index, metadata] of [
+      [oversized, "/project", "Title"],
+      ["large-directory", oversized, "Title"],
+      ["large-title", "/project", oversized],
+    ].entries()) {
+      db.prepare("INSERT INTO session VALUES (?, ?, ?, ?, ?, NULL)").run(
+        ...metadata,
+        updatedAtMs,
+        updatedAtMs + index + 1,
+      );
+    }
+    expect(discoverOpenCodeSessions(filePath, 2).map((s) => s.sessionId)).toEqual([
+      "selected",
+      "other",
+    ]);
+    db.close();
+  });
   it("retains the first prompt and newest history within the message limit", () => {
     const { db, filePath, message } = fixture();
     for (let i = 0; i < 205; i++)
