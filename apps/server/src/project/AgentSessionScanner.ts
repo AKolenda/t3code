@@ -35,6 +35,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -45,6 +46,7 @@ import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSn
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { createTranscriptJsonReader, TranscriptJsonLimitError } from "./AgentSessionJson.ts";
 
 /** Chunk size for full transcript reads. */
 const TRANSCRIPT_PREFIX_BYTES = 32 * 1024;
@@ -73,12 +75,12 @@ const MAX_METADATA_RECORDS_PER_TRANSCRIPT = 1_000;
 const RECENT_THREAD_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 /**
  * Large tool results (especially screenshots) can make an otherwise ordinary
- * Codex transcript several GiB. The importer reads those files one JSONL
- * record at a time rather than buffering the entire transcript. These limits
- * bound total I/O, not the size of an individual record held in memory.
+ * Codex transcript several GiB. Streaming field selection avoids allocating
+ * those payloads. Raw I/O and selected history have separate budgets.
  */
 const MAX_IMPORTED_TRANSCRIPT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORTED_MESSAGES = 200;
+const MAX_IMPORT_HISTORY_BYTES = 32 * 1024 * 1024;
 const MAX_IMPORT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORT_TRANSCRIPTS = 100;
 const MAX_IMPORT_RECORDS = 100_000;
@@ -126,6 +128,7 @@ const TranscriptRecord = Schema.Struct({
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
 const decodeTranscriptRecord = Schema.decodeUnknownOption(Schema.fromJsonString(TranscriptRecord));
+const decodeTranscriptValue = Schema.decodeUnknownOption(TranscriptRecord);
 const decodeCodexTurnMetadata = Schema.decodeUnknownOption(CodexTurnMetadata);
 
 type DecodedTranscriptRecord = typeof TranscriptRecord.Type;
@@ -603,6 +606,9 @@ function sameTranscriptIdentity(
 
 export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
+  // Different project imports can arrive concurrently from multiple clients.
+  // Only one transcript may hold its selected-history budget at a time.
+  const importReadLock = yield* Semaphore.make(1);
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -736,10 +742,9 @@ export const make = Effect.gen(function* () {
   });
 
   /**
-   * Check the open file before and after reading, and decode each complete
-   * record before deciding whether it belongs in imported history. A large
-   * record can contain conversation text alongside image or tool payloads;
-   * its byte size must not decide whether that text is preserved.
+   * Project history fields while reading, before allocating whole JSON records.
+   * Check the file identity on both sides of the read. A selected-history budget
+   * failure rejects the entire transcript before any imported messages persist.
    */
   const readTranscript = Effect.fn("AgentSessionScanner.readTranscript")(function* (
     filePath: string,
@@ -757,34 +762,35 @@ export const make = Effect.gen(function* () {
               return null;
             }
             const records: Array<DecodedTranscriptRecord> = [];
-            let recordChunks: Array<Uint8Array> = [];
+            let historyBytes = 0;
             let recordBytes = 0;
             let recordCount = 0;
             let bytesRead = 0;
-            const decoder = new TextDecoder();
-
-            const appendRecordChunk = (chunk: Uint8Array) => {
-              recordBytes += chunk.byteLength;
-              if (chunk.byteLength > 0) recordChunks.push(chunk);
+            const reserve = (bytes: number) => {
+              recordBytes += bytes;
+              if (historyBytes + recordBytes > MAX_IMPORT_HISTORY_BYTES) {
+                throw new TranscriptJsonLimitError(
+                  "Transcript selected history exceeds the 32 MiB memory budget",
+                );
+              }
             };
+            let reader = createTranscriptJsonReader(reserve);
+            let decoder = new TextDecoder();
+            let recordStarted = false;
 
             const finishRecord = () => {
+              reader.write(decoder.decode());
               recordCount += 1;
               if (recordCount > recordLimit) return false;
-              if (recordBytes > 0) {
-                const bytes = new Uint8Array(recordBytes);
-                let offset = 0;
-                for (const chunk of recordChunks) {
-                  bytes.set(chunk, offset);
-                  offset += chunk.byteLength;
-                }
-                const decoded = decodeTranscriptRecord(decoder.decode(bytes));
-                if (Option.isSome(decoded) && shouldRetainDecodedRecord(source, decoded.value)) {
-                  records.push(decoded.value);
-                }
+              const decoded = decodeTranscriptValue(reader.finish());
+              if (Option.isSome(decoded) && shouldRetainDecodedRecord(source, decoded.value)) {
+                records.push(decoded.value);
+                historyBytes += recordBytes;
               }
-              recordChunks = [];
               recordBytes = 0;
+              reader = createTranscriptJsonReader(reserve);
+              decoder = new TextDecoder();
+              recordStarted = false;
               return true;
             };
 
@@ -797,27 +803,36 @@ export const make = Effect.gen(function* () {
               }
 
               bytesRead += next.value.byteLength;
-              let start = 0;
-              while (start < next.value.byteLength) {
-                const newline = next.value.indexOf(10, start);
-                if (newline === -1) {
-                  appendRecordChunk(next.value.subarray(start));
-                  break;
+              const withinBudget = yield* Effect.try(() => {
+                let start = 0;
+                while (start < next.value.byteLength) {
+                  const newline = next.value.indexOf(10, start);
+                  const end = newline === -1 ? next.value.byteLength : newline;
+                  recordStarted = true;
+                  reader.write(decoder.decode(next.value.subarray(start, end), { stream: true }));
+                  if (newline === -1) break;
+                  if (!finishRecord()) return false;
+                  start = newline + 1;
                 }
-                appendRecordChunk(next.value.subarray(start, newline));
-                if (!finishRecord()) return null;
-                start = newline + 1;
-              }
+                return true;
+              });
+              if (!withinBudget) return null;
             }
 
-            if (recordBytes > 0 && !finishRecord()) return null;
+            if (recordStarted && !(yield* Effect.try(finishRecord))) return null;
             return sameTranscriptIdentity(expected, transcriptIdentity(filePath, yield* file.stat))
               ? { records, recordCount }
               : null;
           }),
         ),
       ),
-    ).pipe(Effect.orElseSucceed(() => null));
+    ).pipe(
+      Effect.catch((cause) =>
+        Effect.logWarning("Could not read imported transcript", { filePath, cause }).pipe(
+          Effect.as(null),
+        ),
+      ),
+    );
   });
 
   /**
@@ -1384,7 +1399,7 @@ export const make = Effect.gen(function* () {
             thread: parsedThread,
             source,
           });
-        }),
+        }).pipe(importReadLock.withPermits(1)),
       ),
       Stream.map(Option.toArray),
       Stream.flattenIterable,
