@@ -115,6 +115,7 @@ function testLayer(input: {
   readonly getThreadProjection?: ThreadManagementService["Service"]["getThreadProjection"];
   readonly getReceipt?: CommandReceiptStoreV2["Service"]["getByCommandId"];
   readonly providers?: ReadonlyArray<ServerProvider>;
+  readonly plan?: ProviderSwitchServiceV2["Service"]["plan"];
 }) {
   return ConversationConfiguration.layer.pipe(
     Layer.provide(
@@ -138,14 +139,16 @@ function testLayer(input: {
           getByCommandId: input.getReceipt ?? (() => Effect.succeed(Option.none())),
         }),
         Layer.mock(ProviderSwitchServiceV2)({
-          plan: () =>
-            Effect.succeed({
-              instanceChanged: false,
-              modelChanged: false,
-              targetProviderThreadId: null,
-              releaseProviderSessionIds: [],
-              transition: { type: "switch_model_in_session" },
-            }),
+          plan:
+            input.plan ??
+            (() =>
+              Effect.succeed({
+                instanceChanged: false,
+                modelChanged: false,
+                targetProviderThreadId: null,
+                releaseProviderSessionIds: [],
+                transition: { type: "switch_model_in_session" },
+              })),
         }),
       ),
     ),
@@ -153,6 +156,48 @@ function testLayer(input: {
 }
 
 describe("ConversationConfigurationMcpService", () => {
+  it.effect("rejects an explicit model when the provider advertises no models", () =>
+    Effect.gen(function* () {
+      const planned = yield* Ref.make(0);
+      const dispatched = yield* Ref.make(0);
+      const parent = projection({
+        threadId: parentThreadId,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      });
+      const target = projection({
+        threadId: targetThreadId,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+      });
+      const layer = testLayer({
+        parent,
+        target,
+        providers: [{ ...provider, models: [] }],
+        plan: () =>
+          Ref.update(planned, (count) => count + 1).pipe(Effect.andThen(Effect.die("plan"))),
+        dispatch: () =>
+          Ref.update(dispatched, (count) => count + 1).pipe(Effect.andThen(Effect.die("dispatch"))),
+      });
+
+      const error = yield* Effect.gen(function* () {
+        const service = yield* ConversationConfiguration.ConversationConfigurationMcpService;
+        return yield* service
+          .configure(scope(), {
+            threadId: targetThreadId,
+            model: "unadvertised-model",
+            clientRequestId: "empty-model-catalog",
+          })
+          .pipe(Effect.flip);
+      }).pipe(Effect.provide(layer));
+
+      assert.equal(error.code, "model_unavailable");
+      assert.match(error.message, /not advertised/);
+      assert.equal(yield* Ref.get(planned), 0);
+      assert.equal(yield* Ref.get(dispatched), 0);
+    }),
+  );
+
   it.effect("replays an accepted selection before provider availability planning", () =>
     Effect.gen(function* () {
       const parent = projection({

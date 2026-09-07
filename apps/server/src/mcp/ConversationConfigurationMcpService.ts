@@ -350,7 +350,7 @@ export const make = Effect.gen(function* () {
         );
       }
       const advertisedModel = provider.models.find((candidate) => candidate.slug === model);
-      if (provider.models.length > 0 && advertisedModel === undefined) {
+      if (advertisedModel === undefined) {
         return yield* failure(
           "model_unavailable",
           `Model ${model} is not advertised by provider instance ${instanceId}.`,
