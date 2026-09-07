@@ -184,6 +184,18 @@ describe("OpenCode history", () => {
     expect(result.thread.messages.map((message) => message.text)).toEqual(["Fix the bug", "Fixed"]);
     db.close();
   });
+  it("keeps valid OpenCode sessions when another row has malformed metadata", () => {
+    const { db, filePath } = fixture();
+    db.prepare("INSERT INTO session VALUES ('invalid', NULL, NULL, ?, ?, NULL)").run(
+      updatedAtMs,
+      updatedAtMs + 1,
+    );
+    expect(discoverOpenCodeSessions(filePath, 10).map((s) => s.sessionId)).toEqual([
+      "selected",
+      "other",
+    ]);
+    db.close();
+  });
   it("retains the first prompt and newest history within the message limit", () => {
     const { db, filePath, message } = fixture();
     for (let i = 0; i < 205; i++)

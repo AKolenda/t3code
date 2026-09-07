@@ -69,6 +69,7 @@ const OpenCodeMessage = Schema.Struct({
 });
 const decodeCursorMeta = Schema.decodeUnknownSync(Schema.fromJsonString(CursorMeta));
 const decodeOpenCodeSession = Schema.decodeUnknownSync(OpenCodeSession);
+const decodeOpenCodeSessionOption = Schema.decodeUnknownOption(OpenCodeSession);
 const decodeMessage = Schema.decodeUnknownOption(Schema.fromJsonString(OpenCodeMessage));
 const decodePart = Schema.decodeUnknownOption(Schema.fromJsonString(TextPart));
 
@@ -413,14 +414,18 @@ export function discoverOpenCodeSessions(filePath: string, limit: number) {
         "SELECT id, directory, title, time_created, time_updated FROM session WHERE parent_id IS NULL ORDER BY time_updated DESC, id LIMIT ?",
       )
       .all(limit)
-      .map((row): DatabaseSession => {
-        const session = decodeOpenCodeSession(row);
-        return {
-          filePath,
-          sessionId: session.id,
-          cwd: session.directory,
-          updatedAtMs: session.time_updated,
-        };
+      .flatMap((row): Array<DatabaseSession> => {
+        const decoded = decodeOpenCodeSessionOption(row);
+        if (Option.isNone(decoded)) return [];
+        const session = decoded.value;
+        return [
+          {
+            filePath,
+            sessionId: session.id,
+            cwd: session.directory,
+            updatedAtMs: session.time_updated,
+          },
+        ];
       }),
   );
 }
