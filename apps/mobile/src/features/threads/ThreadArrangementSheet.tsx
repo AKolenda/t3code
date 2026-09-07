@@ -146,14 +146,13 @@ export function ThreadArrangementSheet(props: {
   const geometry = useRef({ top: 0, height: 0, offset: 0, pageY: 0 });
   const drag = useRef<Drag | null>(null);
   const frame = useRef<number | null>(null);
-  const gestureVersion = useRef(0);
+  const [measured, setMeasured] = useState(false);
   const [preview, setPreview] = useState<Drag | null>(null);
   const translateY = useRef(new Animated.Value(0)).current;
   const latest = useRef({ ordered, planner, moveThread });
   latest.current = { ordered, planner, moveThread };
 
   function stop() {
-    gestureVersion.current += 1;
     if (frame.current !== null) cancelAnimationFrame(frame.current);
     frame.current = null;
     drag.current = null;
@@ -168,7 +167,6 @@ export function ThreadArrangementSheet(props: {
   }, [orderVersion]);
   useEffect(
     () => () => {
-      gestureVersion.current += 1;
       if (frame.current !== null) cancelAnimationFrame(frame.current);
     },
     [],
@@ -212,46 +210,52 @@ export function ThreadArrangementSheet(props: {
     }
   }
 
-  function start(thread: EnvironmentThreadShell, pageY: number) {
-    const version = ++gestureVersion.current;
+  // Measure when the sheet is presented or resized, before handles accept
+  // touches. Starting a quick drag must not wait for a native callback.
+  function measureViewport() {
+    stop();
+    setMeasured(false);
     viewport.current?.measureInWindow((_, top, __, height) => {
-      if (gestureVersion.current !== version) return;
-      geometry.current = { ...geometry.current, top, height, pageY };
-      drag.current = { thread, destination: null, candidate: null };
-      setPreview({ ...drag.current });
-      update(pageY);
-      let last = performance.now();
-      const tick = () => {
-        if (drag.current === null) return;
-        const timestamp = performance.now();
-        const dt = Math.min(timestamp - last, 32);
-        last = timestamp;
-        const bounds = geometry.current;
-        const y = bounds.pageY - bounds.top;
-        const speed =
-          y < 48
-            ? -Math.min(1, (48 - y) / 48)
-            : y > bounds.height - 48
-              ? Math.min(1, (y - bounds.height + 48) / 48)
-              : 0;
-        if (speed !== 0) {
-          const offset = Math.max(
-            0,
-            Math.min(
-              latest.current.ordered.length * ROW_HEIGHT - bounds.height,
-              bounds.offset + speed * dt * 0.5,
-            ),
-          );
-          if (offset !== bounds.offset) {
-            bounds.offset = offset;
-            list.current?.scrollToOffset({ offset, animated: false });
-            update(bounds.pageY);
-          }
-        }
-        frame.current = requestAnimationFrame(tick);
-      };
-      frame.current = requestAnimationFrame(tick);
+      geometry.current = { ...geometry.current, top, height };
+      setMeasured(height > 0);
     });
+  }
+
+  function start(thread: EnvironmentThreadShell, pageY: number) {
+    drag.current = { thread, destination: null, candidate: null };
+    setPreview({ ...drag.current });
+    update(pageY);
+    let last = performance.now();
+    const tick = () => {
+      if (drag.current === null) return;
+      const timestamp = performance.now();
+      const dt = Math.min(timestamp - last, 32);
+      last = timestamp;
+      const bounds = geometry.current;
+      const y = bounds.pageY - bounds.top;
+      const speed =
+        y < 48
+          ? -Math.min(1, (48 - y) / 48)
+          : y > bounds.height - 48
+            ? Math.min(1, (y - bounds.height + 48) / 48)
+            : 0;
+      if (speed !== 0) {
+        const offset = Math.max(
+          0,
+          Math.min(
+            latest.current.ordered.length * ROW_HEIGHT - bounds.height,
+            bounds.offset + speed * dt * 0.5,
+          ),
+        );
+        if (offset !== bounds.offset) {
+          bounds.offset = offset;
+          list.current?.scrollToOffset({ offset, animated: false });
+          update(bounds.pageY);
+        }
+      }
+      frame.current = requestAnimationFrame(tick);
+    };
+    frame.current = requestAnimationFrame(tick);
   }
 
   return (
@@ -260,6 +264,7 @@ export function ThreadArrangementSheet(props: {
       animationType="slide"
       presentationStyle="pageSheet"
       onRequestClose={props.onClose}
+      onShow={measureViewport}
     >
       <View
         className="flex-1 bg-screen"
@@ -318,6 +323,7 @@ export function ThreadArrangementSheet(props: {
                   <DragHandle
                     title={item.title}
                     disabled={
+                      !measured ||
                       pendingOrder !== null ||
                       (props.section === "pinned"
                         ? configs.get(item.environmentId)?.environment.capabilities.threadPinReorder
