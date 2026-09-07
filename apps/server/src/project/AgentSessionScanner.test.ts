@@ -1,4 +1,6 @@
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeSqlite from "node:sqlite";
 import * as NodeOS from "node:os";
 import { describe, expect, it } from "@effect/vitest";
 import {
@@ -1298,6 +1300,189 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
                 : [],
             ),
           ).toEqual([overflow ? "Older prompt" : "First prompt"]);
+        }),
+    );
+
+    it.effect("discovers editor history on the host and preserves the 30-day cutoff", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const fs = yield* FileSystem.FileSystem;
+        const home = yield* makeTempDir("t3-cursor-desktop-home-");
+        const workspace = yield* makeTempDir("t3-cursor-desktop-project-");
+        const filePath = path.join(home, "Cursor", "User", "globalStorage", "state.vscdb");
+        yield* fs.makeDirectory(path.dirname(filePath), { recursive: true });
+        const now = Date.parse("2026-09-06T12:00:00Z");
+        yield* TestClock.setTime(now);
+        const db = new NodeSqlite.DatabaseSync(filePath);
+        db.exec("CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT)");
+        for (const [id, time] of [
+          ["recent", now - 1000],
+          ["old", now - 31 * 86400000],
+        ] as const) {
+          db.prepare("INSERT INTO cursorDiskKV VALUES (?, ?)").run(
+            `composerData:${id}`,
+            encodeTranscriptRecord({
+              composerId: id,
+              createdAt: time,
+              lastUpdatedAt: time,
+              workspaceIdentifier: { uri: { scheme: "file", fsPath: workspace } },
+              conversation: [{ bubbleId: "user", type: 1, text: id }],
+            }),
+          );
+        }
+        db.close();
+        const config = { driver: ProviderDriverKind.make("cursor"), enabled: true, config: {} };
+        const scanner = yield* AgentSessionScanner.AgentSessionScanner.pipe(
+          Effect.provide(
+            makeScannerTestLayer({
+              claudeHomePath: home,
+              codexHomePath: home,
+              providerInstances: {
+                [ProviderInstanceId.make("cursor")]: config,
+                [ProviderInstanceId.make("duplicate")]: config,
+              },
+            }),
+          ),
+          Effect.provideService(HostProcessPlatform, "linux"),
+          Effect.provideService(HostProcessEnvironment, { XDG_CONFIG_HOME: home }),
+        );
+        const scan = yield* scanner.scan;
+        expect(scan.candidates.find((c) => c.path === workspace)).toMatchObject({
+          sources: ["cursor"],
+          threadCount: 2,
+        });
+        const outcomes = Array.from(
+          yield* scanner.recentThreads(workspace).pipe(Stream.runCollect),
+        );
+        expect(outcomes).toHaveLength(1);
+        const outcome = outcomes[0]!;
+        expect(outcome).toMatchObject({
+          _tag: "Importable",
+          thread: { providerSessionId: "recent", providerInstanceId: "cursor" },
+        });
+        if (outcome._tag !== "Importable") return;
+        const retry = Array.from(
+          yield* scanner.recentThreads(workspace, [outcome.source]).pipe(Stream.runCollect),
+        );
+        expect(retry.map((r) => r._tag)).toEqual(["AlreadyImported"]);
+      }),
+    );
+
+    it.effect(
+      "discovers enabled OpenCode accounts and imports only recent selected-project sessions",
+      () =>
+        Effect.gen(function* () {
+          const path = yield* Path.Path;
+          const home = yield* makeTempDir("t3-opencode-import-");
+          const workspace = yield* makeTempDir("t3-opencode-project-");
+          const other = yield* makeTempDir("t3-opencode-other-");
+          const now = Date.parse("2026-09-06T12:00:00Z");
+          yield* TestClock.setTime(now);
+          const databasePath = path.join(home, "opencode.db");
+          const db = new NodeSqlite.DatabaseSync(databasePath);
+          try {
+            db.exec(
+              "CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER, parent_id TEXT); CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT); CREATE TABLE part (id TEXT, message_id TEXT, time_created INTEGER, data TEXT)",
+            );
+            for (const [id, cwd, time] of [
+              ["recent", workspace, now - 1000],
+              ["old", workspace, now - 31 * 86400000],
+              ["other", other, now - 1000],
+            ] as const) {
+              db.prepare("INSERT INTO session VALUES (?, ?, ?, ?, ?, NULL)").run(
+                id,
+                cwd,
+                id,
+                time,
+                time,
+              );
+              db.prepare("INSERT INTO message VALUES (?, ?, ?, ?)").run(
+                id,
+                id,
+                time,
+                encodeTranscriptRecord({ role: "user" }),
+              );
+              db.prepare("INSERT INTO part VALUES (?, ?, ?, ?)").run(
+                id,
+                id,
+                time,
+                encodeTranscriptRecord({ type: "text", text: id }),
+              );
+            }
+          } finally {
+            db.close();
+          }
+          const configured = {
+            driver: ProviderDriverKind.make("opencode"),
+            enabled: true,
+            config: {},
+            environment: [{ name: "OPENCODE_DB_PATH", value: databasePath, sensitive: false }],
+          };
+          const input = {
+            claudeHomePath: home,
+            codexHomePath: home,
+            providerInstances: {
+              "opencode-account": configured,
+              "duplicate-account": configured,
+              opencode: { ...configured, enabled: false },
+            },
+          };
+          const scanner = yield* AgentSessionScanner.AgentSessionScanner.pipe(
+            Effect.provide(makeScannerTestLayer(input)),
+          );
+          const scan = yield* scanner.scan;
+          expect(
+            scan.candidates.map((candidate) => ({
+              path: candidate.path,
+              sources: candidate.sources,
+              threadCount: candidate.threadCount,
+            })),
+          ).toEqual(
+            expect.arrayContaining([
+              { path: workspace, sources: ["opencode"], threadCount: 2 },
+              { path: other, sources: ["opencode"], threadCount: 1 },
+            ]),
+          );
+          const outcomes = Array.from(
+            yield* scanner.recentThreads(workspace).pipe(Stream.runCollect),
+          );
+          expect(outcomes).toHaveLength(1);
+          const outcome = outcomes[0]!;
+          expect(outcome._tag).toBe("Importable");
+          if (outcome._tag !== "Importable") return;
+          expect(outcome.thread.providerInstanceId).toBe("opencode-account");
+          expect(outcome.thread.messages[0]?.text).toBe("recent");
+          const retry = Array.from(
+            yield* scanner.recentThreads(workspace, [outcome.source]).pipe(Stream.runCollect),
+          );
+          expect(retry.map((outcome) => outcome._tag)).toEqual(["AlreadyImported"]);
+          const replacement = new NodeSqlite.DatabaseSync(databasePath);
+          try {
+            replacement.prepare("UPDATE session SET directory = ? WHERE id = 'recent'").run(other);
+          } finally {
+            replacement.close();
+          }
+          const moved = Array.from(
+            yield* scanner.recentThreads(workspace, [outcome.source]).pipe(Stream.runCollect),
+          );
+          expect(moved.map((outcome) => outcome._tag)).toEqual(["Skipped"]);
+          const disabled = yield* runScan({
+            ...input,
+            providerInstances: {
+              [ProviderInstanceId.make("opencode")]: { ...configured, enabled: false },
+            },
+          });
+          expect(disabled.candidates).toEqual([]);
+          const remote = yield* runScan({
+            ...input,
+            providerInstances: {
+              [ProviderInstanceId.make("opencode")]: {
+                ...configured,
+                config: { serverUrl: "http://remote:4096" },
+              },
+            },
+          });
+          expect(remote.candidates).toEqual([]);
         }),
     );
 

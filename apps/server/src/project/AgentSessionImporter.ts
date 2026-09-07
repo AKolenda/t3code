@@ -1,3 +1,4 @@
+import { cursorImportedHistory } from "../provider/CursorHistoryImport.ts";
 import {
   CommandId,
   DEFAULT_MODEL,
@@ -231,9 +232,13 @@ export const importRecentAgentThreads = Effect.fn("importRecentAgentThreads")(fu
               status: "stopped",
               runtimeMode: DEFAULT_RUNTIME_MODE,
               resumeCursor:
-                thread.source === "codex"
-                  ? { threadId: thread.providerSessionId }
-                  : { threadId, resume: thread.providerSessionId },
+                thread.source === "cursor"
+                  ? { schemaVersion: 1, importedHistory: cursorImportedHistory(thread.messages) }
+                  : thread.source === "codex"
+                    ? { threadId: thread.providerSessionId }
+                    : thread.source === "claudeAgent"
+                      ? { threadId, resume: thread.providerSessionId }
+                      : { sessionId: thread.providerSessionId },
               runtimePayload: { cwd: workspaceRoot },
             },
             { onConflict: "ignore" },

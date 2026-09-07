@@ -1,8 +1,8 @@
 /**
  * AgentSessionScanner - discovery of projects a user already works on.
  *
- * Claude Code and Codex both keep a per-session transcript on disk, and each
- * transcript records the directory the session ran in. Reading those `cwd`
+ * Claude Code, Codex, Cursor, and OpenCode keep local conversation history. Each
+ * session records the directory the session ran in. Reading those `cwd`
  * values gives us the set of directories worth offering as projects during
  * onboarding, without asking the user to browse the filesystem.
  *
@@ -14,11 +14,13 @@
  * @module project/AgentSessionScanner
  */
 import * as NodeOS from "node:os";
+import * as NodeURL from "node:url";
 
 import {
   AgentSessionScanError,
   ClaudeSettings,
   CodexSettings,
+  OpenCodeSettings,
   ProviderDriverKind,
   ProviderInstanceId,
   resolveProviderInstanceEnabled,
@@ -40,6 +42,18 @@ import * as Stream from "effect/Stream";
 
 import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
+
+import {
+  discoverCursorSession,
+  discoverCursorDesktopSessions,
+  readCursorDesktopThread,
+  readCursorDesktopWorkspaceIndex,
+  discoverOpenCodeSessions,
+  readCursorThread,
+  readOpenCodeThread,
+  refreshDatabaseSession,
+  type DatabaseSession,
+} from "./AgentSessionDatabase.ts";
 
 import * as ServerConfig from "../config.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -129,7 +143,11 @@ const TranscriptRecord = Schema.Struct({
   ),
 });
 
+const decodeWorkspace = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Struct({ folder: Schema.optional(Schema.String) })),
+);
 const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
+const decodeOpenCodeSettings = Schema.decodeUnknownOption(OpenCodeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
 const decodeTranscriptRecord = Schema.decodeUnknownOption(Schema.fromJsonString(TranscriptRecord));
 const decodeTranscriptValue = Schema.decodeUnknownOption(TranscriptRecord);
@@ -177,7 +195,7 @@ export class AgentSessionScanner extends Context.Service<
   AgentSessionScanner,
   {
     /**
-     * Discover every directory the configured Claude and Codex homes have run
+     * Discover every directory the configured agent homes have run
      * a session in. Candidates are returned newest-first; the client decides
      * which ones to import and how far back to look. Fails with the contract
      * error directly — there is no server-local context worth wrapping.
@@ -202,6 +220,7 @@ interface RawCandidate {
   readonly transcripts: ReadonlyArray<{
     readonly filePath: string;
     readonly mtimeMs: number | null;
+    readonly databaseSession?: DatabaseSession;
   }>;
 }
 
@@ -618,11 +637,16 @@ export const make = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
-  const baseDir = path.resolve(serverConfig.baseDir);
-  const worktreesDir = path.resolve(serverConfig.worktreesDir);
+  const baseDir = yield* fileSystem
+    .realPath(path.resolve(serverConfig.baseDir))
+    .pipe(Effect.orElseSucceed(() => path.resolve(serverConfig.baseDir)));
+  const worktreesDir = yield* fileSystem
+    .realPath(path.resolve(serverConfig.worktreesDir))
+    .pipe(Effect.orElseSucceed(() => path.resolve(serverConfig.worktreesDir)));
   // Windows filesystems are case-insensitive, so path prefix checks there
   // must case fold.
-  const foldWorktreeCase = (yield* HostProcessPlatform) === "win32";
+  const hostPlatform = yield* HostProcessPlatform;
+  const foldWorktreeCase = hostPlatform === "win32";
   const hostEnvironment = yield* HostProcessEnvironment;
   const excludedProjectRoots = new Set(
     [NodeOS.homedir(), NodeOS.tmpdir()].map((directory) =>
@@ -1130,6 +1154,182 @@ export const make = Effect.gen(function* () {
       truncated ||= metadataBudget.truncated;
     }
 
+    for (const source of ["cursor", "opencode"] as const) {
+      const instances = Object.entries(settings.providerInstances)
+        .filter(
+          ([, instance]) => instance.driver === source && resolveProviderInstanceEnabled(instance),
+        )
+        .map(([instanceId, config]) => ({
+          instanceId: ProviderInstanceId.make(instanceId),
+          config,
+        }));
+      if (!Object.hasOwn(settings.providerInstances, source)) {
+        const config = {
+          driver: ProviderDriverKind.make(source),
+          config: settings.providers[source],
+        };
+        if (resolveProviderInstanceEnabled(config))
+          instances.push({ instanceId: ProviderInstanceId.make(source), config });
+      }
+      instances.sort(
+        (left, right) => Number(right.instanceId === source) - Number(left.instanceId === source),
+      );
+      const seenHomes = new Set<string>();
+      let remaining = MAX_TRANSCRIPTS_PER_SOURCE;
+      let operations = MAX_DISCOVERY_OPERATIONS_PER_SOURCE;
+      for (const { instanceId, config } of instances) {
+        const environment = {
+          ...hostEnvironment,
+          ...Object.fromEntries(config.environment?.map(({ name, value }) => [name, value]) ?? []),
+        };
+        // A configured OpenCode server owns a different store. Local history
+        // cannot be resumed through that server, even if session IDs collide.
+        if (source === "opencode") {
+          const decoded = decodeOpenCodeSettings(config.config ?? {});
+          if (Option.isNone(decoded) || decoded.value.serverUrl.trim()) continue;
+        }
+        const homePath =
+          source === "cursor"
+            ? path.join(
+                expandHomePath(
+                  environment.CURSOR_DATA_DIR?.trim() || path.join(NodeOS.homedir(), ".cursor"),
+                ),
+                "chats",
+              )
+            : expandHomePath(
+                environment.OPENCODE_DB_PATH?.trim() ||
+                  path.join(
+                    environment.XDG_DATA_HOME?.trim() ||
+                      path.join(NodeOS.homedir(), ".local", "share"),
+                    "opencode",
+                    "opencode.db",
+                  ),
+              );
+        const homeKey = yield* directoryIdentity(homePath);
+        if (seenHomes.has(homeKey)) continue;
+        seenHomes.add(homeKey);
+        const add = (session: DatabaseSession) =>
+          raw.push({
+            cwd: session.cwd,
+            source,
+            providerInstanceId: instanceId,
+            threadCount: 1,
+            lastActiveAtMs: session.updatedAtMs,
+            transcripts: [
+              {
+                filePath: session.filePath,
+                mtimeMs: session.updatedAtMs,
+                databaseSession: session,
+              },
+            ],
+          });
+        if (remaining === 0 || operations <= 0) {
+          truncated = true;
+          break;
+        }
+        if (source === "opencode") {
+          const sessions = yield* Effect.try(() =>
+            discoverOpenCodeSessions(homePath, remaining + 1),
+          ).pipe(Effect.orElseSucceed(() => []));
+          truncated ||= sessions.length > remaining;
+          for (const session of sessions.slice(0, remaining)) add(session);
+          remaining -= Math.min(remaining, sessions.length);
+          continue;
+        }
+        // The editor stores history separately from the agent CLI. A custom CLI
+        // data directory must not silently claim the default editor's history.
+        if (!environment.CURSOR_DATA_DIR?.trim()) {
+          const userData =
+            hostPlatform === "darwin"
+              ? path.join(NodeOS.homedir(), "Library", "Application Support", "Cursor")
+              : hostPlatform === "win32"
+                ? path.join(
+                    environment.APPDATA || path.join(NodeOS.homedir(), "AppData", "Roaming"),
+                    "Cursor",
+                  )
+                : path.join(
+                    environment.XDG_CONFIG_HOME || path.join(NodeOS.homedir(), ".config"),
+                    "Cursor",
+                  );
+          const desktopFile = path.join(userData, "User", "globalStorage", "state.vscdb");
+          const workspaceHome = path.join(userData, "User", "workspaceStorage");
+          const roots = new Map<string, string>();
+          const ambiguous = new Set<string>();
+          for (const workspace of yield* listDirectory(workspaceHome)) {
+            if ((operations -= 3) <= 0) {
+              truncated = true;
+              break;
+            }
+            const workspaceFile = path.join(workspaceHome, workspace, "workspace.json");
+            const stats = yield* statOption(workspaceFile);
+            if (Option.isNone(stats) || stats.value.size > MAX_TRANSCRIPT_SCAN_BYTES) continue;
+            const mapped = yield* Effect.gen(function* () {
+              const contents = yield* fileSystem.readFileString(workspaceFile);
+              return yield* Effect.try(() => {
+                const folder = decodeWorkspace(contents).folder;
+                if (!folder?.startsWith("file:")) return undefined;
+                return {
+                  cwd: NodeURL.fileURLToPath(folder),
+                  ids: readCursorDesktopWorkspaceIndex(
+                    path.join(workspaceHome, workspace, "state.vscdb"),
+                  ),
+                };
+              });
+            }).pipe(Effect.orElseSucceed(() => undefined));
+            if (!mapped) continue;
+            for (const id of mapped.ids) {
+              if (ambiguous.has(id)) continue;
+              const previous = roots.get(id);
+              if (previous !== undefined && previous !== mapped.cwd) {
+                roots.delete(id);
+                ambiguous.add(id);
+              } else roots.set(id, mapped.cwd);
+            }
+          }
+
+          const sessions = yield* Effect.try(() =>
+            discoverCursorDesktopSessions(desktopFile, remaining + 1, roots),
+          ).pipe(Effect.orElseSucceed(() => []));
+          truncated ||= sessions.length > remaining;
+          for (const session of sessions.slice(0, remaining)) add(session);
+          remaining -= Math.min(remaining, sessions.length);
+        }
+        const files: Array<{ filePath: string; updatedAtMs: number }> = [];
+        for (const workspace of yield* listDirectory(homePath)) {
+          if (--operations <= 0) {
+            truncated = true;
+            break;
+          }
+          for (const session of yield* listDirectory(path.join(homePath, workspace))) {
+            if ((operations -= 2) <= 0) {
+              truncated = true;
+              break;
+            }
+            const filePath = path.join(homePath, workspace, session, "store.db");
+            const stats = yield* statOption(filePath);
+            if (Option.isNone(stats) || stats.value.type !== "File") continue;
+            const wal = yield* statOption(`${filePath}-wal`);
+            const updatedAtMs = Math.max(
+              Option.getOrNull(stats.value.mtime)?.getTime() ?? 0,
+              Option.isSome(wal) ? (Option.getOrNull(wal.value.mtime)?.getTime() ?? 0) : 0,
+            );
+            files.push({ filePath, updatedAtMs });
+          }
+        }
+        files.sort(
+          (left, right) =>
+            right.updatedAtMs - left.updatedAtMs || left.filePath.localeCompare(right.filePath),
+        );
+        truncated ||= files.length > remaining;
+        for (const file of files.slice(0, remaining)) {
+          const session = yield* Effect.try(() =>
+            discoverCursorSession(file.filePath, file.updatedAtMs),
+          ).pipe(Effect.orElseSucceed(() => null));
+          if (session !== null) add(session);
+        }
+        remaining -= Math.min(remaining, files.length);
+      }
+    }
     return { candidates: raw, truncated };
   });
 
@@ -1309,6 +1509,99 @@ export const make = Effect.gen(function* () {
     return Stream.fromIteratorSucceed(eligibleTranscripts.values(), 1).pipe(
       Stream.mapEffect(({ candidate, transcript }) =>
         Effect.gen(function* () {
+          if (transcript.databaseSession !== undefined) {
+            const databaseSource = candidate.source;
+            if (databaseSource !== "cursor" && databaseSource !== "opencode") {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            }
+            const fileStats = yield* statOption(transcript.filePath);
+            if (Option.isNone(fileStats))
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            const walStats = yield* statOption(`${transcript.filePath}-wal`);
+            const updatedAtMs =
+              databaseSource === "cursor" && transcript.databaseSession.format !== "cursor-desktop"
+                ? Math.max(
+                    Option.getOrNull(fileStats.value.mtime)?.getTime() ?? 0,
+                    Option.isSome(walStats)
+                      ? (Option.getOrNull(walStats.value.mtime)?.getTime() ?? 0)
+                      : 0,
+                  )
+                : transcript.databaseSession.updatedAtMs;
+            const session = yield* Effect.try(() =>
+              refreshDatabaseSession(
+                { ...transcript.databaseSession!, updatedAtMs },
+                databaseSource,
+              ),
+            ).pipe(Effect.orElseSucceed(() => null));
+            if (
+              session === null ||
+              session.sessionId !== transcript.databaseSession.sessionId ||
+              !path.isAbsolute(session.cwd) ||
+              (yield* directoryIdentity(session.cwd)) !== rootIdentity ||
+              session.updatedAtMs < cutoffMs ||
+              session.updatedAtMs > nowMs
+            ) {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            }
+            const completed = completedSources.find(
+              (source) =>
+                source.provider === candidate.source &&
+                source.providerInstanceId === candidate.providerInstanceId &&
+                source.filePath === session.filePath &&
+                source.providerSessionId === session.sessionId &&
+                source.mtimeMs === session.updatedAtMs,
+            );
+            const sessionKey = `${candidate.providerInstanceId}\0${session.sessionId}`;
+            if (importedSessions.has(sessionKey)) return Option.none<AgentSessionRecentThread>();
+            if (completed !== undefined) {
+              importedSessions.add(sessionKey);
+              return Option.some<AgentSessionRecentThread>({
+                _tag: "AlreadyImported",
+                source: completed,
+              });
+            }
+            if (
+              transcriptsRemaining === 0 ||
+              bytesRemaining < MAX_IMPORT_HISTORY_BYTES ||
+              recordsRemaining === 0
+            ) {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            }
+            transcriptsRemaining -= 1;
+            const databaseBudget = { bytesRemaining: MAX_IMPORT_HISTORY_BYTES, recordsRemaining };
+            const snapshot = yield* Effect.try(() =>
+              candidate.source === "cursor"
+                ? session.format === "cursor-desktop"
+                  ? readCursorDesktopThread(session, candidate.providerInstanceId, databaseBudget)
+                  : readCursorThread(session, candidate.providerInstanceId, databaseBudget)
+                : readOpenCodeThread(session, candidate.providerInstanceId, databaseBudget),
+            ).pipe(Effect.orElseSucceed(() => null));
+            bytesRemaining -= MAX_IMPORT_HISTORY_BYTES - Math.max(0, databaseBudget.bytesRemaining);
+            recordsRemaining = Math.max(0, databaseBudget.recordsRemaining);
+            if (
+              snapshot === null ||
+              !path.isAbsolute(snapshot.cwd) ||
+              (yield* directoryIdentity(snapshot.cwd)) !== rootIdentity
+            ) {
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            }
+            const stats = yield* statOption(session.filePath);
+            if (Option.isNone(stats))
+              return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
+            const source: AgentSessionImportSource = {
+              ...transcriptIdentity(session.filePath, stats.value),
+              mtimeMs: session.updatedAtMs,
+              provider: candidate.source,
+              providerInstanceId: candidate.providerInstanceId,
+              providerSessionId: session.sessionId,
+            };
+            importedSessions.add(sessionKey);
+            return Option.some<AgentSessionRecentThread>({
+              _tag: "Importable",
+              thread: snapshot.thread,
+              source,
+            });
+          }
           const completed = completedByFile.get(
             `${candidate.providerInstanceId}\0${transcript.filePath}`,
           );

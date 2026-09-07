@@ -5,7 +5,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeURL from "node:url";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -162,6 +162,56 @@ const cursorAdapterTestLayer = it.layer(
 );
 
 cursorAdapterTestLayer("CursorAdapterLive", (it) => {
+  it.effect("continues imported editor history once, then resumes the native ACP session", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const settings = yield* ServerSettingsService;
+      const workspace = yield* Effect.promise(() =>
+        NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "cursor-import-test-")),
+      );
+      const requestLogPath = NodePath.join(workspace, "requests.ndjson");
+      yield* Effect.promise(() => NodeFSP.writeFile(requestLogPath, ""));
+      const binaryPath = yield* Effect.promise(() =>
+        makeProbeWrapper(requestLogPath, NodePath.join(workspace, "argv.txt")),
+      );
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath } } });
+      const threadId = ThreadId.make("import:cursor:desktop-session");
+      const importedHistory = "user: Fix the bug\nassistant: Fixed it";
+      const start = {
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: workspace,
+        runtimeMode: "full-access" as const,
+      };
+      const session = yield* adapter.startSession({
+        ...start,
+        resumeCursor: { schemaVersion: 1, importedHistory },
+      });
+      expect(session.resumeCursor).toMatchObject({ sessionId: "mock-session-1", importedHistory });
+      // A restart before the first turn must preserve the pending context.
+      yield* adapter.stopSession(threadId);
+      yield* adapter.startSession({ ...start, resumeCursor: session.resumeCursor });
+      yield* adapter.sendTurn({ threadId, input: "Continue", attachments: [] });
+      yield* adapter.sendTurn({ threadId, input: "Next", attachments: [] });
+      const sessions = yield* adapter.listSessions();
+      expect(sessions.find((s) => s.threadId === threadId)?.resumeCursor).toEqual({
+        schemaVersion: 1,
+        sessionId: "mock-session-1",
+      });
+      yield* adapter.stopSession(threadId);
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      expect(requests.filter((r) => r.method === "session/new")).toHaveLength(1);
+      expect(requests.filter((r) => r.method === "session/load")).toHaveLength(1);
+      const prompts = requests.filter((r) => r.method === "session/prompt");
+      const historyPart = { type: "text", text: importedHistory };
+      expect(prompts[0]).toMatchObject({
+        params: { prompt: expect.arrayContaining([historyPart]) },
+      });
+      expect(prompts[1]).not.toMatchObject({
+        params: { prompt: expect.arrayContaining([historyPart]) },
+      });
+    }),
+  );
   it.effect("starts a session and maps mock ACP prompt flow to runtime events", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;

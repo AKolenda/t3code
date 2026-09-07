@@ -4,6 +4,7 @@
  * @module CursorAdapterLive
  */
 
+import { decodeCursorResume } from "../CursorHistoryImport.ts";
 import {
   ApprovalRequestId,
   type CursorSettings,
@@ -171,17 +172,6 @@ function settlePendingUserInputsAsEmptyAnswers(
       discard: true,
     },
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parseCursorResume(raw: unknown): { sessionId: string } | undefined {
-  if (!isRecord(raw)) return undefined;
-  if (raw.schemaVersion !== CURSOR_RESUME_VERSION) return undefined;
-  if (typeof raw.sessionId !== "string" || !raw.sessionId.trim()) return undefined;
-  return { sessionId: raw.sessionId.trim() };
 }
 
 function normalizeModeSearchText(mode: AcpSessionMode): string {
@@ -519,7 +509,8 @@ export function makeCursorAdapter(
           );
           let ctx!: CursorSessionContext;
 
-          const resumeSessionId = parseCursorResume(input.resumeCursor)?.sessionId;
+          const resume = Option.getOrUndefined(decodeCursorResume(input.resumeCursor));
+          const resumeSessionId = resume?.sessionId?.trim();
           const acpNativeLoggers = makeAcpNativeLoggers({
             nativeEventLogger,
             provider: PROVIDER,
@@ -770,6 +761,7 @@ export function makeCursorAdapter(
             resumeCursor: {
               schemaVersion: CURSOR_RESUME_VERSION,
               sessionId: started.sessionId,
+              ...(resume?.importedHistory ? { importedHistory: resume.importedHistory } : {}),
             },
             createdAt: now,
             updatedAt: now,
@@ -1044,10 +1036,15 @@ export function makeCursorAdapter(
             });
           }
 
+          const importedHistory =
+            steeringTurnId === undefined
+              ? Option.getOrUndefined(decodeCursorResume(ctx.session.resumeCursor))?.importedHistory
+              : undefined;
           // ACP has no system-message field; keep runtime context separate from the user's text.
           const result = yield* ctx.acp
             .prompt({
               prompt: [
+                ...(importedHistory ? [{ type: "text" as const, text: importedHistory }] : []),
                 ...promptParts,
                 {
                   type: "text",
@@ -1060,6 +1057,14 @@ export function makeCursorAdapter(
                 mapAcpToAdapterError(PROVIDER, input.threadId, "session/prompt", error),
               ),
             );
+
+          // Once accepted, the native ACP conversation owns this context.
+          const resumed = Option.getOrUndefined(decodeCursorResume(ctx.session.resumeCursor));
+          if (importedHistory && resumed)
+            ctx.session = {
+              ...ctx.session,
+              resumeCursor: { schemaVersion: CURSOR_RESUME_VERSION, sessionId: resumed.sessionId },
+            };
 
           const turnRecord = ctx.turns.find((turn) => turn.id === turnId);
           if (turnRecord) {

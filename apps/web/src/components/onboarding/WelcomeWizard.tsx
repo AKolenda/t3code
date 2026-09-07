@@ -1232,7 +1232,7 @@ function ImportStep({
     return (
       <StepShell
         title="Your projects"
-        description="Looking for projects from Claude Code and Codex."
+        description="Looking for projects from Claude Code, Codex, Cursor, and OpenCode."
         onBack={onBack}
       >
         <div className="mt-6 flex justify-end">
@@ -1253,7 +1253,7 @@ function ImportStep({
             ? "Could not check this computer for projects."
             : scanTruncated
               ? SCAN_LIMIT_MESSAGE
-              : "No existing Claude Code or Codex projects found."
+              : "No existing Claude Code, Codex, Cursor, or OpenCode projects found."
         }
         onBack={onBack}
       >
@@ -1468,6 +1468,6 @@ function CommandBlock({
   );
 }
 
-function formatSource(source: "claudeAgent" | "codex"): string {
-  return source === "claudeAgent" ? "Claude" : "Codex";
+function formatSource(source: AgentSessionProjectCandidate["sources"][number]): string {
+  return { claudeAgent: "Claude", codex: "Codex", cursor: "Cursor", opencode: "OpenCode" }[source];
 }
