@@ -212,6 +212,51 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
       });
     }),
   );
+
+  it.effect("rejects a Cursor transport error returned as a successful assistant answer", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const settings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-transport-error-answer");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({
+          T3_ACP_PROMPT_RESPONSE_TEXT: "Error: RetriableError: WritableIterable is closed",
+        }),
+      );
+      yield* settings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+      const runtimeEventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.takeUntil((event) => event.type === "session.exited"),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const importedHistory = "user: Explain the project\nassistant: It is a sample app";
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        resumeCursor: { schemaVersion: 1, importedHistory },
+      });
+      const error = yield* adapter
+        .sendTurn({ threadId, input: "continue", attachments: [] })
+        .pipe(Effect.flip);
+      assert.equal(error._tag, "ProviderAdapterRequestError");
+      if (error._tag === "ProviderAdapterRequestError") {
+        assert.equal(error.detail, "Cursor reported a transport failure.");
+        assert.equal(error.cause, "Error: RetriableError: WritableIterable is closed");
+      }
+      const sessions = yield* adapter.listSessions();
+      expect(sessions.find((session) => session.threadId === threadId)?.resumeCursor).toMatchObject(
+        {
+          importedHistory,
+        },
+      );
+      yield* adapter.stopSession(threadId);
+      const runtimeEvents = yield* Fiber.join(runtimeEventsFiber);
+      assert.isFalse(runtimeEvents.some((event) => event.type === "turn.completed"));
+    }),
+  );
+
   it.effect("starts a session and maps mock ACP prompt flow to runtime events", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;
