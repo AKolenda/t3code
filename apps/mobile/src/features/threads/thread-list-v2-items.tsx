@@ -1082,13 +1082,13 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                       : cardMenuActions),
             ]}
             dragItemId={
-              Platform.OS === "ios" &&
-              variant === "card" &&
-              !snoozedRow &&
-              props.reorderSupported &&
-              (props.canMoveUp || props.canMoveDown)
+              Platform.OS === "ios" && variant === "card" && !snoozedRow
                 ? scopedThreadKey(thread.environmentId, thread.id)
                 : ""
+            }
+            dragEnabled={
+              props.reorderSupported === true &&
+              (props.canMoveUp === true || props.canMoveDown === true)
             }
             dragGroup={pinnedRow ? "t3-thread-pinned" : "t3-thread-active"}
             onItemDrop={({ nativeEvent }) => {
