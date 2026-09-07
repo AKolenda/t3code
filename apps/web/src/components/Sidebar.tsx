@@ -2,7 +2,6 @@ import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
   DndContext,
-  PointerSensor,
   useSensor,
   useSensors,
   type DragEndEvent,
@@ -174,6 +173,7 @@ import {
 import { resolveLocalCheckoutBranchMismatch } from "./BranchToolbar.logic";
 import { createSidebarCollisionDetection, createSidebarSortingStrategy } from "./Sidebar.drag";
 import { createSidebarListMotion } from "./Sidebar.motion";
+import { SidebarPointerSensor } from "./SidebarPointerSensor";
 import {
   ThreadWorktreeIndicator,
   prStatusIndicator,
@@ -3032,7 +3032,7 @@ export default function Sidebar() {
   // also covers first-time ordering, which assigns keys to keyless neighbors.
   // A failed write, concurrent reorder, or membership change releases the hold.
   const dndSensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(SidebarPointerSensor, { activationConstraint: { distance: 6 } }),
   );
   const [dragState, setDragState] = useState<{
     readonly activeKey: string;
