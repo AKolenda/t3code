@@ -1564,6 +1564,7 @@ function ProjectDetail({
       </SettingsPageContainer>
 
       <ProjectScriptEditorDialog
+        editScope={AuthSettingsWriteScope}
         environmentId={selectedCheckout.environmentId}
         request={editorRequest}
         scripts={scripts}

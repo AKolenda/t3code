@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import { AuthSettingsWriteScope, type EnvironmentId } from "@t3tools/contracts";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import { PlusIcon } from "lucide-react";
 import { useState } from "react";
@@ -105,6 +105,7 @@ export function ProjectDefaultActionsSettings({
         // The editor's controls follow one machine's grant; the write itself
         // checks every selected machine before it touches any of them.
         <ProjectScriptEditorDialog
+          editScope={AuthSettingsWriteScope}
           environmentId={editorEnvironmentId}
           request={request}
           scripts={scripts}
