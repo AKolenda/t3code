@@ -762,7 +762,7 @@ const ThreadWorkLogRow = memo(function ThreadWorkLogRow(
         className="rounded-md px-0.5 py-0 active:bg-subtle"
       >
         <View className="min-h-8 flex-row items-center gap-1.5">
-          {row.live ? (
+          {row.live && !expanded ? (
             <ShimmeringWorkContent
               environmentId={props.environmentId}
               icon={icon}
