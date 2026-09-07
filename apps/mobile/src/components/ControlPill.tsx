@@ -230,6 +230,11 @@ export function ControlPillMenu(
         child.props.onPress?.(event);
       },
     });
+    menuProps.onDragBegin = () => {
+      menuPress.current.suppressPress = true;
+      pendingPress.current = null;
+      props.onDragBegin?.();
+    };
     menuProps.onMenuInteractionStart = () => {
       menuPress.current.isPreparing = true;
       props.onMenuInteractionStart?.();

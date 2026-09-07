@@ -52,8 +52,11 @@ spot where the thread will land. Drops into either section keep the position you
 mobile, open a thread's menu and choose **Arrange threads**. Drag a handle within or between
 **Pinned** and **Active** to reorder, pin, or unpin. Drop onto the **Settled** divider to
 settle a thread. The dragged card shows the action before you release it. Expand **Snoozed**
-or **Settled** to drag a parked thread back into either live section. Each drop saves; **Done** returns to the thread list.
-**Move up** and **Move down** are also available in the thread menu. The server
+or **Settled** to drag a parked thread back into either live section. Each drop saves;
+**Done** returns to the thread list. **Move up** and **Move down** are also available in the
+thread menu. On iOS, hold a thread and move your finger to drag it directly, including after
+its context menu appears. Drop into **Pinned** or **Active** to pin, unpin, wake, or
+un-settle it, or onto the **Settled** divider to settle it. The server
 saves the order, so it survives a refresh and appears on your other connected devices.
 
 On web and desktop, the list also animates section changes made with thread actions such as

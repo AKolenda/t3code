@@ -1,6 +1,8 @@
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { threadArrangementOpenAtom } from "../../state/thread-order";
+import { environmentThreadShells } from "../../state/threads";
+import { scopedThreadKey } from "../../lib/scopedEntities";
 import type { ThreadMoveDestination } from "./threadOrder";
 import type {
   EnvironmentProject,
@@ -1079,6 +1081,27 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                       ? snoozableCardMenuActions
                       : cardMenuActions),
             ]}
+            dragItemId={
+              Platform.OS === "ios" &&
+              variant === "card" &&
+              !snoozedRow &&
+              props.reorderSupported &&
+              (props.canMoveUp || props.canMoveDown)
+                ? scopedThreadKey(thread.environmentId, thread.id)
+                : ""
+            }
+            dragGroup={pinnedRow ? "t3-thread-pinned" : "t3-thread-active"}
+            onItemDrop={({ nativeEvent }) => {
+              if (nativeEvent.placement !== "before" && nativeEvent.placement !== "after") return;
+              const source = appAtomRegistry
+                .get(environmentThreadShells.threadShellsAtom)
+                .find((row) => scopedThreadKey(row.environmentId, row.id) === nativeEvent.itemId);
+              if (!source || (source.pinnedAt != null) !== pinnedRow) return;
+              onMoveThread?.(source, {
+                targetId: scopedThreadKey(thread.environmentId, thread.id),
+                placement: nativeEvent.placement,
+              });
+            }}
             onPressAction={handleMenuAction}
             shouldOpenOnLongPress
           >
