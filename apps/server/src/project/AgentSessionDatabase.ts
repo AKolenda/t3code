@@ -243,12 +243,15 @@ function desktopMetadata(db: NodeSqlite.DatabaseSync, id: string, fallbackCwd?: 
     'lastUpdatedAt', coalesce(json_extract(value, '$.lastUpdatedAt'), json_extract(value, '$.createdAt')),
     'workspaceIdentifier', json_extract(value, '$.workspaceIdentifier'),
     'trackedGitRepos', json_extract(value, '$.trackedGitRepos')
-  ) AS metadata FROM cursorDiskKV WHERE key = ? AND json_valid(value)
+  ) AS metadata FROM (
+    SELECT CASE WHEN length(CAST(value AS BLOB)) <= ? THEN value END AS value
+    FROM cursorDiskKV WHERE key = ?
+  ) WHERE json_valid(value)
     AND json_extract(value, '$.subagentInfo') IS NULL
     AND coalesce(json_extract(value, '$.isBestOfNSubcomposer'), 0) = 0
     AND (coalesce(json_array_length(value, '$.fullConversationHeadersOnly'), 0) > 0
       OR coalesce(json_array_length(value, '$.conversation'), 0) > 0)`)
-    .get(`composerData:${id}`);
+    .get(MAX_HISTORY_BYTES, `composerData:${id}`);
   if (typeof row?.metadata !== "string") return null;
   // JSON projection uses null for absent properties; strip them before decoding.
   const raw = decodeDesktopMetadataRecord(row.metadata);
@@ -285,18 +288,27 @@ export function discoverCursorDesktopSessions(
   return withDatabase(filePath, (db) => {
     const rows = db
       .prepare(
-        `SELECT substr(key, 14) AS id FROM cursorDiskKV WHERE key GLOB 'composerData:*' AND json_valid(value)
-          AND (coalesce(json_array_length(value, '$.fullConversationHeadersOnly'), 0) > 0 OR coalesce(json_array_length(value, '$.conversation'), 0) > 0)
+        `SELECT substr(key, 14) AS id, oversized FROM (
+          SELECT key, length(CAST(value AS BLOB)) > ? AS oversized,
+            CASE WHEN length(CAST(value AS BLOB)) <= ? THEN value END AS value
+          FROM cursorDiskKV WHERE key GLOB 'composerData:*'
+        ) WHERE oversized OR (json_valid(value)
+          AND (coalesce(json_array_length(value, '$.fullConversationHeadersOnly'), 0) > 0 OR coalesce(json_array_length(value, '$.conversation'), 0) > 0))
           ORDER BY coalesce(json_extract(value, '$.lastUpdatedAt'), json_extract(value, '$.createdAt')) DESC, key LIMIT ?`,
       )
-      .iterate(MAX_RECORDS + 1);
+      .iterate(MAX_HISTORY_BYTES, MAX_HISTORY_BYTES, MAX_RECORDS + 1);
     const sessions: Array<DatabaseSession> = [];
     let inspected = 0;
-    for (const { id } of rows) {
+    let truncated = false;
+    for (const { id, oversized } of rows) {
       // Invalid rows must not consume the valid-session limit, but still bound
       // metadata work and let the caller report an incomplete scan.
       if (++inspected > MAX_RECORDS) return { sessions, truncated: true };
       if (sessions.length >= limit) return { sessions, truncated: true };
+      if (oversized) {
+        truncated = true;
+        continue;
+      }
       if (typeof id !== "string") continue;
       try {
         const metadata = desktopMetadata(db, id, roots.get(id));
@@ -312,7 +324,7 @@ export function discoverCursorDesktopSessions(
         continue;
       }
     }
-    return { sessions, truncated: false };
+    return { sessions, truncated };
   });
 }
 

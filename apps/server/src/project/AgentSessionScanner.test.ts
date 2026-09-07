@@ -1450,17 +1450,39 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         }
         db.close();
         const config = { driver: ProviderDriverKind.make("cursor"), enabled: true, config: {} };
+        const staleHome = path.join(home, "stale");
+        const staleChats = path.join(staleHome, "chats");
+        const staleWorkspace = path.join(staleChats, "workspace");
+        const simulatedFileSystem = FileSystem.FileSystem.of({
+          ...fs,
+          readDirectory: (directory, options) =>
+            directory === staleChats
+              ? Effect.succeed(["workspace"])
+              : directory === staleWorkspace
+                ? Effect.succeed(Array.from({ length: 5000 }, (_, i) => `stale-${i}`))
+                : fs.readDirectory(directory, options),
+          // Files disappeared after listing, but their cached stats are still visible.
+          stat: (target) =>
+            target.startsWith(staleWorkspace) && target.endsWith("store.db")
+              ? fs.stat(filePath)
+              : fs.stat(target),
+        });
         const scanner = yield* AgentSessionScanner.AgentSessionScanner.pipe(
           Effect.provide(
             makeScannerTestLayer({
               claudeHomePath: home,
               codexHomePath: home,
               providerInstances: {
-                [ProviderInstanceId.make("cursor")]: config,
+                [ProviderInstanceId.make("cursor")]: {
+                  ...config,
+                  environment: [{ name: "CURSOR_DATA_DIR", value: staleHome, sensitive: false }],
+                },
+                [ProviderInstanceId.make("editor")]: config,
                 [ProviderInstanceId.make("duplicate")]: config,
               },
             }),
           ),
+          Effect.provideService(FileSystem.FileSystem, simulatedFileSystem),
           Effect.provideService(HostProcessPlatform, "linux"),
           Effect.provideService(HostProcessEnvironment, { XDG_CONFIG_HOME: home }),
         );
@@ -1476,13 +1498,28 @@ it.layer(NodeServices.layer)("AgentSessionScanner", (it) => {
         const outcome = outcomes[0]!;
         expect(outcome).toMatchObject({
           _tag: "Importable",
-          thread: { providerSessionId: "recent", providerInstanceId: "cursor" },
+          thread: { providerSessionId: "recent", providerInstanceId: "editor" },
         });
         if (outcome._tag !== "Importable") return;
         const retry = Array.from(
           yield* scanner.recentThreads(workspace, [outcome.source]).pipe(Stream.runCollect),
         );
         expect(retry.map((r) => r._tag)).toEqual(["AlreadyImported"]);
+        yield* fs.rename(filePath, `${filePath}.previous`);
+        yield* fs.copyFile(`${filePath}.previous`, filePath);
+        const replacement = new NodeSqlite.DatabaseSync(filePath);
+        replacement
+          .prepare(
+            "UPDATE cursorDiskKV SET value = json_set(value, '$.conversation[0].text', 'Recovered history') WHERE key = 'composerData:recent'",
+          )
+          .run();
+        replacement.close();
+        const recovered = Array.from(
+          yield* scanner.recentThreads(workspace, [outcome.source]).pipe(Stream.runCollect),
+        );
+        expect(recovered).toMatchObject([
+          { _tag: "Importable", thread: { messages: [{ text: "Recovered history" }] } },
+        ]);
       }),
     );
 

@@ -264,7 +264,7 @@ describe("Cursor desktop history", () => {
       bubbleId: "tool",
       type: 2,
       text: "",
-      toolFormerData: { result: "x".repeat(100_000) },
+      toolFormerData: { result: "x".repeat(2 * 1024 * 1024) },
     });
     put("bubbleId:desktop:answer", {
       bubbleId: "answer",
@@ -276,7 +276,8 @@ describe("Cursor desktop history", () => {
     return { filePath, db, put, composer };
   }
   it("reads ordered editor bubbles without loading tool payloads or abandoned replies", () => {
-    const { filePath, db } = fixture();
+    const { filePath, db, put, composer } = fixture();
+    put("composerData:desktop", { ...composer, fileSnapshot: "x".repeat(2 * 1024 * 1024) });
     const { sessions } = discoverCursorDesktopSessions(filePath, 100);
     expect(sessions).toHaveLength(1);
     const snapshot = readCursorDesktopThread(sessions[0]!, instanceId, {
@@ -361,6 +362,23 @@ describe("Cursor desktop history", () => {
     expect(
       readCursorDesktopThread(session, instanceId)?.thread.messages.map((m) => m.text),
     ).toEqual(["Fix desktop history", "Fixed"]);
+    db.close();
+  });
+  it("skips oversized raw composers before parsing and reports an incomplete scan", () => {
+    const { filePath, db, put, composer } = fixture();
+    const session = discoverCursorDesktopSessions(filePath, 1).sessions[0]!;
+    put("composerData:oversized", {
+      ...composer,
+      composerId: "oversized",
+      fileSnapshot: "x".repeat(32 * 1024 * 1024),
+    });
+    const discovery = discoverCursorDesktopSessions(filePath, 10);
+    expect(discovery.sessions.map((s) => s.sessionId)).toEqual(["desktop"]);
+    expect(discovery.truncated).toBe(true);
+    db.prepare(
+      "UPDATE cursorDiskKV SET value = (SELECT value FROM cursorDiskKV WHERE key = 'composerData:oversized') WHERE key = 'composerData:desktop'",
+    ).run();
+    expect(readCursorDesktopThread(session, instanceId)).toBeNull();
     db.close();
   });
   it("skips empty drafts, subagents, and remote workspaces", () => {

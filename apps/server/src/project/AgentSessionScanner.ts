@@ -1382,14 +1382,19 @@ export const make = Effect.gen(function* () {
           (left, right) =>
             right.updatedAtMs - left.updatedAtMs || left.filePath.localeCompare(right.filePath),
         );
-        truncated ||= files.length > remaining;
-        for (const file of files.slice(0, remaining)) {
+        for (const file of files) {
+          if (remaining === 0 || --operations <= 0) {
+            truncated = true;
+            break;
+          }
           const session = yield* Effect.try(() =>
             discoverCursorSession(file.filePath, file.updatedAtMs),
           ).pipe(Effect.orElseSucceed(() => null));
-          if (session !== null) add(session);
+          if (session !== null) {
+            add(session);
+            remaining -= 1;
+          }
         }
-        remaining -= Math.min(remaining, files.length);
       }
     }
     return { candidates: raw, truncated };
@@ -1615,13 +1620,19 @@ export const make = Effect.gen(function* () {
             ) {
               return Option.some<AgentSessionRecentThread>({ _tag: "Skipped" });
             }
+            const currentIdentity = transcriptIdentity(session.filePath, fileStats.value);
+            // Shared database size changes when unrelated sessions are written.
+            // Only stable file identity distinguishes a replacement from that growth.
             const completed = completedSources.find(
               (source) =>
                 source.provider === candidate.source &&
                 source.providerInstanceId === candidate.providerInstanceId &&
                 source.filePath === session.filePath &&
                 source.providerSessionId === session.sessionId &&
-                source.mtimeMs === session.updatedAtMs,
+                source.mtimeMs === session.updatedAtMs &&
+                source.device === currentIdentity.device &&
+                source.inode === currentIdentity.inode &&
+                source.birthtimeMs === currentIdentity.birthtimeMs,
             );
             const sessionKey = `${candidate.providerInstanceId}\0${session.sessionId}`;
             if (importedSessions.has(sessionKey)) return Option.none<AgentSessionRecentThread>();
