@@ -1,3 +1,4 @@
+import type { ThreadMoveDestination } from "../threads/threadOrder";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { canSnooze } from "@t3tools/client-runtime/state/thread-settled";
 import * as Cause from "effect/Cause";
@@ -229,7 +230,7 @@ export function useThreadListActions(): {
   readonly unpinThread: (thread: EnvironmentThreadShell) => Promise<boolean>;
   readonly moveThread: (
     thread: EnvironmentThreadShell,
-    direction: "up" | "down",
+    direction: ThreadMoveDestination,
   ) => Promise<boolean>;
   readonly regenerateThreadTitle: (thread: EnvironmentThreadShell) => Promise<boolean>;
 } {
@@ -474,7 +475,7 @@ export function useThreadListActions(): {
     reportFailure: false,
   });
   const moveThread = useCallback(
-    async (thread: EnvironmentThreadShell, direction: "up" | "down") => {
+    async (thread: EnvironmentThreadShell, direction: ThreadMoveDestination) => {
       if (getPendingThreadOrder() !== null) return false;
       const section = thread.pinnedAt != null ? "pinned" : "active";
       const configs = appAtomRegistry.get(environmentServerConfigsAtom);

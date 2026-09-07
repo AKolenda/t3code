@@ -2,6 +2,7 @@ import { planPinnedMove } from "@t3tools/client-runtime/state/thread-sort";
 import {
   createPendingThreadOrder,
   createThreadMovePlanner,
+  threadOrderAfterMove,
   reconcilePendingThreadOrder,
   type PendingThreadOrder,
 } from "./threadOrder";
@@ -1274,5 +1275,94 @@ describe("mobile move availability", () => {
     expect(assignments![0]!.id).toBe(`${environmentId}:move-4`);
     expect(assignments![0]!.orderKey > "bb").toBe(true);
     expect(assignments![0]!.orderKey < "dd").toBe(true);
+  });
+});
+
+describe("thread drag destinations", () => {
+  it("moves across multiple rows while keeping hidden anchors in place", () => {
+    expect(
+      threadOrderAfterMove(["a", "hidden", "b", "c"], "c", {
+        targetId: "a",
+        placement: "before",
+      }),
+    ).toEqual(["c", "a", "hidden", "b"]);
+    expect(
+      threadOrderAfterMove(["a", "hidden", "b", "c"], "a", {
+        targetId: "b",
+        placement: "after",
+      }),
+    ).toEqual(["hidden", "b", "a", "c"]);
+  });
+
+  it("rejects missing, self, and unchanged destinations", () => {
+    for (const targetId of ["missing", "a", "b"]) {
+      expect(
+        threadOrderAfterMove(["a", "b", "c"], "a", {
+          targetId,
+          placement: "before",
+        }),
+      ).toBeNull();
+    }
+    expect(threadOrderAfterMove(["a", "b"], "missing", "down")).toBeNull();
+  });
+
+  it.each(["active", "pinned"] as const)(
+    "persists a dropped %s row and holds its order until confirmed",
+    (section) => {
+      const ordered = ["a", "b", "c", "d"].map((id) =>
+        makeThread({
+          id: ThreadId.make(id),
+          title: id,
+          pinnedAt: section === "pinned" ? NOW : null,
+        }),
+      );
+      const ids = ordered.map((row) => `${row.environmentId}:${row.id}`);
+      const direction = { targetId: ids[0]!, placement: "before" as const };
+      const assignments = createThreadMovePlanner({
+        ordered,
+        section,
+        reorderableEnvironmentIds: new Set([environmentId]),
+      })(ids[3]!, direction)!;
+      const pending = createPendingThreadOrder({
+        section,
+        ordered,
+        movedId: ids[3]!,
+        direction,
+        assignments,
+      });
+      expect(pending.orderedIds).toEqual([ids[3], ids[0], ids[1], ids[2]]);
+      const confirmed = ordered.map((row) => ({
+        ...row,
+        [section === "pinned" ? "pinOrderKey" : "activeOrderKey"]: assignments.find(
+          (a) => a.id === `${row.environmentId}:${row.id}`,
+        )!.orderKey,
+      }));
+      expect(
+        getThreadListV2OrderedSection({ threads: confirmed, section, now: NOW }).map(
+          (row) => `${row.environmentId}:${row.id}`,
+        ),
+      ).toEqual(pending.orderedIds);
+      expect(
+        reconcilePendingThreadOrder({ ...pending, commandsComplete: true }, confirmed),
+      ).toBeNull();
+    },
+  );
+
+  it("refuses a drop that would need to rewrite an old server's keyless row", () => {
+    const old = EnvironmentId.make("old-server");
+    const ordered = [environmentId, old, environmentId].map((env, index) =>
+      makeThread({
+        id: ThreadId.make(String(index)),
+        title: String(index),
+        environmentId: env,
+      }),
+    );
+    expect(
+      createThreadMovePlanner({
+        ordered,
+        section: "active",
+        reorderableEnvironmentIds: new Set([environmentId]),
+      })(`${environmentId}:2`, { targetId: `${environmentId}:0`, placement: "before" }),
+    ).toBeNull();
   });
 });

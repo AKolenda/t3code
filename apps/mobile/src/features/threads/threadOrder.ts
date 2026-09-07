@@ -1,6 +1,37 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { planPinnedMove } from "@t3tools/client-runtime/state/thread-sort";
+import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
 import type { EnvironmentId } from "@t3tools/contracts";
+
+export type ThreadMoveDestination =
+  | "up"
+  | "down"
+  | {
+      readonly targetId: string;
+      readonly placement: "before" | "after";
+    };
+
+/** Resolve against stable row identities, including rows hidden by a filter. */
+export function threadOrderAfterMove(
+  orderedIds: readonly string[],
+  movedId: string,
+  destination: ThreadMoveDestination,
+): string[] | null {
+  const from = orderedIds.indexOf(movedId);
+  if (from < 0) return null;
+  const result = orderedIds.filter((id) => id !== movedId);
+  let to: number;
+  if (typeof destination === "string") {
+    to = from + (destination === "up" ? -1 : 1);
+    if (to < 0 || to >= orderedIds.length) return null;
+  } else {
+    const target = result.indexOf(destination.targetId);
+    if (target < 0) return null;
+    to = target + (destination.placement === "after" ? 1 : 0);
+  }
+  if (to === from) return null;
+  result.splice(to, 0, movedId);
+  return result;
+}
 
 type OrderRow = Pick<
   EnvironmentThreadShell,
@@ -53,9 +84,11 @@ export function createThreadMovePlanner(input: {
       .filter((row) => input.reorderableEnvironmentIds.has(row.environmentId))
       .map(rowId),
   );
-  return (movedId: string, direction: "up" | "down") => {
+  return (movedId: string, direction: ThreadMoveDestination) => {
     if (!writableIds.has(movedId)) return null;
-    const assignments = planPinnedMove({ orderedIds, keysById, movedId, direction });
+    const nextIds = threadOrderAfterMove(orderedIds, movedId, direction);
+    if (nextIds === null) return null;
+    const assignments = planPinnedReorder({ orderedIds: nextIds, keysById, movedId });
     return assignments === null ||
       assignments.length === 0 ||
       assignments.some((assignment) => !writableIds.has(assignment.id))
@@ -68,13 +101,11 @@ export function createPendingThreadOrder(input: {
   readonly section: PendingThreadOrder["section"];
   readonly ordered: readonly OrderRow[];
   readonly movedId: string;
-  readonly direction: "up" | "down";
+  readonly direction: ThreadMoveDestination;
   readonly assignments: readonly { readonly id: string; readonly orderKey: string }[];
 }): PendingThreadOrder {
-  const orderedIds = input.ordered.map(rowId);
-  const from = orderedIds.indexOf(input.movedId);
-  orderedIds.splice(from, 1);
-  orderedIds.splice(from + (input.direction === "up" ? -1 : 1), 0, input.movedId);
+  const orderedIds = threadOrderAfterMove(input.ordered.map(rowId), input.movedId, input.direction);
+  if (orderedIds === null) throw new Error("Cannot begin an invalid thread move");
   return {
     section: input.section,
     orderedIds,
