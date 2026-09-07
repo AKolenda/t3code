@@ -787,10 +787,18 @@ function ProjectDetail({
     (member) => member.physicalProjectKey === selectedCheckoutKey,
   );
   const selectedCheckout = selectedCheckoutMatch ?? representative;
-  const canEditCheckout = useEnvironmentScope(
+  const canOperateCheckout = useEnvironmentScope(
     selectedCheckout.environmentId,
     AuthOrchestrationOperateScope,
   );
+  const canWriteCheckoutSettings = useEnvironmentScope(
+    selectedCheckout.environmentId,
+    AuthSettingsWriteScope,
+  );
+  const canEditCheckout = canOperateCheckout;
+  // Actions live in the environment's settings, so changing them needs settings
+  // access on top of the project grant.
+  const canEditActions = canOperateCheckout && canWriteCheckoutSettings;
   const selectedServerConfig = useAtomValue(
     serverEnvironment.configValueAtom(selectedCheckout.environmentId),
   );
@@ -1443,7 +1451,7 @@ function ProjectDetail({
                 {scriptsInherited
                   ? "Inherited from machine defaults."
                   : `Overridden for ${selectedCheckoutLabel}.`}
-                {!canEditCheckout && " This connection cannot change actions in this checkout."}
+                {!canEditActions && " This connection cannot change actions in this checkout."}
               </p>
             </div>
             <div className="flex w-full flex-wrap gap-1.5 sm:w-auto sm:shrink-0 sm:justify-end">
@@ -1462,7 +1470,7 @@ function ProjectDetail({
                       <Button
                         size="xs"
                         variant="ghost"
-                        disabled={isSavingScripts || !canEditCheckout}
+                        disabled={isSavingScripts || !canEditActions}
                         type="button"
                       />
                     }
@@ -1481,7 +1489,7 @@ function ProjectDetail({
                     {importableScripts.map((fileScript) => (
                       <MenuItem
                         key={`${fileScript.name} ${fileScript.command}`}
-                        disabled={isSavingScripts || !canEditCheckout}
+                        disabled={isSavingScripts || !canEditActions}
                         onClick={() => void importFileScript(fileScript)}
                       >
                         <ScriptIcon icon={fileScript.icon ?? "play"} className="size-4 shrink-0" />
@@ -1499,7 +1507,7 @@ function ProjectDetail({
               <Button
                 size="xs"
                 variant="outline"
-                disabled={isSavingScripts || !canEditCheckout}
+                disabled={isSavingScripts || !canEditActions}
                 onClick={() =>
                   setEditorRequest({ scriptId: null, initial: EMPTY_PROJECT_SCRIPT_INPUT })
                 }
@@ -1512,7 +1520,7 @@ function ProjectDetail({
           <ProjectActionsList
             scripts={scripts}
             keybindings={keybindings}
-            disabled={isSavingScripts || !canEditCheckout}
+            disabled={isSavingScripts || !canEditActions}
             onEdit={(script) => setEditorRequest(editorRequestForScript(script, keybindings))}
           />
           {t3File.status === "invalid" ? (
