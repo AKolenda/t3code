@@ -73,12 +73,11 @@ const MAX_METADATA_RECORDS_PER_TRANSCRIPT = 1_000;
 const RECENT_THREAD_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 /**
  * Large tool results (especially screenshots) can make an otherwise ordinary
- * Codex transcript several GiB. The importer streams those files and discards
- * records too large to retain safely, so this is an I/O guard rather
- * than an allocation guard.
+ * Codex transcript several GiB. The importer reads those files one JSONL
+ * record at a time rather than buffering the entire transcript. These limits
+ * bound total I/O, not the size of an individual record held in memory.
  */
 const MAX_IMPORTED_TRANSCRIPT_BYTES = 4 * 1024 * 1024 * 1024;
-const MAX_IMPORTED_RECORD_BYTES = 1024 * 1024;
 const MAX_IMPORTED_MESSAGES = 200;
 const MAX_IMPORT_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_IMPORT_TRANSCRIPTS = 100;
@@ -737,10 +736,10 @@ export const make = Effect.gen(function* () {
   });
 
   /**
-   * Check the open file before and after reading, and retain only decoded
-   * records small enough to become useful imported history. Tool payloads can
-   * contain multi-megabyte images; buffering the whole JSONL file made their
-   * file size indistinguishable from actual import complexity.
+   * Check the open file before and after reading, and decode each complete
+   * record before deciding whether it belongs in imported history. A large
+   * record can contain conversation text alongside image or tool payloads;
+   * its byte size must not decide whether that text is preserved.
    */
   const readTranscript = Effect.fn("AgentSessionScanner.readTranscript")(function* (
     filePath: string,
@@ -761,25 +760,18 @@ export const make = Effect.gen(function* () {
             let recordChunks: Array<Uint8Array> = [];
             let recordBytes = 0;
             let recordCount = 0;
-            let recordTooLarge = false;
             let bytesRead = 0;
             const decoder = new TextDecoder();
 
             const appendRecordChunk = (chunk: Uint8Array) => {
               recordBytes += chunk.byteLength;
-              if (recordTooLarge) return;
-              if (recordBytes > MAX_IMPORTED_RECORD_BYTES) {
-                recordChunks = [];
-                recordTooLarge = true;
-                return;
-              }
               if (chunk.byteLength > 0) recordChunks.push(chunk);
             };
 
             const finishRecord = () => {
               recordCount += 1;
               if (recordCount > recordLimit) return false;
-              if (!recordTooLarge && recordBytes > 0) {
+              if (recordBytes > 0) {
                 const bytes = new Uint8Array(recordBytes);
                 let offset = 0;
                 for (const chunk of recordChunks) {
@@ -793,7 +785,6 @@ export const make = Effect.gen(function* () {
               }
               recordChunks = [];
               recordBytes = 0;
-              recordTooLarge = false;
               return true;
             };
 
