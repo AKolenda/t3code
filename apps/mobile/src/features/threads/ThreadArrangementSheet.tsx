@@ -1,7 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Animated, FlatList, Modal, PanResponder, Pressable, View } from "react-native";
+import { Animated, FlatList, Modal, PanResponder, Platform, Pressable, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/AppText";
@@ -21,6 +21,7 @@ const keyOf = (thread: EnvironmentThreadShell) => scopedThreadKey(thread.environ
 type Drag = {
   thread: EnvironmentThreadShell;
   destination: Exclude<ThreadMoveDestination, string> | null;
+  candidate: string | null;
 };
 
 /** A handle owns its touch from the start; touches on the row still scroll. */
@@ -195,6 +196,9 @@ export function ThreadArrangementSheet(props: {
                 : ("after" as const),
           }
         : null;
+    const candidate = destination ? `${destination.targetId}:${destination.placement}` : null;
+    if (current.candidate === candidate) return;
+    current.candidate = candidate;
     const valid =
       destination && latest.current.planner(keyOf(current.thread), destination) !== null
         ? destination
@@ -213,7 +217,7 @@ export function ThreadArrangementSheet(props: {
     viewport.current?.measureInWindow((_, top, __, height) => {
       if (gestureVersion.current !== version) return;
       geometry.current = { ...geometry.current, top, height, pageY };
-      drag.current = { thread, destination: null };
+      drag.current = { thread, destination: null, candidate: null };
       setPreview({ ...drag.current });
       update(pageY);
       let last = performance.now();
@@ -259,10 +263,13 @@ export function ThreadArrangementSheet(props: {
     >
       <View
         className="flex-1 bg-screen"
-        style={{ paddingTop: insets.top, paddingBottom: insets.bottom }}
+        style={{
+          paddingTop: Platform.OS === "ios" ? 16 : insets.top,
+          paddingBottom: insets.bottom,
+        }}
       >
-        <View className="flex-row items-center justify-between px-5 py-3">
-          <Text className="text-xl font-t3-semibold">Arrange {props.section} threads</Text>
+        <View className="flex-row items-center justify-between gap-3 px-5 py-3">
+          <Text className="flex-1 text-xl font-t3-semibold">Arrange {props.section} threads</Text>
           <Pressable
             accessibilityRole="button"
             onPress={props.onClose}
