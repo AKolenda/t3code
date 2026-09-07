@@ -2,6 +2,20 @@ import Foundation
 
 public protocol HTTPTransport: Sendable {
     func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse)
+    func upload(for request: URLRequest, fromFile fileURL: URL) async throws
+        -> (Data, HTTPURLResponse)
+}
+
+public extension HTTPTransport {
+    /// Test transports can keep recording URLRequest bodies without providing
+    /// a second transport implementation. Production overrides this method.
+    func upload(for request: URLRequest, fromFile fileURL: URL) async throws
+        -> (Data, HTTPURLResponse)
+    {
+        var request = request
+        request.httpBody = try Data(contentsOf: fileURL)
+        return try await data(for: request)
+    }
 }
 
 /// The Core transport deliberately knows nothing about Clerk or the relay.
@@ -50,6 +64,19 @@ public struct URLSessionHTTPTransport: HTTPTransport {
         }
         return (data, httpResponse)
     }
+
+    public func upload(for request: URLRequest, fromFile fileURL: URL) async throws
+        -> (Data, HTTPURLResponse)
+    {
+        let (data, response) = try await session.upload(
+            for: HTTPRequestPolicy.prepare(request),
+            fromFile: fileURL
+        )
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw HTTPError.invalidResponse
+        }
+        return (data, httpResponse)
+    }
 }
 
 /// Shared wire-level defaults for HTTP requests.
@@ -78,6 +105,7 @@ public enum HTTPError: LocalizedError, Sendable {
     case missingCredential
     case incompatibleCredential
     case managedAuthorizationUnavailable
+    case unauthenticatedSession
 
     public var errorDescription: String? {
         switch self {
@@ -91,13 +119,79 @@ public enum HTTPError: LocalizedError, Sendable {
             "This environment's saved authentication method is invalid. Connect it again."
         case .managedAuthorizationUnavailable:
             "This build cannot authorize a managed T3 Connect environment."
+        case .unauthenticatedSession:
+            "The environment rejected the session authorization."
         }
     }
 }
 
-private struct ErrorBody: Decodable {
+struct T3ConnectNetworkError: LocalizedError, Sendable {
+    static let hint =
+        "Your DNS or firewall may be blocking T3 Connect. Try another network, such as a phone hotspot."
+
+    let message: String
+
+    var errorDescription: String? { "\(message) \(Self.hint)" }
+
+    // A failed transport can be an outage or filtering. Keep protocol and
+    // authentication errors unchanged because they have a server response.
+    static func wrapping(_ error: any Error) -> any Error {
+        guard let error = error as? URLError else { return error }
+        switch error.code {
+        case .timedOut, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed,
+             .networkConnectionLost, .notConnectedToInternet:
+            return Self(message: error.localizedDescription)
+        default:
+            return error
+        }
+    }
+}
+
+enum DPoPFailureReason: Decodable, Equatable, Sendable {
+    case timeWindow
+    case keyMismatch
+    case requestMismatch
+    case tokenMismatch
+    case replay
+    case invalidProof
+    case unknown
+
+    init(from decoder: any Decoder) throws {
+        switch try decoder.singleValueContainer().decode(String.self) {
+        case "time_window": self = .timeWindow
+        case "key_mismatch": self = .keyMismatch
+        case "request_mismatch": self = .requestMismatch
+        case "token_mismatch": self = .tokenMismatch
+        case "replay": self = .replay
+        case "invalid_proof": self = .invalidProof
+        default: self = .unknown
+        }
+    }
+}
+
+enum DPoPFailurePresentation {
+    static let clockHint =
+        "Hint: Check that automatic date and time is enabled on both devices, then try again."
+    static let unknownHint =
+        "Hint: Try again. If it still fails, clock skew may be the cause; check that automatic date and time is enabled on both devices."
+    static let retryHint = "Hint: Try again. If the problem continues, copy the trace ID."
+
+    static func message(_ message: String, reason: DPoPFailureReason?) -> String {
+        let hint = if reason == .timeWindow {
+            clockHint
+        } else if reason == nil {
+            unknownHint
+        } else {
+            retryHint
+        }
+        return "\(message) \(hint)"
+    }
+}
+
+struct EnvironmentErrorBody: Decodable {
     let message: String?
     let reason: String?
+    let dpopFailureReason: DPoPFailureReason?
     let traceId: String?
 }
 
@@ -153,7 +247,8 @@ public actor EnvironmentAPI {
         id: String,
         environment: Environment,
         turnLimit: Int? = nil,
-        beforeCursor: String? = nil
+        beforeCursor: String? = nil,
+        timeoutInterval: TimeInterval? = nil
     ) async throws -> OrchestrationThreadDetailSnapshot {
         let encodedID = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? id
         var queryItems: [URLQueryItem] = []
@@ -168,6 +263,7 @@ public actor EnvironmentAPI {
             path: "/api/orchestration/threads/\(encodedID)",
             queryItems: queryItems,
             method: "GET",
+            timeoutInterval: timeoutInterval,
             as: OrchestrationThreadDetailSnapshot.self
         )
     }
@@ -206,7 +302,7 @@ public actor EnvironmentAPI {
         mimeType: String,
         to url: URL
     ) async throws {
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: url, timeoutInterval: 60)
         request.httpMethod = "POST"
         request.httpBody = data
         request.setValue(mimeType, forHTTPHeaderField: "Content-Type")
@@ -226,6 +322,34 @@ public actor EnvironmentAPI {
         }
     }
 
+    /// Production uses URLSession's file upload API so large attachments never
+    /// become one in-memory Data value.
+    public func uploadAttachment(
+        fileURL: URL,
+        byteCount: Int,
+        mimeType: String,
+        to url: URL
+    ) async throws {
+        var request = URLRequest(url: url, timeoutInterval: 60)
+        request.httpMethod = "POST"
+        request.setValue(mimeType, forHTTPHeaderField: "Content-Type")
+        request.setValue(String(byteCount), forHTTPHeaderField: "Content-Length")
+
+        let (responseData, response) = try await transport.upload(
+            for: HTTPRequestPolicy.prepare(request),
+            fromFile: fileURL
+        )
+        guard (200...299).contains(response.statusCode) else {
+            let detail = String(data: responseData, encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            throw HTTPError.status(
+                response.statusCode,
+                message: detail.flatMap { $0.isEmpty ? nil : $0 } ?? "File upload failed.",
+                traceID: nil
+            )
+        }
+    }
+
     public func webSocketTicket(for environment: Environment) async throws -> WebSocketTicket {
         try await authorized(
             environment: environment,
@@ -240,6 +364,7 @@ public actor EnvironmentAPI {
             environment: environment,
             path: "/api/auth/session",
             method: "GET",
+            isUnauthorizedResponse: { !$0.authenticated },
             as: AuthSessionState.self
         )
     }
@@ -286,6 +411,7 @@ public actor EnvironmentAPI {
         method: String,
         body: Data? = nil,
         timeoutInterval: TimeInterval? = nil,
+        isUnauthorizedResponse: (@Sendable (Result) -> Bool)? = nil,
         as type: Result.Type
     ) async throws -> Result {
         guard let credential = try await credentials.credential(for: environment.id) else {
@@ -348,7 +474,12 @@ public actor EnvironmentAPI {
                 request.timeoutInterval = timeoutInterval
             }
             do {
-                return try await send(request, as: type)
+                return try await send(
+                    request,
+                    isManagedRequest: true,
+                    isUnauthorizedResponse: isUnauthorizedResponse,
+                    as: type
+                )
             } catch let error as HTTPError where error.isRejectedAuthorization {
                 if let saved = try await newestUsableManagedCredential(
                     replacing: current,
@@ -377,7 +508,12 @@ public actor EnvironmentAPI {
                 if let timeoutInterval {
                     retry.timeoutInterval = timeoutInterval
                 }
-                return try await send(retry, as: type)
+                return try await send(
+                    retry,
+                    isManagedRequest: true,
+                    isUnauthorizedResponse: isUnauthorizedResponse,
+                    as: type
+                )
             }
         }
     }
@@ -461,25 +597,52 @@ public actor EnvironmentAPI {
 
     private func send<Result: Decodable & Sendable>(
         _ request: URLRequest,
+        isManagedRequest: Bool = false,
+        isUnauthorizedResponse: (@Sendable (Result) -> Bool)? = nil,
         as type: Result.Type
     ) async throws -> Result {
-        let (data, response) = try await transport.data(for: HTTPRequestPolicy.prepare(request))
+        let data: Data
+        let response: HTTPURLResponse
+        do {
+            (data, response) = try await transport.data(for: HTTPRequestPolicy.prepare(request))
+        } catch {
+            throw isManagedRequest ? T3ConnectNetworkError.wrapping(error) : error
+        }
         guard (200..<300).contains(response.statusCode) else {
-            let body = try? JSONDecoder.t3.decode(ErrorBody.self, from: data)
+            let body = try? JSONDecoder.t3.decode(EnvironmentErrorBody.self, from: data)
+            let message: String
+            if response.statusCode == 401,
+               request.value(forHTTPHeaderField: "DPoP") != nil,
+               body?.reason == "invalid_credential"
+            {
+                message = DPoPFailurePresentation.message(
+                    "The environment credential is invalid.",
+                    reason: body?.dpopFailureReason
+                )
+            } else {
+                message = body?.message ?? body?.reason ?? "Environment request failed."
+            }
             throw HTTPError.status(
                 response.statusCode,
-                message: body?.message ?? body?.reason ?? "Environment request failed.",
+                message: message,
                 traceID: body?.traceId
             )
         }
-        return try JSONDecoder.t3.decode(type, from: data)
+        let result = try JSONDecoder.t3.decode(type, from: data)
+        if isUnauthorizedResponse?(result) == true {
+            throw HTTPError.unauthenticatedSession
+        }
+        return result
     }
 }
 
 private extension HTTPError {
     var isRejectedAuthorization: Bool {
-        guard case let .status(status, _, _) = self else { return false }
-        return status == 401
+        switch self {
+        case .unauthenticatedSession: return true
+        case let .status(status, _, _): return status == 401
+        default: return false
+        }
     }
 }
 

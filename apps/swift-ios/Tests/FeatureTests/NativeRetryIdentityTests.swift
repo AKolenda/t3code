@@ -4,6 +4,60 @@ import XCTest
 
 @MainActor
 final class NativeRetryIdentityTests: XCTestCase {
+    func testSavedSettingsSurviveAConnectionRepublish() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("t3-native-settings-republish-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let environment = Environment(
+            id: "environment-settings-republish",
+            label: "Settings republish",
+            httpBaseURL: URL(string: "https://settings-republish.example")!,
+            webSocketBaseURL: URL(string: "wss://settings-republish.example")!
+        )
+        let store = EnvironmentStore(
+            fileURL: directory.appendingPathComponent("environments.json")
+        )
+        try await store.save([environment])
+        try await store.setActiveEnvironment(id: environment.id)
+        let transport = ConcurrentBootstrapHTTPTransport(shell: retryShellSnapshot())
+        let connection = ConcurrentBootstrapWebSocketConnection()
+        let runtime = EnvironmentRuntime(
+            environmentStore: store,
+            credentialStore: InMemoryCredentialStore(
+                credentials: [environment.id: EnvironmentCredential(accessToken: "token")]
+            ),
+            httpTransport: transport,
+            webSocketConnector: ConcurrentBootstrapWebSocketConnector(connection: connection)
+        )
+        let settingsSuite = "t3-native-settings-republish-\(UUID().uuidString)"
+        let settingsStore = UserDefaults(suiteName: settingsSuite)!
+        defer { settingsStore.removePersistentDomain(forName: settingsSuite) }
+        let client = NativeFeatureClient(runtime: runtime, settingsStore: settingsStore)
+        let initial = try await client.initialSnapshot()
+        await connection.waitUntilConnected()
+        var updated = initial.settings
+        updated.textSize = FeatureTextSizeAdjustment(steps: 2)
+        updated.codeSize = FeatureTextSizeAdjustment(steps: -1)
+        try await client.saveSettings(updated)
+        var events = client.events().makeAsyncIterator()
+
+        await connection.failReceive()
+
+        var receivedRepublish = false
+        while let event = await events.next() {
+            guard case let .snapshot(snapshot) = event,
+                  snapshot.connection.state == .reconnecting else {
+                continue
+            }
+            XCTAssertEqual(snapshot.settings.textSize.steps, 2)
+            XCTAssertEqual(snapshot.settings.codeSize.steps, -1)
+            receivedRepublish = true
+            break
+        }
+        XCTAssertTrue(receivedRepublish)
+        await client.disconnect()
+    }
+
     func testConcurrentBootstrapRetriesKeepIndependentStableIdentities() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("t3-native-concurrent-retry-\(UUID().uuidString)")
@@ -98,7 +152,7 @@ final class NativeRetryIdentityTests: XCTestCase {
         )!
         let client = NativeFeatureClient(runtime: runtime, settingsStore: settings)
         let initial = try await client.initialSnapshot()
-        XCTAssertEqual(initial.threads.first?.runtimeMode, .automatic)
+        XCTAssertEqual(initial.threads.first?.runtimeMode, .approvalRequired)
         XCTAssertEqual(initial.threads.first?.interactionMode, .standard)
         await connection.waitUntilConnected()
 
@@ -162,8 +216,12 @@ final class NativeRetryIdentityTests: XCTestCase {
             retriedBootstrap["message"]?["messageId"]
         )
         XCTAssertNotEqual(initialBootstrap["threadId"], retriedBootstrap["threadId"])
-        for command in commands {
-            XCTAssertEqual(command["runtimeMode"]?.stringValue, "full-access")
+        for command in turnCommands {
+            XCTAssertEqual(command["runtimeMode"]?.stringValue, "approval-required")
+            XCTAssertEqual(command["interactionMode"]?.stringValue, "default")
+        }
+        for command in bootstrapCommands {
+            XCTAssertEqual(command["runtimeMode"]?.stringValue, "auto-accept-edits")
             XCTAssertEqual(command["interactionMode"]?.stringValue, "default")
         }
         await client.disconnect()
@@ -290,6 +348,7 @@ private actor ConcurrentBootstrapWebSocketConnection: WebSocketConnection {
     private var connectionWaiters: [CheckedContinuation<Void, Never>] = []
     private var queuedResponses: [Data] = []
     private var receiver: CheckedContinuation<Data, Error>?
+    private var shouldFailNextReceive = false
 
     func send(_ data: Data) async throws {
         let request = try JSONDecoder.t3.decode(JSONValue.self, from: data)
@@ -298,7 +357,8 @@ private actor ConcurrentBootstrapWebSocketConnection: WebSocketConnection {
             connectionWaiters.forEach { $0.resume() }
             connectionWaiters.removeAll()
         }
-        if request["tag"]?.stringValue == RPCMethod.serverGetConfig.rawValue,
+        if request["tag"]?.stringValue == RPCMethod.serverGetConfig.rawValue
+            || request["tag"]?.stringValue == RPCMethod.subscribeServerConfig.rawValue,
            let response = try retryConfigResponse(for: request) {
             enqueue(response)
             return
@@ -324,6 +384,10 @@ private actor ConcurrentBootstrapWebSocketConnection: WebSocketConnection {
     }
 
     func receive() async throws -> Data {
+        if shouldFailNextReceive {
+            shouldFailNextReceive = false
+            throw URLError(.networkConnectionLost)
+        }
         if !queuedResponses.isEmpty {
             return queuedResponses.removeFirst()
         }
@@ -335,6 +399,16 @@ private actor ConcurrentBootstrapWebSocketConnection: WebSocketConnection {
     func close() {
         receiver?.resume(throwing: CancellationError())
         receiver = nil
+    }
+
+    func failReceive() {
+        let error = URLError(.networkConnectionLost)
+        if let receiver {
+            self.receiver = nil
+            receiver.resume(throwing: error)
+        } else {
+            shouldFailNextReceive = true
+        }
     }
 
     func waitUntilConnected() async {
@@ -560,7 +634,8 @@ private actor AmbiguousDispatchWebSocketConnection: WebSocketConnection {
             connectionWaiters.forEach { $0.resume() }
             connectionWaiters.removeAll()
         }
-        if request["tag"]?.stringValue == RPCMethod.serverGetConfig.rawValue,
+        if request["tag"]?.stringValue == RPCMethod.serverGetConfig.rawValue
+            || request["tag"]?.stringValue == RPCMethod.subscribeServerConfig.rawValue,
            let response = try retryConfigResponse(for: request) {
             enqueue(response)
             return
@@ -623,7 +698,8 @@ private actor PartialBootstrapWebSocketConnection: WebSocketConnection {
         }
         guard request["tag"]?.stringValue == RPCMethod.dispatchCommand.rawValue,
               let payload = request["payload"] else {
-            if request["tag"]?.stringValue == RPCMethod.serverGetConfig.rawValue,
+            if request["tag"]?.stringValue == RPCMethod.serverGetConfig.rawValue
+                || request["tag"]?.stringValue == RPCMethod.subscribeServerConfig.rawValue,
                let response = try retryConfigResponse(for: request) {
                 enqueue(response)
             }
@@ -682,13 +758,26 @@ private actor PartialBootstrapWebSocketConnection: WebSocketConnection {
 
 private func retryConfigResponse(for request: JSONValue) throws -> Data? {
     guard case let .number(requestID)? = request["id"] else { return nil }
+    let config = JSONValue.object(["providers": .array([])])
+    if request["tag"]?.stringValue == RPCMethod.subscribeServerConfig.rawValue {
+        return try JSONEncoder.t3.encode(
+            JSONValue.object([
+                "_tag": .string("Chunk"),
+                "requestId": .number(requestID),
+                "values": .array([.object([
+                    "type": .string("snapshot"),
+                    "config": config,
+                ])]),
+            ])
+        )
+    }
     return try JSONEncoder.t3.encode(
         JSONValue.object([
             "_tag": .string("Exit"),
             "requestId": .number(requestID),
             "exit": .object([
                 "_tag": .string("Success"),
-                "value": .object(["providers": .array([])]),
+                "value": config,
             ]),
         ])
     )

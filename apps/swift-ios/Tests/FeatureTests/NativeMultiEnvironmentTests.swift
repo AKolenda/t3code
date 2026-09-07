@@ -1,4 +1,5 @@
 import Foundation
+import Testing
 import XCTest
 @testable import T3Code
 
@@ -77,7 +78,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
     }
 
     func testSnapshotMergesEnvironmentsAndRoutesThreadWorkToItsOwner() async throws {
-        let fixture = try await makeFixture()
+        let fixture = try await Self.makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
         let snapshot = try await fixture.client.initialSnapshot()
@@ -101,19 +102,229 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         XCTAssertEqual(detail.thread.environmentName, "Steam Box")
 
         try await fixture.client.renameThread(id: remoteThread.id, title: "Remote rename")
+        let selection = FeatureSelection(
+            providerID: "codex",
+            modelID: "gpt-5.6-sol",
+            options: [
+                .init(id: "reasoningEffort", value: .string("xhigh")),
+                .init(id: "serviceTier", value: .string("priority")),
+            ]
+        )
         try await fixture.client.sendMessage(
             threadID: remoteThread.id,
             text: "Run this on Steam Box",
-            selection: nil
+            selection: selection
         )
 
-        let routedHosts = await fixture.transport.dispatchHosts()
-        XCTAssertEqual(routedHosts, ["two.example", "two.example"])
+        let records = await fixture.transport.dispatchRecords()
+        XCTAssertEqual(records.map(\.host), ["two.example", "two.example"])
+        let turnSelection = try XCTUnwrap(
+            records.last?.command["modelSelection"]?.decode(ModelSelection.self)
+        )
+        XCTAssertEqual(turnSelection.instanceId, selection.providerID)
+        XCTAssertEqual(turnSelection.model, selection.modelID)
+        XCTAssertEqual(
+            turnSelection.options,
+            [
+                .init(id: "reasoningEffort", value: .string("xhigh")),
+                .init(id: "serviceTier", value: .string("priority")),
+            ]
+        )
+        await fixture.client.disconnect()
+    }
+
+    func testPassiveProviderRefreshKeepsActiveThreadsAndAcceptsTheirNextSequence() async throws {
+        let server = MultiEnvironmentConfigurationServer()
+        let fixture = try await Self.makeFixture(
+            passiveSequence: 5_000,
+            webSocketConnector: MultiEnvironmentConfigurationConnector(server: server),
+            rpcConnectionWaitTimeout: .seconds(1),
+            fallbackPollingInitialDelay: .seconds(60),
+            aggregateRefreshInterval: .seconds(60)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        _ = try await fixture.client.initialSnapshot()
+
+        let providers = try await fixture.client.refreshProviders(environmentID: "two")
+        XCTAssertEqual(providers.map(\.id), ["codex-two.example"])
+
+        let refreshed = try await fixture.client.initialSnapshot()
+        XCTAssertEqual(
+            refreshed.threads.filter { $0.environmentID == "one" }.compactMap(\.wireID),
+            ["thread-one"]
+        )
+        XCTAssertEqual(
+            refreshed.threads.filter { $0.environmentID == "two" }.compactMap(\.wireID),
+            ["thread-two"]
+        )
+
+        let current = multiEnvironmentShell(
+            projectID: "project-one", threadID: "thread-one", title: "Updated local work"
+        )
+        let added = multiEnvironmentShell(
+            projectID: "project-one", threadID: "thread-new", title: "New local work"
+        )
+        await fixture.transport.setShell(
+            OrchestrationShellSnapshot(
+                snapshotSequence: 2,
+                projects: current.projects,
+                threads: current.threads + added.threads,
+                updatedAt: current.updatedAt
+            ),
+            host: "one.example"
+        )
+
+        let updated = try await fixture.client.initialSnapshot()
+        XCTAssertEqual(
+            Set(updated.threads.filter { $0.environmentID == "one" }.compactMap(\.wireID)),
+            ["thread-one", "thread-new"]
+        )
+        XCTAssertEqual(updated.threads.first { $0.wireID == "thread-one" }?.title, "Updated local work")
+        XCTAssertEqual(updated.threads.first { $0.wireID == "thread-new" }?.projectID,
+                       FeatureScopedID.project(environmentID: "one", wireID: "project-one"))
+        await fixture.client.disconnect()
+    }
+
+    func testPassiveEnvironmentSettingsDoNotReplaceActiveThreads() async throws {
+        let server = MultiEnvironmentConfigurationServer()
+        let fixture = try await Self.makeFixture(
+            passiveSequence: 5_000,
+            webSocketConnector: MultiEnvironmentConfigurationConnector(server: server),
+            rpcConnectionWaitTimeout: .seconds(1),
+            fallbackPollingInitialDelay: .seconds(60),
+            aggregateRefreshInterval: .seconds(60)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        _ = try await fixture.client.initialSnapshot()
+
+        try await fixture.client.updateServerPreferences(
+            environmentID: "two", change: .environmentIcon("mac-mini")
+        )
+
+        let snapshot = try await fixture.client.initialSnapshot()
+        XCTAssertEqual(
+            snapshot.threads.filter { $0.environmentID == "one" }.compactMap(\.wireID),
+            ["thread-one"]
+        )
+        XCTAssertEqual(
+            snapshot.threads.filter { $0.environmentID == "two" }.compactMap(\.wireID),
+            ["thread-two"]
+        )
+        let updatedHosts = await server.updatedHosts()
+        XCTAssertEqual(updatedHosts, ["two.example"])
+        await fixture.client.disconnect()
+    }
+
+    func testMachineModelDefaultsRefreshCachedProjectsWithoutChangingOtherEnvironments() async throws {
+        let server = MultiEnvironmentConfigurationServer()
+        let fixture = try await Self.makeFixture(
+            webSocketConnector: MultiEnvironmentConfigurationConnector(server: server),
+            rpcConnectionWaitTimeout: .seconds(1),
+            fallbackPollingInitialDelay: .seconds(60),
+            aggregateRefreshInterval: .seconds(60)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let source = multiEnvironmentShell(projectID: "project-two", threadID: "thread-two", title: "Remote work")
+        var projectFields = try JSONValue.encode(source.projects[0]).decode([String: JSONValue].self)
+        projectFields["defaultModelSelection"] = .null
+        let project = try JSONValue.object(projectFields).decode(OrchestrationProject.self)
+        await fixture.transport.setShell(OrchestrationShellSnapshot(
+            snapshotSequence: source.snapshotSequence, projects: [project],
+            threads: source.threads, updatedAt: source.updatedAt
+        ), host: "two.example")
+        let initial = try await fixture.client.initialSnapshot()
+        XCTAssertNil(initial.projects.first { $0.environmentID == "two" }?.defaultSelection)
+        let localDefault = initial.projects.first { $0.environmentID == "one" }?.defaultSelection
+
+        for model in ["claude-opus-5", "claude-sonnet-5"] {
+            let selection = ModelSelection(instanceId: "claude-work", model: model)
+            try await fixture.client.updateServerPreferences(environmentID: "two", change: .sharedPreferences(.object([
+                "defaultModelSelection": try JSONValue.encode(selection),
+            ])))
+            let snapshot = try await fixture.client.initialSnapshot()
+            XCTAssertEqual(snapshot.projects.first { $0.environmentID == "two" }?.defaultSelection?.modelID, model)
+            XCTAssertEqual(snapshot.projects.first { $0.environmentID == "one" }?.defaultSelection, localDefault)
+        }
+
+        await fixture.transport.setShell(source, host: "two.example")
+        let overridden = try await fixture.client.initialSnapshot()
+        XCTAssertEqual(overridden.projects.first { $0.environmentID == "two" }?.defaultSelection?.modelID, "gpt-5.6-sol")
+        await fixture.client.disconnect()
+    }
+
+    func testSharedSettingsFanOutDoesNotReplaceActiveThreads() async throws {
+        let server = MultiEnvironmentConfigurationServer()
+        let fixture = try await Self.makeFixture(
+            passiveSequence: 5_000,
+            webSocketConnector: MultiEnvironmentConfigurationConnector(server: server),
+            rpcConnectionWaitTimeout: .seconds(1),
+            fallbackPollingInitialDelay: .seconds(60),
+            aggregateRefreshInterval: .seconds(60)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        _ = try await fixture.client.initialSnapshot()
+
+        try await fixture.client.updateServerPreferences(
+            environmentID: "one", change: .defaultThreadEnvMode(.worktree)
+        )
+
+        let snapshot = try await fixture.client.initialSnapshot()
+        XCTAssertEqual(
+            snapshot.threads.filter { $0.environmentID == "one" }.compactMap(\.wireID),
+            ["thread-one"]
+        )
+        XCTAssertEqual(
+            snapshot.threads.filter { $0.environmentID == "two" }.compactMap(\.wireID),
+            ["thread-two"]
+        )
+        let updatedHosts = await server.updatedHosts()
+        XCTAssertEqual(updatedHosts, ["one.example", "two.example"])
+        await fixture.client.disconnect()
+    }
+
+    func testRestartPreferenceOnlyReachesComputersThatSupportIt() async throws {
+        let server = MultiEnvironmentConfigurationServer(restartSupportHosts: ["one.example"])
+        let fixture = try await Self.makeFixture(
+            webSocketConnector: MultiEnvironmentConfigurationConnector(server: server),
+            rpcConnectionWaitTimeout: .seconds(1),
+            fallbackPollingInitialDelay: .seconds(60),
+            aggregateRefreshInterval: .seconds(60)
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let snapshot = try await fixture.client.initialSnapshot()
+        XCTAssertEqual(snapshot.preferencesByEnvironment?["one"]?.continueThreadsAfterServerUpdate, false)
+        XCTAssertNil(snapshot.preferencesByEnvironment?["two"]?.continueThreadsAfterServerUpdate)
+
+        try await fixture.client.updateServerPreferences(
+            environmentID: "one", change: .continueThreadsAfterServerUpdate(true)
+        )
+        let updatedHosts = await server.updatedHosts()
+        XCTAssertEqual(updatedHosts, ["one.example"])
+        XCTAssertTrue(fixture.client.sharedPreferenceMismatches(environmentID: "one").isEmpty)
+
+        let all = ServerSettingsSnapshot(continueThreadsAfterServerUpdate: true)
+        try await fixture.client.updateServerPreferences(
+            environmentID: "one",
+            change: .sharedPreferences(all.sharedPatch(supportsRestartContinuation: true))
+        )
+        let supportedSettings = await server.settings(host: "one.example")
+        let legacySettings = await server.settings(host: "two.example")
+        XCTAssertEqual(supportedSettings["continueThreadsAfterServerUpdate"], .bool(true))
+        XCTAssertNil(legacySettings["continueThreadsAfterServerUpdate"])
+        XCTAssertEqual(legacySettings["defaultThreadEnvMode"], .string("local"))
+        do {
+            try await fixture.client.updateServerPreferences(
+                environmentID: "two", change: .continueThreadsAfterServerUpdate(true)
+            )
+            XCTFail("An older computer must not receive the restart preference.")
+        } catch is FeatureCapabilityUnavailable {
+            // The unsupported action must fail before sending a settings command.
+        }
         await fixture.client.disconnect()
     }
 
     func testBackgroundLivenessKeepsASettledThreadWorking() async throws {
-        let fixture = try await makeFixture()
+        let fixture = try await Self.makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         await fixture.transport.setShell(
             multiEnvironmentShell(
@@ -137,6 +348,82 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         await fixture.client.disconnect()
     }
 
+    func testNewerDetailSettlementBeatsOlderShellForNonActiveEnvironment() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        await fixture.transport.setShell(
+            multiEnvironmentShell(
+                projectID: "project-two",
+                threadID: "thread-two",
+                title: "Remote work",
+                snapshotSequence: 90,
+                settledOverride: "settled",
+                settledAt: "2026-07-31T12:01:00.000Z"
+            ),
+            host: "two.example"
+        )
+        await fixture.transport.setDetail(
+            multiEnvironmentDetail(
+                projectID: "project-two",
+                threadID: "thread-two",
+                snapshotSequence: 100
+            ),
+            host: "two.example"
+        )
+
+        let snapshot = try await fixture.client.initialSnapshot()
+        let thread = try XCTUnwrap(snapshot.threads.first { $0.environmentID == "two" })
+        let detail = try await fixture.client.loadThread(id: thread.id)
+
+        XCTAssertFalse(detail.thread.isSettled)
+        XCTAssertNil(detail.thread.settlementFacts?.settlementOverride)
+        await fixture.client.disconnect()
+    }
+
+    func testNewerShellSettlementBeatsStaleDetailForNonActiveEnvironment() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        await fixture.transport.setShell(
+            multiEnvironmentShell(
+                projectID: "project-two",
+                threadID: "thread-two",
+                title: "Remote work",
+                snapshotSequence: 100,
+                settledOverride: "settled",
+                settledAt: "2026-07-31T12:01:00.000Z"
+            ),
+            host: "two.example"
+        )
+        await fixture.transport.setDetail(
+            multiEnvironmentDetail(
+                projectID: "project-two",
+                threadID: "thread-two",
+                snapshotSequence: 90
+            ),
+            host: "two.example"
+        )
+
+        let snapshot = try await fixture.client.initialSnapshot()
+        let thread = try XCTUnwrap(snapshot.threads.first { $0.environmentID == "two" })
+        let detail = try await fixture.client.loadThread(id: thread.id)
+
+        XCTAssertTrue(detail.thread.isSettled)
+        XCTAssertEqual(detail.thread.settlementFacts?.settlementOverride, .settled)
+
+        await fixture.transport.setDetail(
+            multiEnvironmentDetail(
+                projectID: "project-two",
+                threadID: "thread-two",
+                snapshotSequence: 95
+            ),
+            host: "two.example"
+        )
+        let refreshed = try await fixture.client.loadThread(id: thread.id)
+        XCTAssertTrue(refreshed.thread.isSettled)
+        XCTAssertEqual(refreshed.thread.settlementFacts?.settlementOverride, .settled)
+        await fixture.client.disconnect()
+    }
+
     func testSnapshotKeepsRepositoryIdentityForCrossComputerProjectGrouping() async throws {
         let identity = RepositoryIdentity(
             canonicalKey: "github.com/t3/example",
@@ -151,7 +438,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
             owner: "t3",
             name: "example"
         )
-        let fixture = try await makeFixture(repositoryIdentity: identity)
+        let fixture = try await Self.makeFixture(repositoryIdentity: identity)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
         let snapshot = try await fixture.client.initialSnapshot()
@@ -166,7 +453,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
     }
 
     func testFailedEnvironmentKeepsItsLastKnownRowsWithoutHidingHealthyDevices() async throws {
-        let fixture = try await makeFixture()
+        let fixture = try await Self.makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
         _ = try await fixture.client.initialSnapshot()
@@ -200,8 +487,46 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         await fixture.client.disconnect()
     }
 
+    func testCachedShellRowsApplySettlementAndRemoveDeletedRoutes() async throws {
+        let fixture = try await Self.makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let initial = try await fixture.client.initialSnapshot()
+        let original = try XCTUnwrap(initial.threads.first { $0.environmentID == "two" })
+        let updated = multiEnvironmentShell(
+            projectID: "project-two", threadID: "thread-two", title: "Remote work",
+            providerID: "claudeAgent", modelID: "claude-opus-4-1",
+            backgroundLiveness: .monitoring, snapshotSequence: 2,
+            settledOverride: "settled", settledAt: "2026-07-31T12:01:00.000Z"
+        )
+        await fixture.transport.setShell(updated, host: "two.example")
+        let refreshed = try await fixture.client.initialSnapshot()
+        let settled = try XCTUnwrap(refreshed.threads.first { $0.id == original.id })
+        XCTAssertEqual(settled.updatedAt, original.updatedAt)
+        XCTAssertTrue(settled.isSettled)
+        XCTAssertEqual(settled.state, .monitoring)
+        XCTAssertEqual(refreshed.threads.first { $0.environmentID == "one" },
+                       initial.threads.first { $0.environmentID == "one" })
+
+        await fixture.transport.setShell(
+            OrchestrationShellSnapshot(
+                snapshotSequence: 3, projects: updated.projects, threads: [], updatedAt: updated.updatedAt
+            ),
+            host: "two.example"
+        )
+        let removed = try await fixture.client.initialSnapshot()
+        XCTAssertFalse(removed.threads.contains { $0.id == original.id })
+        XCTAssertEqual(removed.projects.first { $0.environmentID == "two" }?.threadCount, 0)
+        do {
+            _ = try await fixture.client.loadThread(id: original.id)
+            XCTFail("Removed threads must no longer have a route.")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "The selected thread is no longer available.")
+        }
+        await fixture.client.disconnect()
+    }
+
     func testOlderHTTPSnapshotCannotReplaceNewerEnvironmentState() async throws {
-        let fixture = try await makeFixture()
+        let fixture = try await Self.makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         _ = try await fixture.client.initialSnapshot()
 
@@ -246,7 +571,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
     }
 
     func testThreadCreationCannotReplaceNewerEnvironmentStateWithAnOlderShell() async throws {
-        let fixture = try await makeFixture()
+        let fixture = try await Self.makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         _ = try await fixture.client.initialSnapshot()
 
@@ -300,7 +625,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
 
     func testPullRequestPagesPreserveCursorsAndTargetOnlyTheRequestedEnvironment() async throws {
         let recorder = PullRequestPageRecorder()
-        let fixture = try await makeFixture(
+        let fixture = try await Self.makeFixture(
             pullRequestsAvailable: true,
             webSocketConnector: PullRequestPageWebSocketConnector(recorder: recorder),
             rpcConnectionWaitTimeout: .seconds(2)
@@ -334,7 +659,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
 
     func testBackgroundSnapshotDoesNotStartAggregateRefreshLoops() async throws {
         let loader = CountingAggregateEnvironmentLoader()
-        let fixture = try await makeFixture(
+        let fixture = try await Self.makeFixture(
             aggregateEnvironmentLoader: { runtime in
                 await loader.recordLoad()
                 return try await runtime.environments()
@@ -352,8 +677,9 @@ final class NativeMultiEnvironmentTests: XCTestCase {
 
     func testAggregateRefreshRetriesTransientEnvironmentLoadFailures() async throws {
         let loader = FailOnceAggregateEnvironmentLoader()
-        let fixture = try await makeFixture(
+        let fixture = try await Self.makeFixture(
             aggregateRefreshInterval: .milliseconds(5),
+            aggregateFailureRefreshInterval: .milliseconds(5),
             aggregateEnvironmentLoader: { runtime in
                 try await loader.load(from: runtime)
             }
@@ -370,7 +696,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
 
     func testSameClientSnapshotRestartsAggregateRefresh() async throws {
         let loader = BlockingFirstAggregateEnvironmentLoader()
-        let fixture = try await makeFixture(
+        let fixture = try await Self.makeFixture(
             aggregateRefreshInterval: .milliseconds(5),
             aggregateEnvironmentLoader: { runtime in
                 try await loader.load(from: runtime)
@@ -391,7 +717,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
     }
 
     func testDuplicateWireIDsRemainDistinctAndRouteByEnvironment() async throws {
-        let fixture = try await makeFixture(duplicateIDs: true)
+        let fixture = try await Self.makeFixture(duplicateIDs: true)
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
         let snapshot = try await fixture.client.initialSnapshot()
@@ -414,7 +740,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
     }
 
     func testPassiveCreateUsesOwningProjectDefaultAndFallbackRemainsRoutable() async throws {
-        let fixture = try await makeFixture()
+        let fixture = try await Self.makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
 
         let snapshot = try await fixture.client.initialSnapshot()
@@ -448,7 +774,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
     }
 
     func testPassiveCreateRecoversACommittedThreadAfterItsReplyIsLost() async throws {
-        let fixture = try await makeFixture()
+        let fixture = try await Self.makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let snapshot = try await fixture.client.initialSnapshot()
         let project = try XCTUnwrap(
@@ -473,7 +799,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
     }
 
     func testUnarchiveImmediatelyRestoresLiveThreadWhenRefreshIsUnavailable() async throws {
-        let fixture = try await makeFixture()
+        let fixture = try await Self.makeFixture()
         defer { try? FileManager.default.removeItem(at: fixture.directory) }
         let initial = try await fixture.client.initialSnapshot()
         let thread = try XCTUnwrap(
@@ -508,7 +834,7 @@ final class NativeMultiEnvironmentTests: XCTestCase {
     }
 
     func testHTTPFallbackKeepsLiveConnectionReconnecting() async throws {
-        let fixture = try await makeFixture(
+        let fixture = try await Self.makeFixture(
             fallbackPollingInitialDelay: .milliseconds(40),
             fallbackPollingInterval: .seconds(2)
         )
@@ -554,22 +880,29 @@ final class NativeMultiEnvironmentTests: XCTestCase {
         await fixture.client.disconnect()
     }
 
-    private func makeFixture(
+    fileprivate static func makeFixture(
         duplicateIDs: Bool = false,
+        passiveSequence: Int = 1,
+        includeThirdEnvironment: Bool = false,
         repositoryIdentity: RepositoryIdentity? = nil,
         pullRequestsAvailable: Bool = false,
         webSocketConnector: any WebSocketConnecting = UnavailableMultiEnvironmentWebSocketConnector(),
         rpcConnectionWaitTimeout: Duration = .milliseconds(5),
         fallbackPollingInitialDelay: Duration = .seconds(3),
         fallbackPollingInterval: Duration = .seconds(2),
-        aggregateRefreshInterval: Duration = .seconds(20),
+        aggregateRefreshInterval: Duration = NativeFeatureClient.defaultAggregateRefreshInterval,
+        aggregateIdleRefreshInterval: Duration = NativeFeatureClient.defaultAggregateIdleRefreshInterval,
+        aggregateFailureRefreshInterval: Duration = NativeFeatureClient.defaultAggregateFailureRefreshInterval,
+        aggregateRefreshSleep: @escaping @Sendable (Duration) async throws -> Void = {
+            try await Task.sleep(for: $0)
+        },
         aggregateEnvironmentLoader: @escaping @Sendable (EnvironmentRuntime) async throws -> [Environment] = {
             try await $0.environments()
         }
     ) async throws -> MultiEnvironmentFixture {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("t3-native-multi-\(UUID().uuidString)", isDirectory: true)
-        let environments = [
+        var environments = [
             Environment(
                 id: "one",
                 label: "Left Book",
@@ -593,37 +926,63 @@ final class NativeMultiEnvironmentTests: XCTestCase {
                 )
             ),
         ]
+        if includeThirdEnvironment {
+            environments.append(
+                Environment(
+                    id: "three",
+                    label: "Third Box",
+                    httpBaseURL: URL(string: "https://three.example")!,
+                    webSocketBaseURL: URL(string: "wss://three.example")!,
+                    descriptor: try multiEnvironmentDescriptor(
+                        environmentID: "three",
+                        label: "Third Box",
+                        pullRequestsAvailable: pullRequestsAvailable
+                    )
+                )
+            )
+        }
         let store = EnvironmentStore(
             fileURL: directory.appendingPathComponent("environments.json")
         )
         try await store.save(environments)
         try await store.setActiveEnvironment(id: "one")
-        let transport = MultiEnvironmentHTTPTransport(
-            shells: [
-                "one.example": multiEnvironmentShell(
-                    projectID: duplicateIDs ? "project-shared" : "project-one",
-                    threadID: duplicateIDs ? "thread-shared" : "thread-one",
-                    title: "Local work",
-                    repositoryIdentity: repositoryIdentity
-                ),
-                "two.example": multiEnvironmentShell(
-                    projectID: duplicateIDs ? "project-shared" : "project-two",
-                    threadID: duplicateIDs ? "thread-shared" : "thread-two",
-                    title: "Remote work",
-                    providerID: "claudeAgent",
-                    modelID: "claude-opus-4-1",
-                    repositoryIdentity: repositoryIdentity
-                ),
-            ]
-        )
+        var shells = [
+            "one.example": multiEnvironmentShell(
+                projectID: duplicateIDs ? "project-shared" : "project-one",
+                threadID: duplicateIDs ? "thread-shared" : "thread-one",
+                title: "Local work",
+                repositoryIdentity: repositoryIdentity
+            ),
+            "two.example": multiEnvironmentShell(
+                projectID: duplicateIDs ? "project-shared" : "project-two",
+                threadID: duplicateIDs ? "thread-shared" : "thread-two",
+                title: "Remote work",
+                providerID: "claudeAgent",
+                modelID: "claude-opus-4-1",
+                repositoryIdentity: repositoryIdentity,
+                snapshotSequence: passiveSequence
+            ),
+        ]
+        if includeThirdEnvironment {
+            shells["three.example"] = multiEnvironmentShell(
+                projectID: "project-three",
+                threadID: "thread-three",
+                title: "Third work",
+                providerID: "codex",
+                modelID: "gpt-5.6-sol"
+            )
+        }
+        let transport = MultiEnvironmentHTTPTransport(shells: shells)
+        var environmentCredentials = [
+            "one": EnvironmentCredential(accessToken: "one-token"),
+            "two": EnvironmentCredential(accessToken: "two-token"),
+        ]
+        if includeThirdEnvironment {
+            environmentCredentials["three"] = EnvironmentCredential(accessToken: "three-token")
+        }
         let runtime = EnvironmentRuntime(
             environmentStore: store,
-            credentialStore: InMemoryCredentialStore(
-                credentials: [
-                    "one": EnvironmentCredential(accessToken: "one-token"),
-                    "two": EnvironmentCredential(accessToken: "two-token"),
-                ]
-            ),
+            credentialStore: InMemoryCredentialStore(credentials: environmentCredentials),
             httpTransport: transport,
             webSocketConnector: webSocketConnector,
             rpcConnectionWaitTimeout: rpcConnectionWaitTimeout
@@ -640,9 +999,127 @@ final class NativeMultiEnvironmentTests: XCTestCase {
                 fallbackPollingInitialDelay: fallbackPollingInitialDelay,
                 fallbackPollingInterval: fallbackPollingInterval,
                 aggregateRefreshInterval: aggregateRefreshInterval,
+                aggregateIdleRefreshInterval: aggregateIdleRefreshInterval,
+                aggregateFailureRefreshInterval: aggregateFailureRefreshInterval,
+                aggregateRefreshSleep: aggregateRefreshSleep,
                 aggregateEnvironmentLoader: aggregateEnvironmentLoader
             )
         )
+    }
+}
+
+@Suite("Native passive thread refresh")
+@MainActor
+struct NativePassiveThreadRefreshTests {
+    @Test(
+        "Passive thread events arrive within five seconds and stay fast after changes",
+        .timeLimit(.minutes(1))
+    )
+    func passiveThreadEventsArriveWithinFiveSecondsAndStayFastAfterChanges() async throws {
+        let refreshSleep = ControllableAggregateRefreshSleep()
+        let fixture = try await NativeMultiEnvironmentTests.makeFixture(
+            aggregateRefreshSleep: {
+                try await refreshSleep.sleep(for: $0)
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        let initial = try await fixture.client.initialSnapshot()
+        let thread = try #require(
+            initial.threads.first(where: { $0.environmentID == "two" })
+        )
+        let updatedTitle = "Passive work updated automatically"
+        let eventProbe = ThreadTitleEventProbe(
+            events: fixture.client.events(),
+            threadID: thread.id,
+            title: updatedTitle
+        )
+        eventProbe.start()
+
+        let firstCadence = await refreshSleep.waitUntilRequested(count: 1)
+        #expect(firstCadence == .seconds(5))
+        await fixture.transport.setShell(
+            multiEnvironmentShell(
+                projectID: "project-two",
+                threadID: "thread-two",
+                title: updatedTitle,
+                providerID: "claudeAgent",
+                modelID: "claude-opus-4-1"
+            ),
+            host: "two.example"
+        )
+        await refreshSleep.resume()
+
+        await eventProbe.waitUntilObserved()
+        #expect(eventProbe.didObserveTitle())
+        let changedCadence = await refreshSleep.waitUntilRequested(count: 2)
+        #expect(changedCadence == .seconds(5))
+        await fixture.client.disconnect()
+    }
+
+    @Test("Passive refresh uses ten seconds when work is unchanged")
+    func passiveRefreshUsesTenSecondsWhenWorkIsUnchanged() async throws {
+        let refreshSleep = ControllableAggregateRefreshSleep()
+        let fixture = try await NativeMultiEnvironmentTests.makeFixture(
+            aggregateRefreshSleep: {
+                try await refreshSleep.sleep(for: $0)
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        _ = try await fixture.client.initialSnapshot()
+
+        let firstCadence = await refreshSleep.waitUntilRequested(count: 1)
+        #expect(firstCadence == .seconds(5))
+        await refreshSleep.resume()
+        let idleCadence = await refreshSleep.waitUntilRequested(count: 2)
+        #expect(idleCadence == .seconds(10))
+        await fixture.client.disconnect()
+    }
+
+    @Test("A failed passive environment backs off without slowing an active peer")
+    func failedPassiveEnvironmentBacksOffWithoutSlowingActivePeer() async throws {
+        let refreshSleep = ControllableAggregateRefreshSleep()
+        let fixture = try await NativeMultiEnvironmentTests.makeFixture(
+            includeThirdEnvironment: true,
+            aggregateRefreshSleep: {
+                try await refreshSleep.sleep(for: $0)
+            }
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.directory) }
+        _ = try await fixture.client.initialSnapshot()
+        await fixture.transport.setShell(
+            multiEnvironmentShell(
+                projectID: "project-two",
+                threadID: "thread-two",
+                title: "Remote work",
+                providerID: "claudeAgent",
+                modelID: "claude-opus-4-1",
+                backgroundLiveness: .working
+            ),
+            host: "two.example"
+        )
+        await fixture.transport.setReachable(false, host: "three.example")
+
+        let firstCadence = await refreshSleep.waitUntilRequested(count: 1)
+        #expect(firstCadence == .seconds(5))
+        await refreshSleep.resume()
+        let secondCadence = await refreshSleep.waitUntilRequested(count: 2)
+        #expect(secondCadence == .seconds(5))
+        let initialFailedReadCount = await fixture.transport.shellReadCount(host: "three.example")
+        #expect(initialFailedReadCount == 2)
+
+        for requestCount in 2...4 {
+            await refreshSleep.resume()
+            let cadence = await refreshSleep.waitUntilRequested(count: requestCount + 1)
+            #expect(cadence == .seconds(5))
+            let failedReadCount = await fixture.transport.shellReadCount(host: "three.example")
+            #expect(failedReadCount == 2)
+        }
+
+        await refreshSleep.resume()
+        _ = await refreshSleep.waitUntilRequested(count: 6)
+        let retriedReadCount = await fixture.transport.shellReadCount(host: "three.example")
+        #expect(retriedReadCount == 3)
+        await fixture.client.disconnect()
     }
 }
 
@@ -822,6 +1299,102 @@ private actor RuntimeReplacementHTTPTransport: HTTPTransport {
     }
 }
 
+@MainActor
+private final class ThreadTitleEventProbe {
+    private let events: AsyncStream<FeatureEvent>
+    private let threadID: String
+    private let title: String
+    private var observed = false
+    private var observedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var task: Task<Void, Never>?
+
+    init(events: AsyncStream<FeatureEvent>, threadID: String, title: String) {
+        self.events = events
+        self.threadID = threadID
+        self.title = title
+    }
+
+    func start() {
+        task = Task { [weak self] in
+            guard let self else { return }
+            for await event in events {
+                switch event {
+                case let .thread(thread):
+                    observed = thread.id == threadID && thread.title == title
+                case let .snapshot(snapshot):
+                    observed = snapshot.threads.contains {
+                        $0.id == self.threadID && $0.title == self.title
+                    }
+                case .connection, .threadRemoved, .detail, .detailDelta, .threadSync, .failure:
+                    observed = false
+                }
+                if observed {
+                    observedWaiters.forEach { $0.resume() }
+                    observedWaiters.removeAll()
+                    return
+                }
+            }
+        }
+    }
+
+    func didObserveTitle() -> Bool {
+        observed
+    }
+
+    func waitUntilObserved() async {
+        guard observed == false else { return }
+        await withCheckedContinuation { continuation in
+            observedWaiters.append(continuation)
+        }
+    }
+
+    deinit {
+        task?.cancel()
+    }
+}
+
+private actor ControllableAggregateRefreshSleep {
+    private var requestedCadences: [Duration] = []
+    private var requestWaiters: [(
+        count: Int,
+        continuation: CheckedContinuation<Duration, Never>
+    )] = []
+    private var sleepContinuation: CheckedContinuation<Void, Never>?
+
+    func sleep(for cadence: Duration) async throws {
+        requestedCadences.append(cadence)
+        let satisfied = requestWaiters.filter { requestedCadences.count >= $0.count }
+        requestWaiters.removeAll { requestedCadences.count >= $0.count }
+        satisfied.forEach {
+            $0.continuation.resume(returning: requestedCadences[$0.count - 1])
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    continuation.resume()
+                } else {
+                    sleepContinuation = continuation
+                }
+            }
+        } onCancel: {
+            Task { await self.resume() }
+        }
+        try Task.checkCancellation()
+    }
+
+    func waitUntilRequested(count: Int) async -> Duration {
+        if requestedCadences.count >= count { return requestedCadences[count - 1] }
+        return await withCheckedContinuation { continuation in
+            requestWaiters.append((count, continuation))
+        }
+    }
+
+    func resume() {
+        sleepContinuation?.resume()
+        sleepContinuation = nil
+    }
+}
+
 private struct MultiEnvironmentFixture {
     let directory: URL
     let transport: MultiEnvironmentHTTPTransport
@@ -831,8 +1404,10 @@ private struct MultiEnvironmentFixture {
 private actor MultiEnvironmentHTTPTransport: HTTPTransport {
     private let shells: [String: OrchestrationShellSnapshot]
     private var shellData: [String: Data]
+    private var detailData: [String: [String: Data]] = [:]
     private var reachableHosts: Set<String>
     private var shellReadsEnabledHosts: Set<String>
+    private var shellReadCounts: [String: Int] = [:]
     private var dispatched: [MultiEnvironmentDispatchRecord] = []
     private var hostsDroppingNextCreateReply = Set<String>()
 
@@ -863,6 +1438,13 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
         shellData[host] = try! JSONEncoder.t3.encode(shell)
     }
 
+    func setDetail(
+        _ detail: OrchestrationThreadDetailSnapshot,
+        host: String
+    ) {
+        detailData[host, default: [:]][detail.thread.id] = try! JSONEncoder.t3.encode(detail)
+    }
+
     func dispatchHosts() -> [String] {
         dispatched.map(\.host)
     }
@@ -871,16 +1453,23 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
         dispatched
     }
 
+    func shellReadCount(host: String) -> Int {
+        shellReadCounts[host, default: 0]
+    }
+
     func dropNextCreateReply(host: String) {
         hostsDroppingNextCreateReply.insert(host)
     }
 
     func data(for request: URLRequest) throws -> (Data, HTTPURLResponse) {
         let host = request.url?.host ?? ""
+        let path = request.url?.path ?? ""
+        if path == "/api/orchestration/shell" {
+            shellReadCounts[host, default: 0] += 1
+        }
         guard reachableHosts.contains(host) else {
             throw URLError(.cannotConnectToHost)
         }
-        let path = request.url?.path ?? ""
         if path == "/api/orchestration/shell",
            shellReadsEnabledHosts.contains(host),
            let data = shellData[host] {
@@ -888,6 +1477,9 @@ private actor MultiEnvironmentHTTPTransport: HTTPTransport {
         }
         if path.hasPrefix("/api/orchestration/threads/") {
             let threadID = request.url?.lastPathComponent.removingPercentEncoding ?? "thread"
+            if let data = detailData[host]?[threadID] {
+                return (data, multiEnvironmentResponse(request))
+            }
             let projectID = shells[host]?.threads
                 .first(where: { $0.id == threadID })?
                 .projectId ?? shells[host]?.projects.first?.id ?? "project"
@@ -947,6 +1539,120 @@ private struct MultiEnvironmentDispatchRecord: Sendable {
 private struct UnavailableMultiEnvironmentWebSocketConnector: WebSocketConnecting {
     func connect(to _: URL) async throws -> any WebSocketConnection {
         throw URLError(.cannotConnectToHost)
+    }
+}
+
+private actor MultiEnvironmentConfigurationServer {
+    private var settingsByHost: [String: [String: JSONValue]] = [:]
+    private var settingsUpdateHosts: [String] = []
+    private let restartSupportHosts: Set<String>
+
+    init(restartSupportHosts: Set<String> = []) {
+        self.restartSupportHosts = restartSupportHosts
+    }
+
+    func updatedHosts() -> [String] { settingsUpdateHosts }
+    func settings(host: String) -> [String: JSONValue] { settingsByHost[host] ?? [:] }
+
+    func response(to request: JSONValue, host: String) throws -> JSONValue? {
+        guard let tag = request["tag"]?.stringValue,
+              case let .number(id)? = request["id"] else { return nil }
+        let value: JSONValue
+        switch tag {
+        case RPCMethod.subscribeServerConfig.rawValue:
+            return .object([
+                "_tag": .string("Chunk"), "requestId": .number(id),
+                "values": .array([.object([
+                    "type": .string("snapshot"), "config": config(host: host),
+                ])]),
+            ])
+        case RPCMethod.serverRefreshProviders.rawValue:
+            value = .object(["providers": .array([.object([
+                "instanceId": .string("codex-\(host)"), "driver": .string("codex"),
+                "enabled": .bool(true), "installed": .bool(true), "status": .string("ready"),
+                "auth": .object(["status": .string("authenticated")]),
+                "checkedAt": .string("2026-09-04T12:00:00.000Z"), "models": .array([]),
+            ])])])
+        case RPCMethod.serverUpdateSettings.rawValue:
+            guard case let .object(patch)? = request["payload"]?["patch"] else {
+                throw URLError(.badServerResponse)
+            }
+            settingsUpdateHosts.append(host)
+            settingsByHost[host, default: [:]].merge(patch) { _, next in next }
+            value = .object(settingsByHost[host] ?? [:])
+        case RPCMethod.getArchivedShellSnapshot.rawValue:
+            value = try JSONValue.encode(OrchestrationShellSnapshot(
+                snapshotSequence: 0, projects: [], threads: [], updatedAt: "2026-09-04T12:00:00.000Z"
+            ))
+        default:
+            return nil
+        }
+        return .object([
+            "_tag": .string("Exit"), "requestId": .number(id),
+            "exit": .object(["_tag": .string("Success"), "value": value]),
+        ])
+    }
+
+    private func config(host: String) -> JSONValue {
+        let environmentID = host == "one.example" ? "one" : "two"
+        return .object([
+            "providers": .array([]), "settings": .object(settingsByHost[host] ?? [:]),
+            "environment": .object([
+                "environmentId": .string(environmentID), "label": .string(host),
+                "platform": .object(["os": .string("darwin"), "arch": .string("arm64")]),
+                "serverVersion": .string("1.0.0"),
+                "capabilities": .object([
+                    "threadAutoSettlement": .bool(true), "environmentIcon": .bool(true),
+                    "threadRestartContinuation": .bool(restartSupportHosts.contains(host)),
+                ]),
+            ]),
+        ])
+    }
+}
+
+private struct MultiEnvironmentConfigurationConnector: WebSocketConnecting {
+    let server: MultiEnvironmentConfigurationServer
+
+    func connect(to url: URL) -> any WebSocketConnection {
+        MultiEnvironmentConfigurationConnection(host: url.host ?? "", server: server)
+    }
+}
+
+private actor MultiEnvironmentConfigurationConnection: WebSocketConnection {
+    private let host: String
+    private let server: MultiEnvironmentConfigurationServer
+    private var responses: [Data] = []
+    private var receiver: CheckedContinuation<Data, Error>?
+    private var closed = false
+
+    init(host: String, server: MultiEnvironmentConfigurationServer) {
+        self.host = host
+        self.server = server
+    }
+
+    func send(_ data: Data) async throws {
+        guard !closed else { throw URLError(.networkConnectionLost) }
+        let request = try JSONDecoder.t3.decode(JSONValue.self, from: data)
+        guard let response = try await server.response(to: request, host: host) else { return }
+        let data = try JSONEncoder.t3.encode(response)
+        if let receiver {
+            self.receiver = nil
+            receiver.resume(returning: data)
+        } else {
+            responses.append(data)
+        }
+    }
+
+    func receive() async throws -> Data {
+        guard !closed else { throw URLError(.networkConnectionLost) }
+        if !responses.isEmpty { return responses.removeFirst() }
+        return try await withCheckedThrowingContinuation { receiver = $0 }
+    }
+
+    func close() {
+        closed = true
+        receiver?.resume(throwing: CancellationError())
+        receiver = nil
     }
 }
 
@@ -1056,19 +1762,22 @@ private func multiEnvironmentDescriptor(
     return try value.decode(EnvironmentDescriptor.self)
 }
 
-private func multiEnvironmentShell(
+func multiEnvironmentShell(
     projectID: String,
     threadID: String,
     title: String,
     providerID: String = "codex",
     modelID: String = "gpt-5.6-sol",
     repositoryIdentity: RepositoryIdentity? = nil,
-    backgroundLiveness: OrchestrationBackgroundLiveness? = nil
+    backgroundLiveness: OrchestrationBackgroundLiveness? = nil,
+    snapshotSequence: Int = 1,
+    settledOverride: String? = nil,
+    settledAt: String? = nil
 ) -> OrchestrationShellSnapshot {
     let timestamp = "2026-07-31T12:00:00.000Z"
     let model = ModelSelection(instanceId: providerID, model: modelID)
     return OrchestrationShellSnapshot(
-        snapshotSequence: 1,
+        snapshotSequence: snapshotSequence,
         projects: [
             OrchestrationProject(
                 id: projectID,
@@ -1096,8 +1805,8 @@ private func multiEnvironmentShell(
                 createdAt: timestamp,
                 updatedAt: timestamp,
                 archivedAt: nil,
-                settledOverride: nil,
-                settledAt: nil,
+                settledOverride: settledOverride,
+                settledAt: settledAt,
                 snoozedUntil: nil,
                 snoozedAt: nil,
                 pinnedAt: nil,
@@ -1113,13 +1822,17 @@ private func multiEnvironmentShell(
     )
 }
 
-private func multiEnvironmentDetail(
+func multiEnvironmentDetail(
     projectID: String,
-    threadID: String
+    threadID: String,
+    snapshotSequence: Int = 2,
+    settledOverride: String? = nil,
+    settledAt: String? = nil,
+    messages: [OrchestrationMessage] = []
 ) -> OrchestrationThreadDetailSnapshot {
     let timestamp = "2026-07-31T12:00:00.000Z"
     return OrchestrationThreadDetailSnapshot(
-        snapshotSequence: 2,
+        snapshotSequence: snapshotSequence,
         thread: OrchestrationThread(
             id: threadID,
             projectId: projectID,
@@ -1133,13 +1846,13 @@ private func multiEnvironmentDetail(
             createdAt: timestamp,
             updatedAt: timestamp,
             archivedAt: nil,
-            settledOverride: nil,
-            settledAt: nil,
+            settledOverride: settledOverride,
+            settledAt: settledAt,
             snoozedUntil: nil,
             snoozedAt: nil,
             pinnedAt: nil,
             deletedAt: nil,
-            messages: [],
+            messages: messages,
             activities: [],
             checkpoints: [],
             session: nil

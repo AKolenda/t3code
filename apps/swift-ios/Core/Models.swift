@@ -94,46 +94,81 @@ public struct EnvironmentDescriptor: Codable, Equatable, Sendable {
     public struct Platform: Codable, Equatable, Sendable {
         public let os: String
         public let arch: String
+        public var machine: String? = nil
     }
 
     public struct Capabilities: Codable, Equatable, Sendable {
+        public struct FileAttachments: Codable, Equatable, Sendable {
+            public let maxUploadBytes: Int
+        }
+
         public let repositoryIdentity: Bool
         public let connectionProbe: Bool?
         public let attachmentUploads: Bool?
+        public let fileAttachments: FileAttachments?
         public let pullRequests: Bool?
         public let threadSettlement: Bool?
+        public let threadAutoSettlement: Bool?
+        public var threadRestartContinuation: Bool? = nil
         public let threadSnooze: Bool?
         public let threadPinning: Bool?
         public let threadTitleRegeneration: Bool?
+        public let threadPullRequestLinking: Bool?
         public let serverSelfUpdate: String?
         public let serverSelfUpdateProgress: Bool?
+        public var environmentIcon: Bool? = nil
+        public var usageLimitSources: Bool? = nil
 
         private enum CodingKeys: String, CodingKey {
             case repositoryIdentity
             case connectionProbe
             case attachmentUploads
+            case fileAttachments
             case pullRequests
             case threadSettlement
+            case threadAutoSettlement
+            case threadRestartContinuation
             case threadSnooze
             case threadPinning
             case threadTitleRegeneration
+            case threadPullRequestLinking
             case serverSelfUpdate
             case serverSelfUpdateProgress
+            case environmentIcon
+            case usageLimitSources
         }
 
         public init(from decoder: any Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
+            environmentIcon = try container.decodeIfPresent(Bool.self, forKey: .environmentIcon)
+            usageLimitSources = try container.decodeIfPresent(Bool.self, forKey: .usageLimitSources)
             repositoryIdentity =
                 try container.decodeIfPresent(Bool.self, forKey: .repositoryIdentity) ?? false
             connectionProbe = try container.decodeIfPresent(Bool.self, forKey: .connectionProbe)
             attachmentUploads = try container.decodeIfPresent(Bool.self, forKey: .attachmentUploads)
+            fileAttachments = try container.decodeIfPresent(
+                FileAttachments.self,
+                forKey: .fileAttachments
+            )
             pullRequests = try container.decodeIfPresent(Bool.self, forKey: .pullRequests)
             threadSettlement = try container.decodeIfPresent(Bool.self, forKey: .threadSettlement)
+            threadAutoSettlement = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .threadAutoSettlement
+            )
+            threadRestartContinuation = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .threadRestartContinuation
+            )
             threadSnooze = try container.decodeIfPresent(Bool.self, forKey: .threadSnooze)
             threadPinning = try container.decodeIfPresent(Bool.self, forKey: .threadPinning)
             threadTitleRegeneration = try container.decodeIfPresent(
                 Bool.self,
                 forKey: .threadTitleRegeneration
+           )
+            threadPullRequestLinking = try container.decodeIfPresent(
+                Bool.self,
+                forKey: .threadPullRequestLinking
             )
             serverSelfUpdate = try container.decodeIfPresent(String.self, forKey: .serverSelfUpdate)
             serverSelfUpdateProgress = try container.decodeIfPresent(
@@ -354,6 +389,14 @@ public struct OrchestrationProject: Codable, Identifiable, Equatable, Sendable {
     public let createdAt: String
     public let updatedAt: String
     public let deletedAt: String?
+    public var projectIcon: ProjectIconOverride? = nil
+}
+
+public struct ProjectIconOverride: Codable, Equatable, Hashable, Sendable {
+    public let kind: String
+    public var name: String? = nil
+    public var color: String? = nil
+    public var emoji: String? = nil
 }
 
 public enum RuntimeMode: String, Codable, CaseIterable, Sendable {
@@ -393,6 +436,20 @@ public enum OrchestrationBackgroundLiveness: String, Codable, Equatable, Sendabl
     case monitoring
 }
 
+public struct ThreadLinkedPullRequest: Codable, Equatable, Hashable, Sendable {
+    public let projectId: String
+    public let repository: String
+    public let number: Int
+    public let url: String
+
+    public init(projectId: String, repository: String, number: Int, url: String) {
+        self.projectId = projectId
+        self.repository = repository
+        self.number = number
+        self.url = url
+    }
+}
+
 public struct OrchestrationThreadShell: Codable, Identifiable, Equatable, Sendable {
     public let id: String
     public let projectId: String
@@ -402,12 +459,16 @@ public struct OrchestrationThreadShell: Codable, Identifiable, Equatable, Sendab
     public let interactionMode: InteractionMode
     public let branch: String?
     public let worktreePath: String?
+    public var linkedPullRequest: ThreadLinkedPullRequest? = nil
+    public var branchPullRequest: ThreadLinkedPullRequest? = nil
     public let latestTurn: OrchestrationLatestTurn?
     public let createdAt: String
     public let updatedAt: String
     public let archivedAt: String?
     public let settledOverride: String?
     public let settledAt: String?
+    public var unsettledAt: String? = nil
+    public var activeOrderKey: String? = nil
     public let snoozedUntil: String?
     public let snoozedAt: String?
     public let pinnedAt: String?
@@ -475,12 +536,16 @@ public struct OrchestrationThread: Codable, Identifiable, Equatable, Sendable {
     public let interactionMode: InteractionMode
     public let branch: String?
     public let worktreePath: String?
+    public var linkedPullRequest: ThreadLinkedPullRequest? = nil
+    public var branchPullRequest: ThreadLinkedPullRequest? = nil
     public let latestTurn: OrchestrationLatestTurn?
     public let createdAt: String
     public let updatedAt: String
     public let archivedAt: String?
     public let settledOverride: String?
     public let settledAt: String?
+    public var unsettledAt: String? = nil
+    public var activeOrderKey: String? = nil
     public let snoozedUntil: String?
     public let snoozedAt: String?
     public let pinnedAt: String?

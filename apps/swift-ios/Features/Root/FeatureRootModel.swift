@@ -18,6 +18,11 @@ struct FeatureDetailRenderUpdate: Equatable {
     let change: FeatureDetailRenderChange
 }
 
+enum FeatureThreadLoadState: Equatable {
+    case loading
+    case failed(String)
+}
+
 @MainActor
 public final class FeatureRootModel: ObservableObject {
     private static let maximumRetainedThreadDetails = 6
@@ -26,11 +31,14 @@ public final class FeatureRootModel: ObservableObject {
         let id: UUID
         let settled: Bool
         let settledAt: Date?
+        let unsettledAt: Date?
 
         func apply(to thread: inout FeatureThread) {
             thread.isSettled = settled
             thread.keepsActive = !settled
+            thread.settlementFacts?.settlementOverride = settled ? .settled : .active
             thread.settledAt = settledAt
+            thread.unsettledAt = unsettledAt
             if settled {
                 thread.pinnedAt = nil
             }
@@ -38,7 +46,12 @@ public final class FeatureRootModel: ObservableObject {
     }
 
     @Published public private(set) var snapshot = FeatureSnapshot()
+    @Published private(set) var pullRequestsByThreadID: [String: HomeThreadPullRequestPresentation] = [:]
+    private var pullRequestObservationIdentities: [String: String] = [:]
     @Published public private(set) var details: [String: FeatureThreadDetail] = [:]
+    @Published private(set) var detailLoadStates: [String: FeatureThreadLoadState] = [:]
+    @Published private(set) var threadSyncStates: [String: FeatureThreadSyncState] = [:]
+    private var backgroundedAt: Date?
     /// Advances whenever a Home presentation input changes.
     @Published public private(set) var homePresentationRevision: UInt64 = 0
     /// Advances when a Home-visible thread is inserted, removed, or changed.
@@ -57,6 +70,10 @@ public final class FeatureRootModel: ObservableObject {
     let client: any FeatureClient
     private let outboxStore: FeatureOutboxStore
     private let draftStore: FeatureComposerDraftStore
+    public private(set) lazy var attachmentUploads = FeatureAttachmentUploadCoordinator(
+        client: client,
+        draftStore: draftStore
+    )
     private var pendingSubmissionsByID: [String: FeatureQueuedSubmission] = [:]
     private var pendingThreadsByID: [String: FeatureThread] = [:]
     private var pendingSettlementMutations: [String: PendingSettlementMutation] = [:]
@@ -66,11 +83,16 @@ public final class FeatureRootModel: ObservableObject {
     private var detailLoadGeneration: UInt64 = 0
     private var detailLoadRevisions: [String: UInt64] = [:]
     private var detailLoadRequestRevision: UInt64 = 0
+    private var activeDetailLoadRequests: [String: UInt64] = [:]
     private var storedDetailLoadRequestRevisions: [String: UInt64] = [:]
     private var detailMetadataRevisions: [String: UInt64] = [:]
     private var outboxDrainTask: Task<Void, Never>?
     private var outboxRetryAttempt = 0
     private var outboxGeneration: UInt64 = 0
+    private var lastPersistedSettings = FeatureSettings()
+    private var settingsWriteTask: Task<Void, Error>?
+    private var settingsWriteGeneration: UInt64 = 0
+    private var settingsChangeRevision: UInt64 = 0
 
     public init(
         client: any FeatureClient,
@@ -109,6 +131,18 @@ public final class FeatureRootModel: ObservableObject {
         }
     }
 
+    func applicationDidEnterBackground(at date: Date = .now) {
+        backgroundedAt = date
+    }
+
+    func applicationDidBecomeActive(at date: Date = .now) async {
+        guard let backgroundedAt else { return }
+        self.backgroundedAt = nil
+        await client.resumeAfterBackground(
+            reconnect: date.timeIntervalSince(backgroundedAt) >= 10
+        )
+    }
+
     /// Background refresh is deliberately separate from `reload()`: native
     /// clients must not mount WebSocket streams or timers for a bounded BG task.
     public func refreshInBackground() async -> Bool {
@@ -123,9 +157,31 @@ public final class FeatureRootModel: ObservableObject {
         }
     }
 
+    @discardableResult
+    public func refreshProviders(environmentID: String) async -> Bool {
+        await perform {
+            let providers = try await client.refreshProviders(environmentID: environmentID)
+            var byEnvironment = snapshot.providersByEnvironment ?? [:]
+            byEnvironment[environmentID] = providers
+            snapshot.providersByEnvironment = byEnvironment
+        }
+    }
+
     public func reloadAfterConnection() async {
         clearDetails()
         await reload()
+    }
+
+    func refreshWorkspaceProviders(environmentID: String, cwd: String, instanceID: String) async {
+        do {
+            let providers = try await client.refreshWorkspaceProviders(environmentID: environmentID, cwd: cwd, instanceID: instanceID)
+            try Task.checkCancellation()
+            var byEnvironment = snapshot.providersByEnvironment ?? [:]
+            byEnvironment[environmentID] = providers
+            snapshot.providersByEnvironment = byEnvironment
+        } catch {
+            // Older or offline servers retain their last catalog. Do not block composing.
+        }
     }
 
     public func pair(endpoint: String, token: String?) async -> Bool {
@@ -350,7 +406,7 @@ public final class FeatureRootModel: ObservableObject {
                 projectID: request.projectID,
                 prompt: prompt,
                 selection: request.selection,
-                runtimeMode: request.runtimeMode.mobileNormalized,
+                runtimeMode: request.runtimeMode,
                 interactionMode: request.interactionMode.mobileNormalized,
                 workspaceMode: request.workspaceMode,
                 branch: request.branch,
@@ -430,16 +486,18 @@ public final class FeatureRootModel: ObservableObject {
         guard let previous = snapshot.threads.first(where: { $0.id == id }) else {
             return false
         }
-        if settled, !previous.canSettleNow {
+        if settled, !previous.canSettleNow() {
             errorMessage = "This thread still needs attention. Resolve or stop it first."
             return false
         }
 
         let environment = currentEnvironmentIdentity
+        let now = Date.now
         let mutation = PendingSettlementMutation(
             id: UUID(),
             settled: settled,
-            settledAt: settled ? Date.now : nil
+            settledAt: settled ? now : nil,
+            unsettledAt: settled ? nil : now
         )
         pendingSettlementMutations[id] = mutation
         mutateThread(id: id) { mutation.apply(to: &$0) }
@@ -457,7 +515,9 @@ public final class FeatureRootModel: ObservableObject {
             guard $0.isSettled == settled, $0.settledAt == mutation.settledAt else { return }
             $0.isSettled = previous.isSettled
             $0.keepsActive = previous.keepsActive
+            $0.settlementFacts?.settlementOverride = previous.settlementFacts?.settlementOverride
             $0.settledAt = previous.settledAt
+            $0.unsettledAt = previous.unsettledAt
             $0.pinnedAt = previous.pinnedAt
         }
         return false
@@ -491,12 +551,43 @@ public final class FeatureRootModel: ObservableObject {
         }
     }
 
+    func updatePullRequest(
+        _ pullRequest: HomeThreadPullRequestPresentation?,
+        threadID: String,
+        observationIdentity: String
+    ) {
+        guard snapshot.threads.first(where: { $0.id == threadID })?
+            .pullRequestObservationIdentity == observationIdentity else {
+            return
+        }
+        if pullRequest == nil, pullRequestsByThreadID[threadID] == nil { return }
+        if pullRequestsByThreadID[threadID] == pullRequest,
+           pullRequestObservationIdentities[threadID] == observationIdentity {
+            return
+        }
+        if let pullRequest {
+            pullRequestsByThreadID[threadID] = pullRequest
+            pullRequestObservationIdentities[threadID] = observationIdentity
+        } else {
+            pullRequestsByThreadID.removeValue(forKey: threadID)
+            pullRequestObservationIdentities.removeValue(forKey: threadID)
+        }
+        homePresentationRevision &+= 1
+    }
+
+    func isEffectivelySettled(_ thread: FeatureThread) -> Bool {
+        thread.isEffectivelySettled()
+    }
+
     public func setRuntimeMode(_ id: String, mode: FeatureRuntimeMode) async {
-        let mode = mode.mobileNormalized
-        let environment = currentEnvironmentIdentity
+        guard let environmentID = snapshot.threads.first(where: { $0.id == id })?.environmentID else {
+            return
+        }
         await perform {
             try await client.setRuntimeMode(id: id, mode: mode)
-            guard currentEnvironmentIdentity == environment else { return }
+            guard snapshot.threads.first(where: { $0.id == id })?.environmentID == environmentID else {
+                return
+            }
             mutateThread(id: id) { $0.runtimeMode = mode }
         }
     }
@@ -521,7 +612,7 @@ public final class FeatureRootModel: ObservableObject {
         }
     }
 
-    public func detail(for id: String, force: Bool = false) async -> FeatureThreadDetail? {
+    public func detail(for id: String, force: Bool = false, fresh: Bool = false) async -> FeatureThreadDetail? {
         if !force, let cached = details[id] {
             return cached
         }
@@ -532,8 +623,18 @@ public final class FeatureRootModel: ObservableObject {
         let threadBeforeLoad = snapshot.threads.first { $0.id == id }
         detailLoadRequestRevision &+= 1
         let loadRequestRevision = detailLoadRequestRevision
+        activeDetailLoadRequests[id] = loadRequestRevision
+        detailLoadStates[id] = .loading
+        defer {
+            if activeDetailLoadRequests[id] == loadRequestRevision {
+                activeDetailLoadRequests[id] = nil
+                if detailLoadStates[id] == .loading {
+                    detailLoadStates[id] = nil
+                }
+            }
+        }
         do {
-            var detail = try await client.loadThread(id: id)
+            var detail = try await client.loadThread(id: id, fresh: fresh)
             guard currentEnvironmentIdentity == environment else {
                 return details[id]
             }
@@ -558,8 +659,15 @@ public final class FeatureRootModel: ObservableObject {
             upsert(detail.thread)
             return detail
         } catch {
-            if !Self.isBenignCancellation(error) {
-                errorMessage = error.localizedDescription
+            if !Self.isBenignCancellation(error),
+               activeDetailLoadRequests[id] == loadRequestRevision,
+               detailLoadGeneration == loadGenerationBeforeLoad,
+               detailLoadRevisions[id] == loadRevisionBeforeLoad,
+               currentEnvironmentIdentity == environment {
+                detailLoadStates[id] = .failed(error.localizedDescription)
+                if details[id] == nil {
+                    errorMessage = error.localizedDescription
+                }
             }
             return details[id]
         }
@@ -652,6 +760,7 @@ public final class FeatureRootModel: ObservableObject {
                 threadID: submission.threadID,
                 text: trimmed,
                 selection: submission.selection,
+                runtimeMode: queued.runtimeMode,
                 attachments: uploads,
                 identity: identity
             )
@@ -748,36 +857,106 @@ public final class FeatureRootModel: ObservableObject {
 
     @discardableResult
     public func saveSettings(_ settings: FeatureSettings) async -> Bool {
+        snapshot.settings = settings
+        settingsChangeRevision &+= 1
+        let revision = settingsChangeRevision
+        let saved = await perform {
+            try await enqueueSettingsWrite(settings)
+        }
+        if !saved, settingsChangeRevision == revision {
+            snapshot.settings = lastPersistedSettings
+        }
+        return saved
+    }
+
+    @discardableResult
+    public func updateAutomaticSettlement(
+        environmentID: String,
+        change: FeatureAutomaticSettlementChange
+    ) async -> Bool {
         await perform {
-            try await client.saveSettings(settings)
-            snapshot.settings = settings
+            let updated = try await client.updateAutomaticSettlement(
+                environmentID: environmentID,
+                change: change
+            )
+            guard var preferences = snapshot.preferencesByEnvironment?[environmentID],
+                  preferences.automaticSettlement != nil else {
+                return
+            }
+            preferences.automaticSettlement = updated
+            snapshot.preferencesByEnvironment?[environmentID] = preferences
         }
     }
 
-    /// Applies appearance optimistically so selecting a theme updates every
-    /// surface immediately, then persists just that preference in the current
-    /// settings snapshot. Other unsaved Settings edits remain drafts.
+    /// Applies one preference immediately and queues it with any other pending changes.
+    @discardableResult
+    public func savePreference<Value>(
+        _ keyPath: WritableKeyPath<FeatureSettings, Value>,
+        value: Value
+    ) async -> Bool {
+        await saveSettingsChange { $0[keyPath: keyPath] = value }
+    }
+
     @discardableResult
     public func saveAppearance(_ appearance: FeatureAppearance) async -> Bool {
-        let previous = snapshot.settings
-        guard previous.appearance != appearance else { return true }
+        await savePreference(\.appearance, value: appearance)
+    }
 
+    @discardableResult
+    public func saveTextSizes(
+        textSize: FeatureTextSizeAdjustment,
+        codeSize: FeatureTextSizeAdjustment
+    ) async -> Bool {
+        await saveSettingsChange {
+            $0.textSize = textSize
+            $0.codeSize = codeSize
+        }
+    }
+
+    private func saveSettingsChange(
+        _ change: (inout FeatureSettings) -> Void
+    ) async -> Bool {
+        let previous = snapshot.settings
         var updated = previous
-        updated.appearance = appearance
+        change(&updated)
+        guard updated != previous else { return true }
         snapshot.settings = updated
+        settingsChangeRevision &+= 1
+        let revision = settingsChangeRevision
 
         do {
-            try await client.saveSettings(updated)
+            try await enqueueSettingsWrite(updated)
             return true
         } catch {
-            if snapshot.settings == updated {
-                snapshot.settings = previous
-            }
+            guard settingsChangeRevision == revision else { return false }
+            snapshot.settings = lastPersistedSettings
             if !Self.isBenignCancellation(error) {
                 errorMessage = error.localizedDescription
             }
             return false
         }
+    }
+
+    /// Serializes full-snapshot writes. Only a successful write advances the
+    /// rollback point, so a failed optimistic predecessor is never restored.
+    private func enqueueSettingsWrite(_ settings: FeatureSettings) async throws {
+        let predecessor = settingsWriteTask
+        let write = Task { @MainActor [client] in
+            if let predecessor {
+                _ = await predecessor.result
+            }
+            try await client.saveSettings(settings)
+            lastPersistedSettings = settings
+        }
+        settingsWriteGeneration &+= 1
+        let generation = settingsWriteGeneration
+        settingsWriteTask = write
+        defer {
+            if settingsWriteGeneration == generation {
+                settingsWriteTask = nil
+            }
+        }
+        try await write.value
     }
 
     @discardableResult
@@ -838,6 +1017,13 @@ public final class FeatureRootModel: ObservableObject {
             pendingThreadsByID.removeValue(forKey: value.thread.id)
             store(value, delta: delta)
             upsert(value.thread)
+        case let .threadSync(id, state):
+            if threadSyncStates[id] != state {
+                threadSyncStates[id] = state
+            }
+            if state == .live, case .failed = detailLoadStates[id] {
+                detailLoadStates[id] = nil
+            }
         case let .failure(message):
             errorMessage = message
         }
@@ -845,6 +1031,7 @@ public final class FeatureRootModel: ObservableObject {
 
     private func upsert(_ thread: FeatureThread) {
         let thread = retainingPendingSettlement(in: thread)
+        discardStalePullRequest(for: thread)
         var metadataChanged = false
         if let index = snapshot.threads.firstIndex(where: { $0.id == thread.id }) {
             let previous = snapshot.threads[index]
@@ -881,6 +1068,8 @@ public final class FeatureRootModel: ObservableObject {
         guard let index = snapshot.threads.firstIndex(where: { $0.id == id }) else { return }
         let projectID = snapshot.threads[index].projectID
         snapshot.threads.remove(at: index)
+        pullRequestsByThreadID.removeValue(forKey: id)
+        pullRequestObservationIdentities.removeValue(forKey: id)
         adjustProjectCount(id: projectID, by: -1)
         threadCollectionRevision &+= 1
         homePresentationRevision &+= 1
@@ -893,6 +1082,13 @@ public final class FeatureRootModel: ObservableObject {
 
     private func install(_ value: FeatureSnapshot) {
         var value = value
+        if settingsWriteTask != nil {
+            // A shell refresh can still contain the settings from before a
+            // queued write. Keep both the visible choice and its rollback point.
+            value.settings = snapshot.settings
+        } else {
+            lastPersistedSettings = value.settings
+        }
         for index in value.threads.indices {
             value.threads[index] = retainingPendingSettlement(in: value.threads[index])
         }
@@ -912,6 +1108,13 @@ public final class FeatureRootModel: ObservableObject {
         }
         let nextThreads = value.threads.reduce(into: [String: FeatureThread]()) {
             $0[$1.id] = $1
+        }
+        for thread in value.threads {
+            discardStalePullRequest(for: thread)
+        }
+        for id in Array(pullRequestsByThreadID.keys) where nextThreads[id] == nil {
+            pullRequestsByThreadID.removeValue(forKey: id)
+            pullRequestObservationIdentities.removeValue(forKey: id)
         }
         for id in previousThreads.keys where nextThreads[id] == nil {
             removeDetail(id: id)
@@ -944,6 +1147,15 @@ public final class FeatureRootModel: ObservableObject {
             || value.environments.contains(where: { $0.connectionState == .connected }) {
             scheduleOutboxDrain()
         }
+    }
+
+    private func discardStalePullRequest(for thread: FeatureThread) {
+        guard let cachedIdentity = pullRequestObservationIdentities[thread.id],
+              cachedIdentity != thread.pullRequestObservationIdentity else {
+            return
+        }
+        pullRequestsByThreadID.removeValue(forKey: thread.id)
+        pullRequestObservationIdentities.removeValue(forKey: thread.id)
     }
 
     private func mutateThread(
@@ -989,7 +1201,8 @@ public final class FeatureRootModel: ObservableObject {
                 userInputs: replacingChangedSuffix(current.userInputs, with: prepared.userInputs),
                 page: prepared.page,
                 activeSubagentCount: prepared.activeSubagentCount,
-                backgroundWorkIsActive: prepared.backgroundWorkIsActive
+                backgroundWorkIsActive: prepared.backgroundWorkIsActive,
+                isCompacting: prepared.isCompacting == true
             )
         } ?? prepared
         guard details[id] != next else { return }
@@ -1050,6 +1263,9 @@ public final class FeatureRootModel: ObservableObject {
             detailRecency.removeAll { $0 == id }
         }
         storedDetailLoadRequestRevisions.removeValue(forKey: id)
+        activeDetailLoadRequests.removeValue(forKey: id)
+        detailLoadStates.removeValue(forKey: id)
+        threadSyncStates.removeValue(forKey: id)
         bumpDetailLoadRevision(id: id)
         bumpDetailRevision(id: id, change: .full)
     }
@@ -1058,6 +1274,9 @@ public final class FeatureRootModel: ObservableObject {
         detailLoadGeneration &+= 1
         detailLoadRevisions.removeAll()
         storedDetailLoadRequestRevisions.removeAll()
+        activeDetailLoadRequests.removeAll()
+        detailLoadStates.removeAll()
+        threadSyncStates.removeAll()
         detailMetadataRevisions.removeAll()
         let hadDetails = !details.isEmpty
         details.removeAll()
@@ -1125,6 +1344,7 @@ public final class FeatureRootModel: ObservableObject {
         }
 
         for submission in submissions {
+            setAttachmentOutboxOwnership(true, for: submission)
             if let creation = submission.creation {
                 if snapshot.threads.contains(where: { $0.id == submission.threadID }) {
                     pendingSubmissionsByID[submission.id] = submission
@@ -1174,6 +1394,7 @@ public final class FeatureRootModel: ObservableObject {
         do {
             try await outboxStore.enqueue(submission)
             pendingSubmissionsByID[submission.id] = submission
+            setAttachmentOutboxOwnership(true, for: submission)
             return true
         } catch {
             errorMessage = "Could not safely queue this message: \(error.localizedDescription)"
@@ -1214,8 +1435,8 @@ public final class FeatureRootModel: ObservableObject {
             providerID: submission.selection?.providerID,
             providerName: provider?.name,
             modelID: submission.selection?.modelID,
-            runtimeMode: .fullAccess,
-            interactionMode: .standard
+            runtimeMode: submission.runtimeMode,
+            interactionMode: submission.interactionMode
         )
         pendingThreadsByID[thread.id] = thread
         upsert(thread)
@@ -1243,7 +1464,7 @@ public final class FeatureRootModel: ObservableObject {
                     id: "\(submission.id)-attachment-\(index)",
                     name: attachment.name,
                     mimeType: attachment.mimeType,
-                    sizeBytes: attachment.data.count
+                    sizeBytes: attachment.byteCount ?? attachment.data?.count ?? 0
                 )
             }
         )
@@ -1335,6 +1556,7 @@ public final class FeatureRootModel: ObservableObject {
         }
         pendingCompletionSubmissionIDs.remove(submission.id)
         pendingSubmissionsByID.removeValue(forKey: submission.id)
+        setAttachmentOutboxOwnership(false, for: submission)
         pendingThreadsByID.removeValue(forKey: submission.threadID)
         markQueuedMessageDelivered(submission)
         outboxRetryAttempt = 0
@@ -1365,6 +1587,7 @@ public final class FeatureRootModel: ObservableObject {
         }
         pendingDiscardSubmissionIDs.remove(submission.id)
         pendingSubmissionsByID.removeValue(forKey: submission.id)
+        setAttachmentOutboxOwnership(false, for: submission)
         let wasPendingCreation = pendingThreadsByID.removeValue(forKey: submission.threadID) != nil
         if wasPendingCreation {
             removeThread(id: submission.threadID)
@@ -1377,6 +1600,21 @@ public final class FeatureRootModel: ObservableObject {
         return true
     }
 
+    private func setAttachmentOutboxOwnership(
+        _ owned: Bool,
+        for submission: FeatureQueuedSubmission
+    ) {
+        if owned {
+            attachmentUploads.syncOutboxOwner(
+                ownerID: submission.id,
+                environmentID: submission.environmentID,
+                attachmentIDs: submission.attachments.map(\.id)
+            )
+        } else {
+            attachmentUploads.removeOutboxOwner(ownerID: submission.id)
+        }
+    }
+
     private func removePendingSubmissions(environmentID: String) {
         let removed = pendingSubmissionsByID.values.filter {
             $0.environmentID == environmentID
@@ -1385,6 +1623,7 @@ public final class FeatureRootModel: ObservableObject {
             pendingCompletionSubmissionIDs.remove(submission.id)
             pendingDiscardSubmissionIDs.remove(submission.id)
             pendingSubmissionsByID.removeValue(forKey: submission.id)
+            setAttachmentOutboxOwnership(false, for: submission)
             if pendingThreadsByID.removeValue(forKey: submission.threadID) != nil {
                 removeThread(id: submission.threadID)
                 removeDetail(id: submission.threadID)
@@ -1491,8 +1730,8 @@ public final class FeatureRootModel: ObservableObject {
                             projectID: creation.projectID,
                             prompt: submission.text,
                             selection: submission.selection,
-                            runtimeMode: .fullAccess,
-                            interactionMode: .standard,
+                            runtimeMode: submission.runtimeMode,
+                            interactionMode: submission.interactionMode,
                             workspaceMode: creation.workspaceMode,
                             branch: creation.branch,
                             worktreePath: creation.worktreePath,
@@ -1515,6 +1754,7 @@ public final class FeatureRootModel: ObservableObject {
                             threadID: submission.threadID,
                             text: submission.text,
                             selection: submission.selection,
+                            runtimeMode: submission.runtimeMode,
                             attachments: submission.uploads,
                             identity: submission.identity
                         )
@@ -1577,6 +1817,6 @@ public final class FeatureRootModel: ObservableObject {
 
 private extension FeatureDraftAttachment {
     var upload: FeatureUploadAttachment {
-        FeatureUploadAttachment(data: data, name: filename, mimeType: mimeType)
+        FeatureUploadAttachment(self)
     }
 }

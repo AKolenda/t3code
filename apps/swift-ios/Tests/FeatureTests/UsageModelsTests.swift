@@ -408,6 +408,118 @@ struct UsageModelsTests {
         #expect(state.environments.filter { $0.errorMessage != nil } == [offlineServer])
     }
 
+    @Test
+    func grokUsageMergesWithOlderServersAndAppearsInCharts() {
+        let environments = [
+            FeatureEnvironmentUsage(
+                environmentID: "new", label: "New",
+                summary: summary(contractVersion: 5, provider: .grok, costUsd: 15),
+                errorMessage: nil
+            ),
+            FeatureEnvironmentUsage(
+                environmentID: "older", label: "Older",
+                summary: summary(contractVersion: 4, provider: .codex, costUsd: 10),
+                errorMessage: nil
+            ),
+            FeatureEnvironmentUsage(
+                environmentID: "legacy", label: "Legacy",
+                summary: summary(contractVersion: 3, provider: .claude, costUsd: 5),
+                errorMessage: nil
+            ),
+        ]
+        let merged = UsageMerger.merge(environments)
+        #expect(merged.costUsd == 30)
+        #expect(Set(merged.providers.map(\.provider)) == [.grok, .codex, .claude])
+        #expect(merged.daily.first?.byProvider[.grok]?.costUsd == 15)
+        #expect(merged.models.contains { $0.provider == .grok })
+        #expect(merged.staleEnvironments.isEmpty)
+        #expect(!isCompatibleUsageContractVersion(2))
+        #expect(!isCompatibleUsageContractVersion(6))
+    }
+
+    @Test
+    func versionThreeKeepsDailyUsageButCannotEnterHourlyTotals() throws {
+        let now = try #require(ISO8601DateFormatter().date(from: "2026-08-18T12:00:00Z"))
+        let environment = FeatureEnvironmentUsage(
+            environmentID: "legacy", label: "Legacy",
+            summary: summary(contractVersion: 3, provider: .claude, costUsd: 20)
+        )
+        var state = UsageLoadState(days: 1, now: now)
+        let hourly = state.begin(days: 1, now: now)
+        state.receive([environment], for: hourly)
+
+        #expect(state.merged.costUsd == 0)
+        #expect(state.merged.totalTokens == 0)
+        #expect(state.merged.staleEnvironments == ["legacy"])
+        #expect(!isCompatibleUsageContractVersion(3, resolution: .hour))
+        #expect(isCompatibleUsageContractVersion(4, resolution: .hour))
+        #expect(isCompatibleUsageContractVersion(5, resolution: .hour))
+
+        let daily = state.begin(days: 7, now: now)
+        state.receive([environment], for: daily)
+        #expect(state.merged.costUsd == 20)
+        #expect(state.merged.staleEnvironments.isEmpty)
+        #expect(isCompatibleUsageContractVersion(3, resolution: .day))
+    }
+
+    @Test
+    func firstEnvironmentRendersWhileAnotherIsStillPending() throws {
+        let now = try #require(ISO8601DateFormatter().date(from: "2026-08-18T12:00:00Z"))
+        var state = UsageLoadState(now: now)
+        let request = state.begin(days: 30, now: now)
+        let pending = FeatureEnvironmentUsage(
+            environmentID: "slow", label: "Slow", summary: nil, isPending: true
+        )
+        let ready = FeatureEnvironmentUsage(
+            environmentID: "ready", label: "Ready", summary: summary(provider: .codex, costUsd: 10)
+        )
+
+        state.receive([ready, pending], for: request)
+        #expect(state.merged.costUsd == 10)
+        #expect(state.isLoading)
+        #expect(state.isPartial)
+        #expect(!state.hasPendingCachedTotals)
+
+        state.receive([
+            ready,
+            .init(environmentID: "slow", label: "Slow", summary: nil, errorMessage: "Offline")
+        ], for: request)
+        state.finish(request)
+        #expect(state.merged.costUsd == 10)
+        #expect(!state.isLoading)
+        #expect(!state.isPartial)
+        #expect(state.environments.last?.errorMessage == "Offline")
+    }
+
+    @Test
+    func pendingRefreshRetainsOnlyTheSameWindowsLastScan() throws {
+        let now = try #require(ISO8601DateFormatter().date(from: "2026-08-18T12:00:00Z"))
+        let timeZone = try #require(TimeZone(identifier: "UTC"))
+        var state = UsageLoadState(now: now, timeZone: timeZone)
+        let initial = state.begin(days: 30, now: now, timeZone: timeZone)
+        let previous = FeatureEnvironmentUsage(
+            environmentID: "current", label: "Current", summary: summary(provider: .codex, costUsd: 10)
+        )
+        state.receive([previous], for: initial)
+        state.finish(initial)
+        let pending = FeatureEnvironmentUsage(
+            environmentID: "current", label: "Current", summary: nil, isPending: true
+        )
+
+        let refresh = state.begin(days: 30, now: now, timeZone: timeZone)
+        state.receive([pending], for: refresh)
+        #expect(state.merged.costUsd == 10)
+        #expect(state.environments.first?.isPending == true)
+        #expect(state.hasPendingCachedTotals)
+        #expect(!state.isPartial)
+
+        let nextDay = state.begin(days: 30, now: now.addingTimeInterval(24 * 60 * 60), timeZone: timeZone)
+        state.receive([pending], for: nextDay)
+        #expect(state.merged.costUsd == 0)
+        #expect(state.environments.first?.summary == nil)
+        #expect(!state.hasPendingCachedTotals)
+    }
+
     private func summary(
         contractVersion: Int = usageContractVersion,
         provider: UsageProviderKind,
@@ -420,7 +532,7 @@ struct UsageModelsTests {
         sourceStatus: UsageSourceStatus = .ok,
         hourStart: String? = nil
     ) -> UsageSummary {
-        let path = provider == .codex ? "/Users/theo/.codex" : "/Users/theo/.claude"
+        let path = "/Users/theo/.\(provider.rawValue)"
         return UsageSummary(
             contractVersion: contractVersion,
             readAt: "2026-08-09T12:00:00.000Z",
@@ -432,7 +544,7 @@ struct UsageModelsTests {
                     day: "2026-08-09",
                     hourStart: hourStart,
                     provider: provider,
-                    model: provider == .codex ? "gpt-5.6-sol" : "claude-opus-4-1",
+                    model: "\(provider.rawValue)-test-model",
                     totals: UsageTokenTotals(
                         uncachedInputTokens: uncachedInput,
                         cachedInputTokens: cachedInput,

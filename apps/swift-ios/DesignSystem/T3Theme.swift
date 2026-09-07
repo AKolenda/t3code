@@ -93,6 +93,7 @@ enum T3Typography {
 
 enum T3Metrics {
     static let minimumTapTarget: CGFloat = 44
+    static let maximumToolFailureMessageHeight: CGFloat = 144
     static let sidebarWidth: CGFloat = 320
     static let minimumSidebarWidth: CGFloat = 280
     static let maximumSidebarWidth: CGFloat = 380
@@ -193,6 +194,15 @@ struct T3ContentUnavailableView: View {
 }
 
 extension View {
+    @ViewBuilder
+    func t3PopoverCompactAdaptation() -> some View {
+        if #available(iOS 16.4, *) {
+            presentationCompactAdaptation(.popover)
+        } else {
+            self
+        }
+    }
+
     func t3NavigationChrome() -> some View {
         toolbarBackground(T3Colors.sheet, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)

@@ -5,10 +5,12 @@ struct MarkdownImageContext: Equatable, @unchecked Sendable {
     let threadID: String
     let workspaceRoot: String
     let resolver: any FeatureWorkspaceAssetResolving
+    var sourceFilePath: String? = nil
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.threadID == rhs.threadID
             && lhs.workspaceRoot == rhs.workspaceRoot
+            && lhs.sourceFilePath == rhs.sourceFilePath
             && ObjectIdentifier(lhs.resolver) == ObjectIdentifier(rhs.resolver)
     }
 }
@@ -25,6 +27,7 @@ struct MarkdownMessageView: View {
     private let isStreaming: Bool
     private let copyActionTitle: String
     private let imageContext: MarkdownImageContext?
+    private let skills: [FeatureProviderSkill]
     @State private var selectionSource: MarkdownSelectionSource
     @State private var renderedDocument: MarkdownRenderedDocument?
     @State private var streamingRenderer = StreamingMarkdownRenderer()
@@ -33,12 +36,14 @@ struct MarkdownMessageView: View {
         _ source: String,
         isStreaming: Bool = false,
         copyActionTitle: String = "Copy message",
-        imageContext: MarkdownImageContext? = nil
+        imageContext: MarkdownImageContext? = nil,
+        skills: [FeatureProviderSkill] = []
     ) {
         self.source = source
         self.isStreaming = isStreaming
         self.copyActionTitle = copyActionTitle
         self.imageContext = imageContext
+        self.skills = skills
         _selectionSource = State(initialValue: MarkdownSelectionSource(source))
         let revision = MarkdownContentRevision(source)
         self.revision = revision
@@ -127,7 +132,8 @@ struct MarkdownMessageView: View {
         selectionSource.text = source
         return MarkdownSelectionContext(
             source: selectionSource,
-            copyActionTitle: copyActionTitle
+            copyActionTitle: copyActionTitle,
+            skills: skills
         )
     }
 }
@@ -208,9 +214,12 @@ private final class MarkdownSelectionSource: @unchecked Sendable {
 private struct MarkdownSelectionContext: Equatable, Sendable {
     let source: MarkdownSelectionSource
     let copyActionTitle: String
+    let skills: [FeatureProviderSkill]
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.source === rhs.source && lhs.copyActionTitle == rhs.copyActionTitle
+        lhs.source === rhs.source
+            && lhs.copyActionTitle == rhs.copyActionTitle
+            && lhs.skills == rhs.skills
     }
 }
 
@@ -327,6 +336,9 @@ private struct MarkdownBlockView: View, Equatable {
                 renderedCode: renderedCode,
                 selectionContext: selectionContext
             )
+
+        case let .artifactTemplate(template):
+            CodexArtifactTemplateView(template: template)
 
         case .thematicBreak:
             Rectangle()
@@ -471,35 +483,62 @@ private struct MarkdownListView: View {
 }
 
 private struct MarkdownImageView: View {
+    private struct Request: Equatable {
+        let image: MarkdownImage
+        let context: MarkdownImageContext?
+        let maximumPixelSize: Int
+    }
+
     let image: MarkdownImage
     let context: MarkdownImageContext?
 
-    @State private var loadedImage: UIImage?
+    @SwiftUI.Environment(\.openURL) private var openURL
+    @SwiftUI.Environment(\.displayScale) private var displayScale
+    @State private var loadedImage: MarkdownDecodedImage?
+    @State private var activeRequest: Request?
+    @State private var knownSize: CGSize?
+    @State private var previewURL: URL?
     @State private var failed = false
 
+    private var request: Request {
+        Request(image: image, context: context, maximumPixelSize: min(2_048, max(512, Int(ceil(480 * displayScale)))))
+    }
+
     private var classifiedSource: MarkdownImageSource {
-        MarkdownImageSource.classify(image.source, workspaceRoot: context?.workspaceRoot)
+        let basePath = context?.sourceFilePath.map {
+            let isWindows = $0.contains("\\")
+            let normalized = $0.replacingOccurrences(of: "\\", with: "/")
+            let parent = (normalized as NSString).deletingLastPathComponent
+            return isWindows ? parent.replacingOccurrences(of: "/", with: "\\") : parent
+        } ?? context?.workspaceRoot
+        return MarkdownImageSource.classify(image.source, workspaceRoot: basePath)
     }
 
     var body: some View {
         if classifiedSource != .blocked {
-            Group {
-                if let loadedImage {
-                    Image(uiImage: loadedImage)
+            let currentRequest = activeRequest == request
+            let decoded = currentRequest ? loadedImage : nil
+            MarkdownImageLayout(sourceSize: decoded?.sourceSize ?? (currentRequest ? knownSize : nil)) {
+                if let decoded {
+                    Image(uiImage: decoded.image)
                         .resizable()
                         .scaledToFit()
-                        .frame(maxHeight: 480)
                 } else {
-                    Image(systemName: failed ? "exclamationmark.triangle" : "photo")
+                    Image(systemName: currentRequest && failed ? "exclamationmark.triangle" : "photo")
                         .font(.title2)
                         .foregroundStyle(T3Colors.textSecondary)
-                        .frame(maxWidth: .infinity, minHeight: 140)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .background(T3Colors.surfaceRaised)
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
             .accessibilityLabel(image.alternativeText.isEmpty ? "Image" : image.alternativeText)
-            .task(id: "\(image.source):\(context?.threadID ?? ""):\(context?.workspaceRoot ?? "")") {
+            .accessibilityAddTraits(.isButton)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                if currentRequest, let previewURL { openURL(previewURL) }
+            }
+            .task(id: request) {
                 await loadImage()
             }
         }
@@ -507,33 +546,86 @@ private struct MarkdownImageView: View {
 
     @MainActor
     private func loadImage() async {
+        let loadingRequest = request
+        activeRequest = loadingRequest
+        loadedImage = nil
+        knownSize = nil
+        failed = false
+        previewURL = nil
         do {
             let url: URL
             switch classifiedSource {
             case let .direct(directURL):
                 url = directURL
+                if directURL.scheme == "http" || directURL.scheme == "https" {
+                    previewURL = directURL
+                }
             case let .workspaceFile(path):
                 guard let context else { return }
-                url = try await context.resolver.workspaceAssetURL(
+                var components = URLComponents()
+                components.scheme = "t3code"
+                components.host = "media-preview"
+                components.path = "/open"
+                components.queryItems = [
+                    URLQueryItem(name: "path", value: path),
+                    URLQueryItem(name: "kind", value: "image"),
+                ]
+                previewURL = components.url
+                let asset = try await context.resolver.mediaAsset(
                     threadID: context.threadID,
                     path: path
                 )
+                try Task.checkCancellation()
+                knownSize = MarkdownImageGeometry.sourceSize(asset.imageDimensions)
+                url = asset.url
             case .blocked:
                 return
             }
-            loadedImage = try await MarkdownImageLoader.load(url)
+            let decoded = try await MarkdownImageLoader.load(url, maximumPixelSize: loadingRequest.maximumPixelSize)
+            try Task.checkCancellation()
+            loadedImage = decoded
         } catch is CancellationError {
             return
         } catch {
+            guard !Task.isCancelled else { return }
             failed = true
         }
     }
 }
 
+private struct CodexArtifactTemplateView: View {
+    let template: CodexArtifactTemplate
+    @SwiftUI.Environment(\.openURL) private var openURL
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(template.displayName)
+                    .font(T3Typography.threadBody.weight(.medium))
+                    .foregroundStyle(T3Colors.textPrimary)
+                Text(template.kind.label)
+                    .font(T3Typography.supporting)
+                    .foregroundStyle(T3Colors.textSecondary)
+            }
+            Spacer(minLength: 8)
+            Button("Use") {
+                if let url = template.useURL { openURL(url) }
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 @MainActor
 private enum MarkdownImageLoader {
-    private static let cache: NSCache<NSURL, UIImage> = {
-        let cache = NSCache<NSURL, UIImage>()
+    private final class CachedImage {
+        let decoded: MarkdownDecodedImage
+        init(_ decoded: MarkdownDecodedImage) { self.decoded = decoded }
+    }
+
+    private static let cache: NSCache<NSString, CachedImage> = {
+        let cache = NSCache<NSString, CachedImage>()
         cache.countLimit = 64
         cache.totalCostLimit = 32 * 1_024 * 1_024
         return cache
@@ -547,9 +639,10 @@ private enum MarkdownImageLoader {
         return URLSession(configuration: configuration)
     }()
 
-    static func load(_ url: URL) async throws -> UIImage {
-        if let cached = cache.object(forKey: url as NSURL) {
-            return cached
+    static func load(_ url: URL, maximumPixelSize: Int) async throws -> MarkdownDecodedImage {
+        let cacheKey = "\(url.absoluteString)#\(maximumPixelSize)" as NSString
+        if let cached = cache.object(forKey: cacheKey) {
+            return cached.decoded
         }
 
         let data: Data
@@ -569,20 +662,14 @@ private enum MarkdownImageLoader {
             }
         }
         try Task.checkCancellation()
-        let decoded = await Task.detached(priority: .utility) {
-            UIImage(data: data)
+        let decoded = try await Task.detached(priority: .utility) {
+            try MarkdownImageDecoder.decode(data, maximumPixelSize: maximumPixelSize)
         }.value
         try Task.checkCancellation()
-        guard let decoded else { throw MarkdownImageLoadingError.invalidImage }
-        let cost = decoded.cgImage.map { $0.bytesPerRow * $0.height } ?? data.count
-        cache.setObject(decoded, forKey: url as NSURL, cost: cost)
+        let cost = decoded.image.cgImage.map { $0.bytesPerRow * $0.height } ?? data.count
+        cache.setObject(CachedImage(decoded), forKey: cacheKey, cost: cost)
         return decoded
     }
-}
-
-private enum MarkdownImageLoadingError: Error {
-    case invalidImage
-    case invalidResponse
 }
 
 private struct MarkdownCodeBlockView: View {
@@ -638,28 +725,31 @@ private struct MarkdownCodeBlockView: View {
                 .fill(T3Colors.separator)
                 .frame(height: 1)
 
-            if wrapsLines {
-                MarkdownInlineText(
-                    renderedCode,
-                    selectionContext: selectionContext,
-                    lineSpacing: 3,
-                    wrapsLines: true
-                )
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(13)
-            } else {
-                ScrollView(.horizontal) {
+            Group {
+                if wrapsLines {
                     MarkdownInlineText(
                         renderedCode,
                         selectionContext: selectionContext,
                         lineSpacing: 3,
-                        wrapsLines: false
+                        wrapsLines: true
                     )
-                        .fixedSize(horizontal: true, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(13)
+                } else {
+                    ScrollView(.horizontal) {
+                        MarkdownInlineText(
+                            renderedCode,
+                            selectionContext: selectionContext,
+                            lineSpacing: 3,
+                            wrapsLines: false
+                        )
+                            .fixedSize(horizontal: true, vertical: true)
+                            .padding(13)
+                    }
+                    .scrollIndicators(.hidden)
                 }
-                .scrollIndicators(.hidden)
             }
+            .t3CodeTextSize()
         }
         .background(T3Colors.surfaceRaised)
         .clipShape(RoundedRectangle(cornerRadius: 10))
@@ -725,7 +815,7 @@ private struct MarkdownInlineText: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UITextView {
-        let textView = UITextView()
+        let textView = FeatureInlineSkillTextView()
         textView.backgroundColor = .clear
         textView.isEditable = false
         textView.isSelectable = true
@@ -754,7 +844,9 @@ private struct MarkdownInlineText: UIViewRepresentable {
             lineSpacing: lineSpacing,
             textColor: textColor,
             dynamicTypeSize: dynamicTypeSize,
-            wrapsLines: wrapsLines
+            wrapsLines: wrapsLines,
+            skills: selectionContext.skills,
+            traits: textView.traitCollection
         )
         if context.coordinator.shouldApply(attributedText) {
             let previousText = context.coordinator.lastAppliedText
@@ -800,6 +892,8 @@ private struct MarkdownInlineText: UIViewRepresentable {
             let textColor: MarkdownTextColor
             let dynamicTypeSize: DynamicTypeSize
             let wrapsLines: Bool
+            let skills: [FeatureProviderSkill]
+            let userInterfaceStyle: UIUserInterfaceStyle
         }
 
         private struct SizeKey: Hashable {
@@ -809,7 +903,8 @@ private struct MarkdownInlineText: UIViewRepresentable {
 
         var selectionContext = MarkdownSelectionContext(
             source: MarkdownSelectionSource(""),
-            copyActionTitle: "Copy message"
+            copyActionTitle: "Copy message",
+            skills: []
         )
         var onOpenURL: ((URL) -> Void)?
         private var cacheKey: CacheKey?
@@ -825,13 +920,17 @@ private struct MarkdownInlineText: UIViewRepresentable {
             lineSpacing: CGFloat,
             textColor: MarkdownTextColor,
             dynamicTypeSize: DynamicTypeSize,
-            wrapsLines: Bool
+            wrapsLines: Bool,
+            skills: [FeatureProviderSkill],
+            traits: UITraitCollection
         ) -> NSAttributedString {
             let key = CacheKey(
                 lineSpacing: lineSpacing,
                 textColor: textColor,
                 dynamicTypeSize: dynamicTypeSize,
-                wrapsLines: wrapsLines
+                wrapsLines: wrapsLines,
+                skills: skills,
+                userInterfaceStyle: traits.userInterfaceStyle
             )
             if cachedRendered === rendered, key == cacheKey, let cachedAttributedText {
                 return cachedAttributedText
@@ -841,7 +940,9 @@ private struct MarkdownInlineText: UIViewRepresentable {
                 lineSpacing: lineSpacing,
                 foregroundColor: textColor.uiColor,
                 dynamicTypeSize: dynamicTypeSize,
-                wrapsLines: wrapsLines
+                wrapsLines: wrapsLines,
+                skills: skills,
+                traits: traits
             )
             cacheKey = key
             cachedRendered = rendered
@@ -990,7 +1091,9 @@ enum MarkdownSelectableTextAttributes {
         lineSpacing: CGFloat,
         foregroundColor: UIColor = T3Colors.uiTextPrimary,
         dynamicTypeSize: DynamicTypeSize = .large,
-        wrapsLines: Bool = true
+        wrapsLines: Bool = true,
+        skills: [FeatureProviderSkill] = [],
+        traits: UITraitCollection = .current
     ) -> NSAttributedString {
         let result = NSMutableAttributedString()
         let paragraphStyle = NSMutableParagraphStyle()
@@ -1017,10 +1120,34 @@ enum MarkdownSelectableTextAttributes {
             if let link = run.link {
                 attributes[.link] = link
             }
+            let runText = String(rendered.attributedText[run.range].characters)
+            let hasLeadingBoundary = run.range.lowerBound == rendered.attributedText.startIndex
+                || rendered.attributedText.characters[
+                    rendered.attributedText.characters.index(before: run.range.lowerBound)
+                ].isWhitespace
+            let hasTrailingBoundary = run.range.upperBound == rendered.attributedText.endIndex
+                || rendered.attributedText.characters[run.range.upperBound].isWhitespace
+            let runLength = (runText as NSString).length
+            let descriptors = rendered.style == .code
+                || intent?.contains(.code) == true
+                || run.link != nil
+                ? []
+                : FeatureInlineSkillParser.descriptors(
+                    in: runText,
+                    skills: skills,
+                    allowsEndBoundary: true
+                ).filter { descriptor in
+                    (descriptor.range.location > 0 || hasLeadingBoundary)
+                        && (NSMaxRange(descriptor.range) < runLength || hasTrailingBoundary)
+                }
             result.append(
-                NSAttributedString(
-                    string: String(rendered.attributedText[run.range].characters),
-                    attributes: attributes
+                FeatureInlineSkillPillRenderer.attributedText(
+                    source: runText,
+                    descriptors: descriptors,
+                    baseAttributes: attributes,
+                    font: attributes[.font] as? UIFont
+                        ?? rendered.style.uiFont(dynamicTypeSize: dynamicTypeSize),
+                    traits: traits
                 )
             )
         }

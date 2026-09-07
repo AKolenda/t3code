@@ -17,6 +17,26 @@ public struct FeatureCapabilityUnavailable: LocalizedError, Sendable, Equatable 
 @MainActor
 public protocol FeatureWorkspaceAssetResolving: AnyObject {
     func workspaceAssetURL(threadID: String, path: String) async throws -> URL
+    func mediaAssetURL(threadID: String, path: String) async throws -> URL
+    func mediaAsset(threadID: String, path: String) async throws -> ResolvedAssetURL
+    func nativeAppIconURL(threadID: String, app: ToolNativeAppReference) async throws -> URL
+}
+
+public extension FeatureWorkspaceAssetResolving {
+    func mediaAsset(threadID: String, path: String) async throws -> ResolvedAssetURL {
+        ResolvedAssetURL(
+            url: try await mediaAssetURL(threadID: threadID, path: path),
+            expiresAt: .distantFuture
+        )
+    }
+
+    func nativeAppIconURL(threadID: String, app: ToolNativeAppReference) async throws -> URL {
+        throw FeatureCapabilityUnavailable("Native app icons")
+    }
+
+    func mediaAssetURL(threadID: String, path: String) async throws -> URL {
+        try await workspaceAssetURL(threadID: threadID, path: path)
+    }
 }
 
 @MainActor
@@ -94,6 +114,9 @@ public struct FeatureFileContent: Sendable, Equatable, Codable {
 
 public enum FeatureFilePreviewKind: Sendable, Equatable {
     case image
+    case pdf
+    case video
+    case document
     case markdown
     case source
     case plainText
@@ -101,6 +124,9 @@ public enum FeatureFilePreviewKind: Sendable, Equatable {
     public static func infer(path: String, language: String? = nil) -> Self {
         let fileExtension = URL(fileURLWithPath: path).pathExtension.lowercased()
         if imageExtensions.contains(fileExtension) { return .image }
+        if fileExtension == "pdf" { return .pdf }
+        if videoExtensions.contains(fileExtension) { return .video }
+        if documentExtensions.contains(fileExtension) { return .document }
         if language?.lowercased() == "markdown" || ["md", "mdx"].contains(fileExtension) {
             return .markdown
         }
@@ -110,6 +136,14 @@ public enum FeatureFilePreviewKind: Sendable, Equatable {
 
     private static let imageExtensions: Set<String> = [
         "avif", "gif", "ico", "jpeg", "jpg", "png", "webp",
+    ]
+
+    private static let videoExtensions: Set<String> = [
+        "m4v", "mov", "mp4", "mpeg", "mpg", "webm",
+    ]
+
+    private static let documentExtensions: Set<String> = [
+        "doc", "docx", "key", "numbers", "pages", "ppt", "pptx", "rtf", "xls", "xlsx",
     ]
 
     private static let sourceExtensions: Set<String> = [
@@ -823,12 +857,20 @@ public struct FeaturePullRequest: Sendable, Equatable, Hashable, Codable {
     public var title: String
     public var state: String
     public var url: URL?
+    public var updatedAt: String?
 
-    public init(number: Int, title: String, state: String, url: URL? = nil) {
+    public init(
+        number: Int,
+        title: String,
+        state: String,
+        url: URL? = nil,
+        updatedAt: String? = nil
+    ) {
         self.number = number
         self.title = title
         self.state = state
         self.url = url
+        self.updatedAt = updatedAt
     }
 }
 
@@ -847,6 +889,9 @@ public struct FeatureSourceControlStatus: Sendable, Equatable, Codable {
     public var upstream: String?
     public var aheadCount: Int
     public var behindCount: Int
+    /// `false` while the remote half of a streamed status is still pending, so
+    /// ahead/behind/pull-request fields are "not yet known" rather than zero.
+    public var isRemoteKnown: Bool
     public var files: [FeatureSourceControlFile]
     public var pullRequest: FeaturePullRequest?
     public var isBusy: Bool
@@ -857,6 +902,7 @@ public struct FeatureSourceControlStatus: Sendable, Equatable, Codable {
         upstream: String? = nil,
         aheadCount: Int = 0,
         behindCount: Int = 0,
+        isRemoteKnown: Bool = true,
         files: [FeatureSourceControlFile] = [],
         pullRequest: FeaturePullRequest? = nil,
         isBusy: Bool = false
@@ -866,6 +912,7 @@ public struct FeatureSourceControlStatus: Sendable, Equatable, Codable {
         self.upstream = upstream
         self.aheadCount = aheadCount
         self.behindCount = behindCount
+        self.isRemoteKnown = isRemoteKnown
         self.files = files
         self.pullRequest = pullRequest
         self.isBusy = isBusy
@@ -877,13 +924,15 @@ public struct FeatureSourceControlStatus: Sendable, Equatable, Codable {
         if !files.isEmpty {
             actions.append(.commit)
             actions.append(.commitAndPush)
-            if pullRequest == nil {
+            if isRemoteKnown, pullRequest == nil {
                 actions.append(.commitPushAndCreatePullRequest)
             }
         }
         if aheadCount > 0 { actions.append(.push) }
         if behindCount > 0 { actions.append(.pull) }
-        if pullRequest == nil { actions.append(.createPullRequest) }
+        // Withheld until the remote half lands: offering it against an unknown
+        // remote can propose a second PR for a branch that already has one.
+        if isRemoteKnown, pullRequest == nil { actions.append(.createPullRequest) }
         return actions
     }
 }
@@ -907,6 +956,7 @@ public struct FeatureTerminalSnapshot: Sendable, Equatable, Codable {
     public var error: String?
     public var hasRunningSubprocess: Bool
     public var updatedAt: String?
+    public var lifecycleVersion: Int
 
     public init(
         threadID: String,
@@ -918,7 +968,8 @@ public struct FeatureTerminalSnapshot: Sendable, Equatable, Codable {
         exitCode: Int? = nil,
         error: String? = nil,
         hasRunningSubprocess: Bool = false,
-        updatedAt: String? = nil
+        updatedAt: String? = nil,
+        lifecycleVersion: Int = 0
     ) {
         self.threadID = threadID
         self.terminalID = terminalID
@@ -930,5 +981,26 @@ public struct FeatureTerminalSnapshot: Sendable, Equatable, Codable {
         self.error = error
         self.hasRunningSubprocess = hasRunningSubprocess
         self.updatedAt = updatedAt
+        self.lifecycleVersion = lifecycleVersion
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case threadID, terminalID, state, title, workingDirectory, buffer
+        case exitCode, error, hasRunningSubprocess, updatedAt, lifecycleVersion
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        threadID = try container.decode(String.self, forKey: .threadID)
+        terminalID = try container.decodeIfPresent(String.self, forKey: .terminalID) ?? "default"
+        state = try container.decodeIfPresent(FeatureTerminalState.self, forKey: .state) ?? .stopped
+        title = try container.decodeIfPresent(String.self, forKey: .title) ?? "Terminal"
+        workingDirectory = try container.decodeIfPresent(String.self, forKey: .workingDirectory)
+        buffer = try container.decodeIfPresent(String.self, forKey: .buffer) ?? ""
+        exitCode = try container.decodeIfPresent(Int.self, forKey: .exitCode)
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+        hasRunningSubprocess = try container.decodeIfPresent(Bool.self, forKey: .hasRunningSubprocess) ?? false
+        updatedAt = try container.decodeIfPresent(String.self, forKey: .updatedAt)
+        lifecycleVersion = try container.decodeIfPresent(Int.self, forKey: .lifecycleVersion) ?? 0
     }
 }

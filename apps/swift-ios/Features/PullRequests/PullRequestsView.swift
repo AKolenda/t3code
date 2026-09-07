@@ -650,7 +650,7 @@ private enum PullRequestDetailTab: String, CaseIterable {
     case files = "Files"
 }
 
-private struct PullRequestDetailView: View {
+struct PullRequestDetailView: View {
     private struct PendingAction: Identifiable {
         let id = UUID()
         let action: PullRequestAction
@@ -659,7 +659,7 @@ private struct PullRequestDetailView: View {
     }
 
     @ObservedObject var rootModel: FeatureRootModel
-    let row: FeaturePullRequestRow
+    let target: FeaturePullRequestTarget
     @StateObject private var model: PullRequestDetailModel
     @State private var tab: PullRequestDetailTab = .summary
     @State private var editor: PullRequestEditor?
@@ -669,9 +669,13 @@ private struct PullRequestDetailView: View {
     @State private var pendingAction: PendingAction?
 
     init(rootModel: FeatureRootModel, row: FeaturePullRequestRow) {
+        self.init(rootModel: rootModel, target: row.target)
+    }
+
+    init(rootModel: FeatureRootModel, target: FeaturePullRequestTarget) {
         self.rootModel = rootModel
-        self.row = row
-        _model = StateObject(wrappedValue: PullRequestDetailModel(client: rootModel.client, target: row.target))
+        self.target = target
+        _model = StateObject(wrappedValue: PullRequestDetailModel(client: rootModel.client, target: target))
     }
 
     var body: some View {
@@ -700,7 +704,7 @@ private struct PullRequestDetailView: View {
             }
         }
         .background(T3Colors.background)
-        .navigationTitle("#\(row.entry.number)")
+        .navigationTitle("#\(target.reference.number)")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) { actionMenu }
@@ -768,7 +772,7 @@ private struct PullRequestDetailView: View {
             HStack(spacing: 7) {
                 Label(detail.state.label, systemImage: detail.state.systemImage)
                     .foregroundStyle(detail.state.color)
-                Text("\(detail.repository) · \(row.environmentName)")
+                Text("\(detail.repository) · \(target.environmentName)")
                 Spacer()
                 Text("+\(detail.additions)").foregroundStyle(T3Colors.success)
                 Text("−\(detail.deletions)").foregroundStyle(T3Colors.danger)
@@ -876,8 +880,8 @@ private struct PullRequestDetailView: View {
 
     private func sendToAgent(_ line: PullRequestDiffLine, file: PullRequestDiffFile) {
         guard let project = rootModel.snapshot.projects.first(where: {
-            $0.environmentID == row.environmentID
-                && ($0.wireID ?? $0.id) == row.entry.projectId
+            $0.environmentID == target.environmentID
+                && ($0.wireID ?? $0.id) == target.reference.projectId
         }) else {
             notice = "The project for this pull request is not available on this computer."
             return
@@ -890,7 +894,7 @@ private struct PullRequestDetailView: View {
             return
         }
         let prompt = """
-        Please inspect and address this line from pull request #\(row.entry.number) in \(row.entry.repository).
+        Please inspect and address this line from pull request #\(target.reference.number) in \(target.reference.repository).
 
         File: \(file.path)
         Line: \(line.displayLineNumber)
@@ -1198,6 +1202,7 @@ private struct PullRequestFilesView: View {
                                                 .frame(minWidth: 500, alignment: .leading)
                                         }
                                         .font(T3Typography.code)
+                                        .t3CodeTextSize()
                                         .foregroundStyle(line.foreground)
                                         .padding(.vertical, 2)
                                         .background(line.background)

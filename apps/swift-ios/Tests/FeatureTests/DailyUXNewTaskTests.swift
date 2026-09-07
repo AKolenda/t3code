@@ -308,7 +308,7 @@ struct DailyUXNewTaskTests {
     }
 
     @Test
-    func requestNormalizesLegacyModesAndKeepsImageBytes() {
+    func requestPreservesLegacyPermissionAndKeepsImageBytes() {
         let image = FeatureDraftAttachment(
             data: Data([1, 2, 3]),
             filename: "Image 1.jpg",
@@ -324,7 +324,7 @@ struct DailyUXNewTaskTests {
         )
 
         #expect(request.trimmedPrompt == "Build it")
-        #expect(request.runtimeMode == .fullAccess)
+        #expect(request.runtimeMode == .approvalRequired)
         #expect(request.interactionMode == .standard)
         #expect(request.workspaceMode == .local)
         #expect(request.branch == nil)
@@ -388,8 +388,20 @@ struct DailyUXNewTaskTests {
 
     @Test
     func mobileModeChoicesOnlyExposeSupportedValues() {
-        #expect(FeatureRuntimeMode.allCases == [.fullAccess])
+        #expect(FeatureRuntimeMode.allCases == [.automatic, .fullAccess])
         #expect(FeatureInteractionMode.allCases == [.standard])
+    }
+
+    @Test
+    func newTasksDefaultToFullAccessBuildMode() {
+        let request = NewTaskRequest(
+            projectID: "project",
+            prompt: "Build it",
+            selection: nil
+        )
+
+        #expect(request.runtimeMode == .fullAccess)
+        #expect(request.interactionMode == .standard)
     }
 
     @Test
@@ -415,6 +427,110 @@ struct DailyUXNewTaskTests {
         #expect(context.projectID == "second-project")
         #expect(merged.text == "Typed while loading")
         #expect(merged.attachments == [savedAttachment])
+    }
+
+    @Test
+    func computerSwitchCarriesLocalContentAndDropsAnotherServersUpload() {
+        let oldUpload = FeatureUploadedAttachmentReference(
+            environmentID: "source", attachmentID: "old-upload"
+        )
+        let currentUpload = FeatureUploadedAttachmentReference(
+            environmentID: "target", attachmentID: "target-upload"
+        )
+        let localFile = FeatureOwnedAttachmentFile(
+            fileName: "screenshot.png",
+            url: URL(fileURLWithPath: "/drafts/screenshot.png"),
+            byteCount: 1_024
+        )
+        let source = FeatureComposerDraft(
+            text: "Fix this screenshot",
+            attachments: [
+                FeatureDraftAttachment(
+                    ownedFile: localFile, thumbnailData: Data([0x01]),
+                    filename: "screenshot.png", mimeType: "image/png",
+                    uploadedReference: oldUpload
+                ),
+                FeatureDraftAttachment(
+                    data: Data([0x02]), filename: "target.png", mimeType: "image/png",
+                    uploadedReference: currentUpload
+                ),
+            ],
+            selection: FeatureSelection(providerID: "source-provider", modelID: "source-model"),
+            workspace: FeatureComposerWorkspaceDraft(
+                mode: .worktree, branch: "source-branch", worktreePath: "/source/tree",
+                startFromOrigin: false
+            )
+        )
+        let content = NewTaskDraftRestoreContext.content(from: source, forEnvironment: "target")
+        let context = NewTaskDraftRestoreContext(projectID: "target-project", baseline: content)
+        let targetSelection = FeatureSelection(providerID: "target-provider", modelID: "target-model")
+        let targetWorkspace = FeatureComposerWorkspaceDraft(
+            mode: .local, branch: nil, worktreePath: nil, startFromOrigin: true
+        )
+        let restored = context.merging(
+            saved: FeatureComposerDraft(selection: targetSelection, workspace: targetWorkspace),
+            current: content
+        )
+
+        #expect(context.shouldCarryContent(into: nil))
+        #expect(restored.text == source.text)
+        #expect(restored.attachments.map(\.id) == source.attachments.map(\.id))
+        #expect(restored.attachments[0].ownedFile == localFile)
+        #expect(restored.attachments[0].thumbnailData == Data([0x01]))
+        #expect(restored.attachments[0].uploadedReference == nil)
+        #expect(restored.attachments[1].uploadedReference == currentUpload)
+        #expect(restored.selection == targetSelection)
+        #expect(restored.workspace == targetWorkspace)
+        #expect(source.attachments[0].uploadedReference == oldUpload)
+    }
+
+    @Test
+    func computerSwitchKeepsExistingTargetDraftAndLiveEdits() {
+        let content = FeatureComposerDraft(text: "Prompt from the first computer")
+        let context = NewTaskDraftRestoreContext(projectID: "target-project", baseline: content)
+        let targetAttachment = FeatureDraftAttachment(
+            data: Data([0x01]), filename: "saved.png", mimeType: "image/png"
+        )
+        let saved = FeatureComposerDraft(
+            text: "Draft already on the target", attachments: [targetAttachment]
+        )
+
+        #expect(!context.shouldCarryContent(into: saved))
+        #expect(context.merging(saved: saved, current: content) == saved)
+        #expect(!context.shouldCarryContent(into: FeatureComposerDraft(attachments: [targetAttachment])))
+
+        let edited = context.merging(
+            saved: saved,
+            current: FeatureComposerDraft(text: "Typed while the target draft loaded")
+        )
+        #expect(edited.text == "Typed while the target draft loaded")
+        #expect(edited.attachments == [targetAttachment])
+
+        let cleared = context.merging(saved: nil, current: FeatureComposerDraft())
+        #expect(cleared.text.isEmpty)
+    }
+
+    @Test
+    func sharedProjectDraftRestorationDoesNotReuseAnotherEnvironmentsUpload() {
+        let source = FeatureComposerDraft(
+            text: "Shared repo draft",
+            attachments: [FeatureDraftAttachment(
+                data: Data([0x01]), filename: "screenshot.png", mimeType: "image/png",
+                uploadedReference: FeatureUploadedAttachmentReference(
+                    environmentID: "source", attachmentID: "source-upload"
+                )
+            )]
+        )
+        let content = NewTaskDraftRestoreContext.content(from: source, forEnvironment: "target")
+        let context = NewTaskDraftRestoreContext(
+            projectID: "target-project", baseline: content, environmentID: "target"
+        )
+        let restored = context.merging(saved: source, current: content)
+
+        #expect(restored.text == source.text)
+        #expect(restored.attachments[0].id == source.attachments[0].id)
+        #expect(restored.attachments[0].data == source.attachments[0].data)
+        #expect(restored.attachments[0].uploadedReference == nil)
     }
 
     @Test
@@ -1110,6 +1226,286 @@ struct DailyUXNewTaskTests {
         #expect(filtered.map(\.id) == [sharedGroup.id])
         #expect(sections.recents.map(\.id) == [sharedGroup.id])
         #expect(sections.others.isEmpty)
+    }
+
+    @Test
+    func newTaskAvailabilityOnlyTreatsEnabledDisconnectedEnvironmentsAsUnreachable() throws {
+        let environments = [
+            FeatureEnvironment(
+                id: "disconnected",
+                name: "Studio Mac",
+                endpoint: "http://studio",
+                connectionState: .disconnected
+            ),
+            FeatureEnvironment(
+                id: "reconnecting",
+                name: "Travel Mac",
+                endpoint: "http://travel",
+                connectionState: .reconnecting
+            ),
+            FeatureEnvironment(
+                id: "connecting",
+                name: "New Mac",
+                endpoint: "http://new",
+                connectionState: .connecting
+            ),
+            FeatureEnvironment(
+                id: "connected",
+                name: "Desk Mac",
+                endpoint: "http://desk",
+                connectionState: .connected
+            ),
+            FeatureEnvironment(
+                id: "unknown",
+                name: "Unknown Mac",
+                endpoint: "http://unknown"
+            ),
+            FeatureEnvironment(
+                id: "disabled",
+                name: "Disabled Mac",
+                endpoint: "http://disabled",
+                isEnabled: false,
+                connectionState: .disconnected
+            ),
+        ]
+
+        // A reconnecting environment can still serve work through HTTP.
+        #expect(
+            DailyUXCreationContext.unreachableEnvironments(in: environments).map(\.id)
+                == ["disconnected"]
+        )
+
+        let projects = environments.map { environment in
+            rankedProject(
+                "\(environment.id)-project",
+                name: environment.name,
+                environmentID: environment.id
+            )
+        }
+        let snapshot = rankedSnapshot(
+            environments: environments,
+            projects: projects,
+            threads: []
+        )
+
+        #expect(
+            DailyUXCreationContext.projects(in: snapshot).map(\.environmentID)
+                == ["disconnected", "reconnecting", "connecting", "connected", "unknown"]
+        )
+        #expect(
+            DailyUXCreationContext.projectEnvironmentValidationMessage(
+                projectID: "disconnected-project",
+                in: snapshot
+            ) == nil
+        )
+        #expect(
+            DailyUXCreationContext.projectEnvironmentValidationMessage(
+                projectID: "reconnecting-project",
+                in: snapshot
+            ) == nil
+        )
+        #expect(
+            DailyUXCreationContext.projectEnvironmentValidationMessage(
+                projectID: "connected-project",
+                in: snapshot
+            ) == nil
+        )
+        #expect(
+            DailyUXCreationContext.projectEnvironmentValidationMessage(
+                projectID: "disabled-project",
+                in: snapshot
+            ) == "Environment is off."
+        )
+
+        let disconnectedProject = try #require(
+            projects.first { $0.environmentID == "disconnected" }
+        )
+        let recoveredSnapshot = rankedSnapshot(
+            environments: [
+                FeatureEnvironment(
+                    id: "disconnected",
+                    name: "Studio Mac",
+                    endpoint: "http://studio",
+                    connectionState: .reconnecting
+                ),
+            ],
+            projects: [disconnectedProject],
+            threads: []
+        )
+
+        #expect(
+            DailyUXCreationContext.projects(in: recoveredSnapshot).map(\.id)
+                == [disconnectedProject.id]
+        )
+        #expect(
+            DailyUXCreationContext.projectEnvironmentValidationMessage(
+                projectID: disconnectedProject.id,
+                in: recoveredSnapshot
+            ) == nil
+        )
+
+        let legacySnapshot = rankedSnapshot(
+            environments: [],
+            projects: [disconnectedProject],
+            threads: []
+        )
+        #expect(
+            DailyUXCreationContext.projectEnvironmentValidationMessage(
+                projectID: disconnectedProject.id,
+                in: legacySnapshot
+            ) == nil
+        )
+    }
+
+    @Test
+    func newTaskRouteOpensForUnreachableEnvironmentsWithoutProjects() {
+        let snapshot = rankedSnapshot(
+            environments: [
+                FeatureEnvironment(
+                    id: "studio",
+                    name: "Studio Mac",
+                    endpoint: "http://studio",
+                    connectionState: .disconnected
+                ),
+            ],
+            projects: [],
+            threads: []
+        )
+
+        #expect(DailyUXCreationContext.newTaskDestination(in: snapshot) == .newTask)
+    }
+
+    @Test
+    func newTaskRouteStillUsesProjectCreationWhenNothingIsReachableOrKnownUnreachable() {
+        let snapshot = rankedSnapshot(
+            environments: [
+                FeatureEnvironment(
+                    id: "connecting",
+                    name: "New Mac",
+                    endpoint: "http://new",
+                    connectionState: .connecting
+                ),
+                FeatureEnvironment(
+                    id: "disabled",
+                    name: "Disabled Mac",
+                    endpoint: "http://disabled",
+                    isEnabled: false,
+                    connectionState: .disconnected
+                ),
+            ],
+            projects: [],
+            threads: []
+        )
+
+        #expect(DailyUXCreationContext.newTaskDestination(in: snapshot) == .addProject)
+    }
+
+    @Test
+    func newTaskRouteKeepsReachableProjectsWhenUnreachableEnvironmentsCoexist() {
+        let project = rankedProject(
+            "reachable-project",
+            name: "Reachable",
+            environmentID: "connected"
+        )
+        let snapshot = rankedSnapshot(
+            environments: [
+                FeatureEnvironment(
+                    id: "connected",
+                    name: "Desk Mac",
+                    endpoint: "http://desk",
+                    connectionState: .connected
+                ),
+                FeatureEnvironment(
+                    id: "unreachable",
+                    name: "Studio Mac",
+                    endpoint: "http://studio",
+                    connectionState: .disconnected
+                ),
+            ],
+            projects: [project],
+            threads: []
+        )
+
+        #expect(DailyUXCreationContext.projects(in: snapshot).map(\.id) == [project.id])
+        #expect(DailyUXCreationContext.newTaskDestination(in: snapshot) == .newTask)
+        #expect(
+            DailyUXCreationContext.unreachableEnvironments(in: snapshot).map(\.name)
+                == ["Studio Mac"]
+        )
+    }
+
+    @Test
+    func unreachableRetryIsSingleFlightAndPresentsProgress() {
+        var retry = NewTaskRetryState()
+
+        #expect(!retry.isInProgress)
+        #expect(retry.buttonTitle == "Try again")
+        let didBegin = retry.begin()
+        #expect(didBegin)
+        #expect(retry.isInProgress)
+        #expect(retry.buttonTitle == "Trying again…")
+        let duplicateBegin = retry.begin()
+        #expect(!duplicateBegin)
+
+        retry.finish()
+
+        #expect(!retry.isInProgress)
+        let didRestart = retry.begin()
+        #expect(didRestart)
+    }
+
+    @Test
+    func zeroSearchMatchesKeepTheUnavailableEnvironmentNotice() {
+        let project = rankedProject("reachable", name: "Reachable")
+        let groups = DailyUXProjectGrouping.groups(projects: [project])
+        let unavailable = [
+            FeatureEnvironment(
+                id: "studio",
+                name: "Studio Mac",
+                endpoint: "http://studio",
+                connectionState: .disconnected
+            ),
+        ]
+        let filtered = NewTaskProjectPickerSearch.matching(
+            groups,
+            query: "no result",
+            environments: unavailable
+        )
+
+        let presentation = NewTaskProjectPickerPresentation(
+            groups: groups,
+            filteredGroups: filtered,
+            unavailableEnvironments: unavailable
+        )
+
+        #expect(presentation.projectContent == .noMatches)
+        #expect(presentation.unavailableEnvironments.map(\.name) == ["Studio Mac"])
+    }
+
+    @Test
+    func boundedUnavailableNoticeExposesEveryEnvironmentNameToAccessibility() {
+        let unavailable = (1 ... 5).map { index in
+            FeatureEnvironment(
+                id: "environment-\(index)",
+                name: "Environment \(index)",
+                endpoint: "http://environment-\(index)",
+                connectionState: .disconnected
+            )
+        }
+        let presentation = NewTaskProjectPickerPresentation(
+            groups: [],
+            filteredGroups: [],
+            unavailableEnvironments: unavailable
+        )
+
+        #expect(
+            presentation.visibleUnavailableEnvironments.map(\.name)
+                == ["Environment 1", "Environment 2", "Environment 3"]
+        )
+        #expect(presentation.additionalUnavailableEnvironmentCount == 2)
+        for environment in unavailable {
+            #expect(presentation.unavailableAccessibilityLabel.contains(environment.name))
+        }
     }
 
     private func rankedProject(

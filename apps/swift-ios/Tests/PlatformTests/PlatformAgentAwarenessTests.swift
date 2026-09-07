@@ -21,7 +21,7 @@ struct PlatformAgentAwarenessTests {
     @Test
     func legacySettingsEnableLiveActivitiesWithoutResettingOtherPreferences() throws {
         let legacy = Data(
-            #"{"appearance":"system","hapticsEnabled":false,"notificationsEnabled":false}"#.utf8
+            #"{"appearance":"system","hapticsEnabled":false,"notificationsEnabled":false,"autoSettleOnMerge":false,"autoSettleAfterDays":14}"#.utf8
         )
         let decoded = try JSONDecoder.t3.decode(FeatureSettings.self, from: legacy)
 
@@ -32,11 +32,14 @@ struct PlatformAgentAwarenessTests {
 
         var disabled = decoded
         disabled.liveActivitiesEnabled = false
-        let roundTrip = try JSONDecoder.t3.decode(
-            FeatureSettings.self,
-            from: JSONEncoder.t3.encode(disabled)
-        )
+        let encoded = try JSONEncoder.t3.encode(disabled)
+        let roundTrip = try JSONDecoder.t3.decode(FeatureSettings.self, from: encoded)
         #expect(!roundTrip.liveActivitiesEnabled)
+        let encodedSettings = try #require(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        #expect(encodedSettings["autoSettleOnMerge"] == nil)
+        #expect(encodedSettings["autoSettleAfterDays"] == nil)
     }
 
     @Test

@@ -15,7 +15,10 @@ struct FeatureComposerTextInput: UIViewRepresentable {
     @Binding var focused: Bool
     let placeholder: String
     let acceptsImages: Bool
+    let isReadOnly: Bool
+    let skills: [FeatureProviderSkill]
     let selectionRequest: FeatureComposerTextSelectionRequest?
+    let onSelectionChange: (NSRange) -> Void
     let onPasteImages: ([NSItemProvider]) -> Void
     let onDismissKeyboard: (() -> Void)?
 
@@ -27,6 +30,7 @@ struct FeatureComposerTextInput: UIViewRepresentable {
         let textView = FeatureComposerUITextView()
         textView.delegate = context.coordinator
         textView.acceptsImages = acceptsImages
+        textView.isReadOnly = isReadOnly
         textView.onPasteImages = onPasteImages
         textView.onDismissKeyboard = onDismissKeyboard
         if onDismissKeyboard != nil {
@@ -39,9 +43,9 @@ struct FeatureComposerTextInput: UIViewRepresentable {
         textView.adjustsFontForContentSizeCategory = true
         textView.smartQuotesType = .no
         textView.smartDashesType = .no
-        // Match the metrics of the SwiftUI text field this view replaced so
-        // the swap is invisible: the surrounding paddings stay in SwiftUI.
-        textView.textContainerInset = .zero
+        // Outer padding belongs to SwiftUI. The bottom inset keeps the final
+        // insertion point above the composer controls.
+        textView.configureComposerViewport()
         textView.textContainer.lineFragmentPadding = 0
         textView.isScrollEnabled = true
         // Deliberately not `keyboardDismissMode = .interactive`: the capped
@@ -59,32 +63,59 @@ struct FeatureComposerTextInput: UIViewRepresentable {
         textView.acceptsImages = acceptsImages
         textView.onPasteImages = onPasteImages
         textView.onDismissKeyboard = onDismissKeyboard
+        textView.isReadOnly = isReadOnly
 
+        let previousAttributedText = textView.attributedText ?? NSAttributedString()
+        let previousText = FeatureInlineSkillProjection.plainText(from: previousAttributedText)
+        let previousSelection = FeatureInlineSkillProjection.plainRange(
+            for: textView.selectedRange,
+            in: previousAttributedText
+        )
         let shouldApplySelection = selectionRequest.map {
             context.coordinator.lastAppliedSelectionRequestID != $0.id
         } ?? false
-        if textView.text != text {
-            let previousText = textView.text ?? ""
-            let selectedRange = textView.selectedRange
-            textView.text = text
-            if !shouldApplySelection {
-                let location = FeatureComposerTextSelectionPolicy.cursorLocationAfterBindingUpdate(
-                    previousText: previousText,
-                    newText: text,
-                    selectedLocation: selectedRange.location
-                )
-                let length = previousText.isEmpty
-                    ? 0
-                    : min(selectedRange.length, text.utf16.count - location)
-                textView.selectedRange = NSRange(location: location, length: length)
-                textView.scrollRangeToVisible(textView.selectedRange)
-            }
+        context.coordinator.isApplyingProgrammaticUpdate = true
+        defer {
+            context.coordinator.isApplyingProgrammaticUpdate = false
+            onSelectionChange(FeatureInlineSkillProjection.plainRange(
+                for: textView.selectedRange,
+                in: textView.attributedText
+            ))
         }
+        let targetSelection: NSRange
         if shouldApplySelection, let selectionRequest {
-            let location = min(selectionRequest.location, textView.text.utf16.count)
-            textView.selectedRange = NSRange(location: location, length: 0)
-            textView.scrollRangeToVisible(textView.selectedRange)
+            targetSelection = NSRange(
+                location: min(selectionRequest.location, text.utf16.count),
+                length: 0
+            )
+        } else if previousText != text {
+            let location = FeatureComposerTextSelectionPolicy.cursorLocationAfterBindingUpdate(
+                previousText: previousText,
+                newText: text,
+                selectedLocation: previousSelection.location
+            )
+            let length = previousText.isEmpty
+                ? 0
+                : min(previousSelection.length, text.utf16.count - location)
+            targetSelection = NSRange(location: location, length: length)
+        } else {
+            targetSelection = previousSelection
+        }
+
+        let rebuiltText = context.coordinator.synchronizeInlineSkills(
+            in: textView,
+            source: text,
+            selection: targetSelection
+        )
+        if shouldApplySelection, let selectionRequest {
+            textView.selectedRange = FeatureInlineSkillProjection.displayRange(
+                for: targetSelection,
+                in: textView.attributedText
+            )
+            textView.scrollSelectionIntoView()
             context.coordinator.lastAppliedSelectionRequestID = selectionRequest.id
+        } else if rebuiltText {
+            textView.scrollSelectionIntoView()
         }
         updateAccessibility(textView)
 
@@ -114,7 +145,8 @@ struct FeatureComposerTextInput: UIViewRepresentable {
             width: width,
             height: FeatureComposerTextInputSizing.height(
                 fittingHeight: fittingSize.height,
-                lineHeight: uiView.font?.lineHeight ?? 22
+                lineHeight: uiView.font?.lineHeight ?? 22,
+                availableHeight: proposal.height
             )
         )
     }
@@ -128,17 +160,138 @@ struct FeatureComposerTextInput: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
+        private struct UndoSnapshot: Equatable {
+            let source: String
+            let selection: NSRange
+            let trailingSkill: FeatureInlineSkillDescriptor?
+        }
+
         var parent: FeatureComposerTextInput
         var lastAppliedFocus: Bool?
         var lastAppliedSelectionRequestID: UUID?
+        var isApplyingProgrammaticUpdate = false
+        private var isSynchronizingInlineSkills = false
+        private var pendingUndoSnapshot: UndoSnapshot?
+        private weak var disabledUndoManager: UndoManager?
 
         init(_ parent: FeatureComposerTextInput) {
             self.parent = parent
         }
 
+        func textView(
+            _ textView: UITextView,
+            shouldChangeTextIn range: NSRange,
+            replacementText text: String
+        ) -> Bool {
+            guard !parent.isReadOnly else { return false }
+            guard !isApplyingProgrammaticUpdate, !isSynchronizingInlineSkills else {
+                return true
+            }
+            if pendingUndoSnapshot == nil {
+                pendingUndoSnapshot = undoSnapshot(in: textView)
+            }
+            if disabledUndoManager == nil,
+               let undoManager = textView.undoManager,
+               undoManager.isUndoRegistrationEnabled {
+                undoManager.disableUndoRegistration()
+                disabledUndoManager = undoManager
+            }
+            return true
+        }
+
         func textViewDidChange(_ textView: UITextView) {
-            guard parent.text != textView.text else { return }
-            parent.text = textView.text
+            restoreUndoRegistration()
+            guard !isApplyingProgrammaticUpdate else { return }
+            guard !isSynchronizingInlineSkills else { return }
+            let source = FeatureInlineSkillProjection.plainText(from: textView.attributedText)
+            if parent.text != source {
+                parent.text = source
+            }
+            guard textView.markedTextRange == nil,
+                  let composerTextView = textView as? FeatureComposerUITextView else {
+                return
+            }
+            let selection = FeatureInlineSkillProjection.plainRange(
+                for: textView.selectedRange,
+                in: textView.attributedText
+            )
+            _ = synchronizeInlineSkills(
+                in: composerTextView,
+                source: source,
+                selection: selection
+            )
+            let updatedSnapshot = undoSnapshot(in: textView)
+            if let pendingUndoSnapshot, pendingUndoSnapshot != updatedSnapshot {
+                registerUndo(
+                    restoring: pendingUndoSnapshot,
+                    inverse: updatedSnapshot,
+                    in: composerTextView
+                )
+            }
+            pendingUndoSnapshot = nil
+            composerTextView.scrollSelectionIntoView()
+        }
+
+        @discardableResult
+        func synchronizeInlineSkills(
+            in textView: FeatureComposerUITextView,
+            source: String,
+            selection: NSRange,
+            preservingTrailing restoredTrailingSkill: FeatureInlineSkillDescriptor? = nil
+        ) -> Bool {
+            // Replacing attributed text would commit or discard active IME composition.
+            guard textView.markedTextRange == nil else { return false }
+            let currentText = textView.attributedText ?? NSAttributedString()
+            let currentSource = FeatureInlineSkillProjection.plainText(from: currentText)
+            let currentSignatures = FeatureInlineSkillProjection.signatures(in: currentText)
+            let preservedTrailing = restoredTrailingSkill ?? (
+                currentSource == source ? currentSignatures.last?.descriptor : nil
+            )
+            let descriptors = FeatureInlineSkillParser.descriptors(
+                in: source,
+                skills: parent.skills,
+                allowsEndBoundary: false,
+                preservingTrailing: preservedTrailing
+            )
+            let font = textView.font ?? UIFont.preferredFont(forTextStyle: .body)
+            let desiredSignatures = FeatureInlineSkillPillRenderer.signatures(
+                for: descriptors,
+                font: font,
+                traits: textView.traitCollection
+            )
+            guard currentSource != source || currentSignatures != desiredSignatures else {
+                return false
+            }
+
+            let baseAttributes: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: T3Colors.uiTextPrimary,
+            ]
+            let attributedText = FeatureInlineSkillPillRenderer.attributedText(
+                source: source,
+                descriptors: descriptors,
+                baseAttributes: baseAttributes,
+                font: font,
+                traits: textView.traitCollection
+            )
+            isSynchronizingInlineSkills = true
+            textView.attributedText = attributedText
+            textView.selectedRange = FeatureInlineSkillProjection.displayRange(
+                for: selection,
+                in: attributedText
+            )
+            textView.typingAttributes = baseAttributes
+            isSynchronizingInlineSkills = false
+            return true
+        }
+
+        func textViewDidChangeSelection(_ textView: UITextView) {
+            guard !isApplyingProgrammaticUpdate, !isSynchronizingInlineSkills else { return }
+            let selection = FeatureInlineSkillProjection.plainRange(
+                for: textView.selectedRange,
+                in: textView.attributedText
+            )
+            parent.onSelectionChange(selection)
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
@@ -149,17 +302,144 @@ struct FeatureComposerTextInput: UIViewRepresentable {
         }
 
         func textViewDidEndEditing(_ textView: UITextView) {
+            restoreUndoRegistration()
+            pendingUndoSnapshot = nil
             lastAppliedFocus = false
             if parent.focused {
                 parent.focused = false
             }
+        }
+
+        private func undoSnapshot(in textView: UITextView) -> UndoSnapshot {
+            let source = FeatureInlineSkillProjection.plainText(from: textView.attributedText)
+            let trailingSkill = FeatureInlineSkillProjection.signatures(in: textView.attributedText)
+                .last?.descriptor
+            return UndoSnapshot(
+                source: source,
+                selection: FeatureInlineSkillProjection.plainRange(
+                    for: textView.selectedRange,
+                    in: textView.attributedText
+                ),
+                trailingSkill: trailingSkill.flatMap {
+                    NSMaxRange($0.range) == source.utf16.count ? $0 : nil
+                }
+            )
+        }
+
+        private func restoreUndoRegistration() {
+            if let disabledUndoManager,
+               !disabledUndoManager.isUndoRegistrationEnabled {
+                disabledUndoManager.enableUndoRegistration()
+            }
+            disabledUndoManager = nil
+        }
+
+        private func registerUndo(
+            restoring snapshot: UndoSnapshot,
+            inverse: UndoSnapshot,
+            in textView: FeatureComposerUITextView
+        ) {
+            guard let undoManager = textView.undoManager else { return }
+            let opensUndoGroup = undoManager.groupingLevel == 0
+            if opensUndoGroup {
+                undoManager.beginUndoGrouping()
+            }
+            undoManager.registerUndo(withTarget: self) { [weak textView] coordinator in
+                guard let textView else { return }
+                coordinator.restore(
+                    snapshot,
+                    inverse: inverse,
+                    in: textView
+                )
+            }
+            undoManager.setActionName("Typing")
+            if opensUndoGroup {
+                undoManager.endUndoGrouping()
+            }
+        }
+
+        private func restore(
+            _ snapshot: UndoSnapshot,
+            inverse: UndoSnapshot,
+            in textView: FeatureComposerUITextView
+        ) {
+            registerUndo(restoring: inverse, inverse: snapshot, in: textView)
+            isApplyingProgrammaticUpdate = true
+            _ = synchronizeInlineSkills(
+                in: textView,
+                source: snapshot.source,
+                selection: snapshot.selection,
+                preservingTrailing: snapshot.trailingSkill
+            )
+            parent.text = snapshot.source
+            parent.onSelectionChange(snapshot.selection)
+            isApplyingProgrammaticUpdate = false
+            textView.scrollSelectionIntoView()
         }
     }
 }
 
 /// Advertises image support to the paste menu and routes image pastes out to
 /// the attachment pipeline. Text-only pastes fall through to UIKit untouched.
-final class FeatureComposerUITextView: UITextView {
+final class FeatureComposerUITextView: FeatureInlineSkillTextView {
+    private static let bottomEditingInset: CGFloat = 10
+    private var lastLaidOutBoundsSize = CGSize.zero
+
+    // Changing isEditable can dismiss an open keyboard. During voice input,
+    // keep the responder and reject user edits without changing isEditable.
+    var isReadOnly = false
+
+    override var canBecomeFirstResponder: Bool {
+        (!isReadOnly || isFirstResponder) && super.canBecomeFirstResponder
+    }
+
+    override func insertText(_ text: String) {
+        guard !isReadOnly else { return }
+        super.insertText(text)
+    }
+
+    override func deleteBackward() {
+        guard !isReadOnly else { return }
+        super.deleteBackward()
+    }
+
+    override func cut(_ sender: Any?) {
+        guard !isReadOnly else { return }
+        super.cut(sender)
+    }
+
+    func configureComposerViewport() {
+        clipsToBounds = true
+        textContainerInset = UIEdgeInsets(
+            top: 0,
+            left: 0,
+            bottom: Self.bottomEditingInset,
+            right: 0
+        )
+    }
+
+    func scrollSelectionIntoView() {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        scrollRangeToVisible(selectedRange)
+        guard let selection = selectedTextRange else { return }
+
+        let caret = caretRect(for: selection.end)
+        let visibleBottom = contentOffset.y + bounds.height - Self.bottomEditingInset
+        guard caret.maxY > visibleBottom else { return }
+
+        let maximumOffset = max(
+            -adjustedContentInset.top,
+            contentSize.height + adjustedContentInset.bottom - bounds.height
+        )
+        let requestedOffset = caret.maxY + Self.bottomEditingInset - bounds.height
+        let pixelScale = traitCollection.displayScale > 0 ? traitCollection.displayScale : 1
+        let alignedOffset = ceil(requestedOffset * pixelScale) / pixelScale
+        setContentOffset(
+            CGPoint(x: contentOffset.x, y: min(maximumOffset, alignedOffset)),
+            animated: false
+        )
+    }
+
     var acceptsImages = false {
         didSet {
             guard oldValue != acceptsImages else { return }
@@ -253,13 +533,23 @@ final class FeatureComposerUITextView: UITextView {
     }
 
     override func layoutSubviews() {
+        let viewportChanged = lastLaidOutBoundsSize != bounds.size
+        lastLaidOutBoundsSize = bounds.size
         super.layoutSubviews()
         if !contentOverflows, contentOffset.y != 0 {
             contentOffset.y = 0
+        } else if viewportChanged, isFirstResponder {
+            // `sizeThatFits` receives a proposal. The final UIKit viewport can
+            // still differ after the footer and attachments take their space.
+            // Recheck the caret against these actual bounds once per resize.
+            scrollSelectionIntoView()
         }
     }
 
     override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
+        if isReadOnly, action == #selector(paste(_:)) || action == #selector(cut(_:)) {
+            return false
+        }
         if action == #selector(paste(_:)),
            acceptsImages,
            FeatureComposerPasteboardPolicy.containsImage(in: UIPasteboard.general) {
@@ -275,6 +565,7 @@ final class FeatureComposerUITextView: UITextView {
     // image vanishes into UITextView's text-only default and the surface's
     // highlight never hears that the session ended.
     override func canPaste(_ itemProviders: [NSItemProvider]) -> Bool {
+        guard !isReadOnly else { return false }
         let holdsImage = itemProviders.contains {
             $0.hasItemConformingToTypeIdentifier(UTType.image.identifier)
         }
@@ -286,6 +577,7 @@ final class FeatureComposerUITextView: UITextView {
     // purpose: Slack and X do the same, and inserting a stray URL next to an
     // attached screenshot reads as a bug.
     override func paste(_ sender: Any?) {
+        guard !isReadOnly else { return }
         guard acceptsImages else {
             super.paste(sender)
             return
@@ -354,6 +646,14 @@ struct FeatureComposerTextSelectionRequest: Equatable {
     let location: Int
 }
 
+/// Selection changes come from `updateUIView` and UIKit delegate callbacks.
+/// Keeping this value outside observation avoids synchronous SwiftUI state
+/// writes while the representable is updating.
+@MainActor
+final class FeatureComposerTextObservation {
+    var selection = NSRange(location: 0, length: 0)
+}
+
 enum FeatureComposerTextSelectionPolicy {
     /// UTF-16 caret location after `range` (character indices, as produced by
     /// the trigger parser) is replaced with `replacement`.
@@ -380,18 +680,23 @@ enum FeatureComposerTextSelectionPolicy {
     }
 }
 
-/// Cap-then-scroll, the way Messages and Slack grow their composers: the
-/// input tracks its content until it reaches a fixed line cap, then holds
-/// that height and scrolls internally. The cap deliberately ignores the
-/// SwiftUI height proposal: proposals here derive from this view's own
-/// previous answer, so scaling by them feeds back and collapses the input.
+/// The editor grows with its content, then scrolls when it reaches the line
+/// cap or the space above the composer controls. A finite SwiftUI proposal is
+/// a hard bound. Returning a larger minimum makes the parent clip the editor
+/// under its fixed footer.
 enum FeatureComposerTextInputSizing {
     static let maximumLines: CGFloat = 12
 
     static func height(
         fittingHeight: CGFloat,
-        lineHeight: CGFloat
+        lineHeight: CGFloat,
+        availableHeight: CGFloat? = nil
     ) -> CGFloat {
-        min(fittingHeight, lineHeight * maximumLines)
+        let maximumHeight = max(0, lineHeight * maximumLines)
+        let contentHeight = max(0, fittingHeight)
+        guard let availableHeight, availableHeight.isFinite else {
+            return min(contentHeight, maximumHeight)
+        }
+        return min(contentHeight, maximumHeight, max(0, availableHeight))
     }
 }
