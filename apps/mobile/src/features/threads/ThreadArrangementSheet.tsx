@@ -286,7 +286,13 @@ export function ThreadArrangementSheet(props: {
         <Text className="px-5 pb-3 text-sm text-foreground-muted">
           Drag the handles to reorder. Changes save when you drop.
         </Text>
-        <View ref={viewport} collapsable={false} className="flex-1" style={{ overflow: "hidden" }}>
+        <View
+          ref={viewport}
+          onLayout={measureViewport}
+          collapsable={false}
+          className="flex-1"
+          style={{ overflow: "hidden" }}
+        >
           <FlatList
             ref={list}
             data={ordered}
