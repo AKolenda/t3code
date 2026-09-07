@@ -46,7 +46,11 @@ import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSn
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { createTranscriptJsonReader, TranscriptJsonLimitError } from "./AgentSessionJson.ts";
+import {
+  createTranscriptJsonReader,
+  createTranscriptJsonSelector,
+  TranscriptJsonLimitError,
+} from "./AgentSessionJson.ts";
 
 /** Chunk size for full transcript reads. */
 const TRANSCRIPT_PREFIX_BYTES = 32 * 1024;
@@ -129,6 +133,7 @@ const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
 const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
 const decodeTranscriptRecord = Schema.decodeUnknownOption(Schema.fromJsonString(TranscriptRecord));
 const decodeTranscriptValue = Schema.decodeUnknownOption(TranscriptRecord);
+const selectTranscriptPath = createTranscriptJsonSelector(TranscriptRecord);
 const decodeCodexTurnMetadata = Schema.decodeUnknownOption(CodexTurnMetadata);
 
 type DecodedTranscriptRecord = typeof TranscriptRecord.Type;
@@ -774,7 +779,7 @@ export const make = Effect.gen(function* () {
                 );
               }
             };
-            let reader = createTranscriptJsonReader(reserve);
+            let reader = createTranscriptJsonReader(reserve, selectTranscriptPath);
             let decoder = new TextDecoder();
             let recordStarted = false;
 
@@ -788,7 +793,7 @@ export const make = Effect.gen(function* () {
                 historyBytes += recordBytes;
               }
               recordBytes = 0;
-              reader = createTranscriptJsonReader(reserve);
+              reader = createTranscriptJsonReader(reserve, selectTranscriptPath);
               decoder = new TextDecoder();
               recordStarted = false;
               return true;
