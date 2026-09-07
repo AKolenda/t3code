@@ -277,6 +277,7 @@ describe("MessagesTimeline", () => {
             isFocused: composer.isComposerFocused,
             isScrollCollapsed: composer.isComposerScrollCollapsed,
             hasExpandedChrome: false,
+            hasMultilinePrompt: false,
             collapseOnBlur: true,
             timelineOverflows: true,
           });

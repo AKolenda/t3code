@@ -29,12 +29,13 @@ export function shouldUseRestingComposerLayout(input: {
   isFocused: boolean;
   isScrollCollapsed: boolean;
   hasExpandedChrome: boolean;
+  hasMultilinePrompt: boolean;
   collapseOnBlur: boolean;
   /** Whether the timeline has more content than fits above the composer. */
   timelineOverflows: boolean;
 }): boolean {
-  // Passive draft content is deliberately absent here. Resting only clamps
-  // the prompt row and overlays its actions; non-image attachment and context
+  // Multiline drafts stay readable. Resting only clamps a single prompt
+  // line and overlays its actions; non-image attachment and context
   // rows keep their natural height above it while image previews move inline.
   // Banners and the tasks badge dock above the surface, so they are absent
   // too. Whether the context strip can host the relocated controls is
@@ -56,6 +57,7 @@ export function shouldUseRestingComposerLayout(input: {
     !input.isMobileViewport &&
     input.timelineOverflows &&
     collapsed &&
+    !input.hasMultilinePrompt &&
     !input.hasExpandedChrome
   );
 }

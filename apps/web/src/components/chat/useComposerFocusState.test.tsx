@@ -19,6 +19,7 @@ function ComposerProbe({ isMobileViewport = false }: { isMobileViewport?: boolea
       isFocused: state.isComposerFocused,
       isScrollCollapsed: state.isComposerScrollCollapsed,
       hasExpandedChrome: false,
+      hasMultilinePrompt: false,
       collapseOnBlur: true,
       timelineOverflows: true,
     });

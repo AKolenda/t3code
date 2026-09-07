@@ -103,6 +103,7 @@ describe("shouldUseRestingComposerLayout", () => {
     isFocused: false,
     isScrollCollapsed: false,
     hasExpandedChrome: false,
+    hasMultilinePrompt: false,
     collapseOnBlur: true,
     timelineOverflows: true,
   };
@@ -157,6 +158,17 @@ describe("shouldUseRestingComposerLayout", () => {
 
   it("keeps drawers and composer-owned menus expanded", () => {
     expect(shouldUseRestingComposerLayout({ ...resting, hasExpandedChrome: true })).toBe(false);
+  });
+
+  it("keeps multiline drafts expanded on blur and scroll", () => {
+    expect(shouldUseRestingComposerLayout({ ...resting, hasMultilinePrompt: true })).toBe(false);
+    expect(
+      shouldUseRestingComposerLayout({
+        ...resting,
+        hasMultilinePrompt: true,
+        isScrollCollapsed: true,
+      }),
+    ).toBe(false);
   });
 });
 
