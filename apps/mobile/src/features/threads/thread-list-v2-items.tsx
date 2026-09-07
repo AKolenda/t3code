@@ -400,6 +400,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   readonly titleRegenerationSupported: boolean;
   /** Server supports reordering this card's section. */
   readonly reorderSupported?: boolean;
+  readonly reorderBusy?: boolean;
   readonly onMoveThread?: (
     thread: EnvironmentThreadShell,
     direction: ThreadMoveDestination,
@@ -1086,10 +1087,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                 ? scopedThreadKey(thread.environmentId, thread.id)
                 : ""
             }
-            dragEnabled={
-              props.reorderSupported === true &&
-              (props.canMoveUp === true || props.canMoveDown === true)
-            }
+            dragEnabled={props.reorderSupported === true && props.reorderBusy !== true}
             dragGroup={pinnedRow ? "t3-thread-pinned" : "t3-thread-active"}
             onItemDrop={({ nativeEvent }) => {
               if (nativeEvent.placement !== "before" && nativeEvent.placement !== "after") return;

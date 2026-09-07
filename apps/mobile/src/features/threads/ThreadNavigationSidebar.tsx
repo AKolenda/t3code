@@ -941,6 +941,7 @@ function ThreadNavigationSidebarPane(
                   ? pinReorderEnvironmentIds.has(thread.environmentId)
                   : activeReorderEnvironmentIds.has(thread.environmentId)
               }
+              reorderBusy={pendingOrder !== null}
               canMoveUp={pendingOrder === null && movePlanner(movedId, "up") !== null}
               canMoveDown={pendingOrder === null && movePlanner(movedId, "down") !== null}
               onSnoozeThread={snoozeThread}
