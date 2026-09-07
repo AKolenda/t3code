@@ -4,6 +4,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import type * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import { createModelSelection } from "@t3tools/shared/model";
@@ -16,6 +17,7 @@ import * as TextGeneration from "./TextGeneration.ts";
 import { makeCodexTextGeneration } from "./CodexTextGeneration.ts";
 import { writeFakeCli } from "../testUtils/fakeCli.ts";
 const decodeCodexSettings = Schema.decodeSync(CodexSettings);
+const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.String));
 
 const DEFAULT_TEST_MODEL_SELECTION = createModelSelection(
   ProviderInstanceId.make("codex"),
@@ -30,6 +32,13 @@ interface FakeCodexInput {
   output: string;
   exitCode?: number;
   stderr?: string;
+  attempts?: ReadonlyArray<{
+    model: string;
+    output?: string;
+    exitCode?: number;
+    stderr?: string;
+    stdout?: string;
+  }>;
   requireImage?: boolean;
   requireServiceTier?: string;
   requireReasoningEffort?: string;
@@ -57,16 +66,27 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
     stderr: input.stderr ?? null,
     output: input.output,
     exitCode: input.exitCode ?? 0,
+    attempts: input.attempts ?? null,
   });
   return Effect.gen(function* () {
     const path = yield* Path.Path;
+    const callsPathJson = yield* encodeJsonString(path.join(dir, "models.log"));
     return writeFakeCli({
       directory: path.join(dir, "bin"),
       name: "codex",
       source: [
         'import * as NodeFS from "node:fs";',
-        `const check = ${check};`,
+        `let check = ${check};`,
         "const args = process.argv.slice(2);",
+        `const callsPath = ${callsPathJson};`,
+        'const previousCalls = NodeFS.existsSync(callsPath) ? NodeFS.readFileSync(callsPath, "utf8").trim().split("\\n") : [];',
+        'const model = args[args.indexOf("--model") + 1];',
+        'NodeFS.appendFileSync(callsPath, model + "\\n");',
+        "if (check.attempts !== null) {",
+        "  const attempt = check.attempts[previousCalls.length];",
+        '  if (!attempt || attempt.model !== model) throw new Error("Unexpected model attempt: " + model);',
+        "  check = { ...check, ...attempt };",
+        "}",
         'const originalArgs = ` ${args.join(" ")} `;',
         "let outputPath = null;",
         "let seenImage = false;",
@@ -122,6 +142,7 @@ function makeFakeCodexBinary(dir: string, input: FakeCodexInput) {
         '  fail("stdin contained forbidden content", 4);',
         "}",
         'if (check.stderr !== null) process.stderr.write(check.stderr + "\\n");',
+        'if (check.stdout) process.stdout.write(check.stdout + "\\n");',
         'if (outputPath !== null) NodeFS.writeFileSync(outputPath, check.output + "\\n");',
         "process.exitCode = check.exitCode;",
         "",
@@ -135,19 +156,170 @@ function withFakeCodexEnv<A, E, R>(
     launchArgs?: string;
     environment?: NodeJS.ProcessEnv;
   },
-  effectFn: (textGeneration: TextGeneration.TextGeneration["Service"]) => Effect.Effect<A, E, R>,
+  effectFn: (
+    textGeneration: TextGeneration.TextGeneration["Service"],
+    readModels: Effect.Effect<string[], PlatformError.PlatformError>,
+  ) => Effect.Effect<A, E, R>,
 ) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
     const tempDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-codex-text-" });
     const codexPath = yield* makeFakeCodexBinary(tempDir, input);
     const config = decodeCodexSettings({ binaryPath: codexPath, launchArgs: input.launchArgs });
     const textGeneration = yield* makeCodexTextGeneration(config, input.environment);
-    return yield* effectFn(textGeneration);
+    const readModels = fs
+      .readFileString(path.join(tempDir, "models.log"))
+      .pipe(Effect.map((content) => content.trim().split("\n")));
+    return yield* effectFn(textGeneration, readModels);
   }).pipe(Effect.scoped);
 }
 
 it.layer(CodexTextGenerationTestLayer)("CodexTextGeneration", (it) => {
+  for (const { operation, output, errorOutput } of [
+    {
+      operation: "generateThreadTitle",
+      output: { title: "Fix session handling" },
+      errorOutput: { stderr: "ERROR: You've hit your usage limit. Try again later." },
+    },
+    {
+      operation: "generateBranchName",
+      output: { branch: "fix/session-handling" },
+      errorOutput: {
+        stdout: '{"error":{"type":"usage_limit_reached"}}',
+        stderr: "No last message",
+      },
+    },
+    {
+      operation: "generateCommitMessage",
+      output: { subject: "Fix session handling", body: "Update session handling." },
+      errorOutput: { stderr: "Usage limit reached" },
+    },
+    {
+      operation: "generatePrContent",
+      output: { title: "Fix session handling", body: "Update session handling." },
+      errorOutput: { stderr: "Usage limit exceeded" },
+    },
+  ] as const) {
+    it.effect(`retries ${operation} with Spark after usage exhaustion`, () =>
+      withFakeCodexEnv(
+        {
+          output: JSON.stringify(output),
+          requireReasoningEffort: "high",
+          requireServiceTier: "priority",
+          stdinMustContain: "session handling",
+          attempts: [
+            { model: "gpt-5.4", exitCode: 1, ...errorOutput },
+            { model: "gpt-5.3-codex-spark" },
+            { model: "gpt-5.4" },
+          ],
+        },
+        (textGeneration, readModels) =>
+          Effect.gen(function* () {
+            const modelSelection = createModelSelection(
+              ProviderInstanceId.make("codex-work"),
+              "gpt-5.4",
+              [
+                { id: "reasoningEffort", value: "high" },
+                { id: "serviceTier", value: "priority" },
+              ],
+            );
+            const input = {
+              cwd: process.cwd(),
+              message: "Fix session handling",
+              branch: "fix/session-handling",
+              stagedSummary: "Fix session handling",
+              stagedPatch: "Update session handling",
+              baseBranch: "main",
+              headBranch: "fix/session-handling",
+              commitSummary: "Fix session handling",
+              diffSummary: "Update session handling",
+              diffPatch: "Update session handling",
+              modelSelection,
+            };
+            expect(yield* textGeneration[operation](input)).toEqual(output);
+            // A later request still tries the user's configured model first.
+            expect(yield* textGeneration[operation](input)).toEqual(output);
+            expect(yield* readModels).toEqual(["gpt-5.4", "gpt-5.3-codex-spark", "gpt-5.4"]);
+            expect(modelSelection.model).toBe("gpt-5.4");
+          }),
+      ),
+    );
+  }
+
+  for (const { name, model, attempts, expectedError } of [
+    {
+      name: "does not retry authentication failures",
+      model: "gpt-5.4",
+      attempts: [{ model: "gpt-5.4", exitCode: 1, stderr: "Please login to Codex" }],
+      expectedError: "Please login to Codex",
+    },
+    {
+      name: "does not retry transient rate limits",
+      model: "gpt-5.4",
+      attempts: [
+        { model: "gpt-5.4", exitCode: 1, stderr: "rate_limit_exceeded: Too many requests" },
+      ],
+      expectedError: "rate_limit_exceeded",
+    },
+    {
+      name: "returns the fallback failure without retrying again",
+      model: "gpt-5.4",
+      attempts: [
+        { model: "gpt-5.4", exitCode: 1, stderr: "You've hit your usage limit." },
+        { model: "gpt-5.3-codex-spark", exitCode: 1, stderr: "Spark usage limit reached" },
+      ],
+      expectedError: "Spark usage limit reached",
+    },
+    ...["gpt-5.3-codex-spark", "5.3-spark", "gpt-5.3-spark"].map((model) => ({
+      name: `does not retry when ${model} is already selected`,
+      model,
+      attempts: [{ model, exitCode: 1, stderr: "You've hit your usage limit." }],
+      expectedError: "You've hit your usage limit.",
+    })),
+  ]) {
+    it.effect(name, () =>
+      withFakeCodexEnv(
+        { output: JSON.stringify({ title: "Ignored" }), attempts },
+        (textGeneration, readModels) =>
+          Effect.gen(function* () {
+            const result = yield* textGeneration
+              .generateThreadTitle({
+                cwd: process.cwd(),
+                message: "Fix session handling",
+                modelSelection: createModelSelection(ProviderInstanceId.make("codex"), model),
+              })
+              .pipe(Effect.result);
+            expect(Result.isFailure(result)).toBe(true);
+            if (Result.isFailure(result)) {
+              expect(result.failure).toBeInstanceOf(TextGenerationError);
+              expect(result.failure.message).toContain(expectedError);
+            }
+            expect(yield* readModels).toEqual(attempts.map((attempt) => attempt.model));
+          }),
+      ),
+    );
+  }
+
+  it.effect("does not fall back when a successful request mentions a usage limit", () =>
+    withFakeCodexEnv(
+      {
+        output: JSON.stringify({ title: "Explain usage limits" }),
+        stderr: "You've hit your usage limit.",
+      },
+      (textGeneration, readModels) =>
+        Effect.gen(function* () {
+          const generated = yield* textGeneration.generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Explain usage limits",
+            modelSelection: DEFAULT_TEST_MODEL_SELECTION,
+          });
+          expect(generated.title).toBe("Explain usage limits");
+          expect(yield* readModels).toEqual([DEFAULT_TEST_MODEL_SELECTION.model]);
+        }),
+    ),
+  );
+
   it.effect("generates and sanitizes commit messages without branch by default", () =>
     withFakeCodexEnv(
       {

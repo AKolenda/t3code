@@ -11,6 +11,7 @@ import {
   type CodexSettings,
   DEFAULT_TEXT_GENERATION_REASONING_EFFORT,
   type ModelSelection,
+  ProviderDriverKind,
   TextGenerationError,
 } from "@t3tools/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
@@ -34,10 +35,13 @@ import {
   sanitizeThreadTitle,
   toJsonSchemaObject,
 } from "./TextGenerationUtils.ts";
-import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { getModelSelectionStringOptionValue, normalizeModelSlug } from "@t3tools/shared/model";
 import { getCodexServiceTierOptionValue } from "../codexModelOptions.ts";
 
 const CODEX_TIMEOUT_MS = 180_000;
+const CODEX_USAGE_FALLBACK_MODEL = "gpt-5.3-codex-spark";
+const CODEX_USAGE_LIMIT_ERROR =
+  /\busage_limit_reached\b|\byou(?:'|’)ve hit your usage limit\b|\busage limit (?:has been )?(?:reached|exceeded)\b/i;
 const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 /**
  * Build a Codex text-generation closure bound to a specific `CodexSettings`
@@ -177,7 +181,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     const schemaPath = yield* writeTempFile(operation, "codex-schema", schemaJson);
     const outputPath = yield* writeTempFile(operation, "codex-output", "");
 
-    const runCodexCommand = Effect.fn("runCodexJson.runCodexCommand")(function* () {
+    const runCodexCommand = Effect.fn("runCodexJson.runCodexCommand")(function* (model: string) {
       const launchArgs = resolveCodexLaunchArgs(codexConfig.launchArgs, resolvedEnvironment);
       const reasoningEffort =
         getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") ??
@@ -193,7 +197,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
           "-s",
           "read-only",
           "--model",
-          modelSelection.model,
+          model,
           "--config",
           `model_reasoning_effort="${reasoningEffort}"`,
           ...(serviceTier ? ["--config", `service_tier="${serviceTier}"`] : []),
@@ -239,6 +243,36 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
         { concurrency: "unbounded" },
       );
 
+      return { stdout, stderr, exitCode };
+    }, Effect.scoped);
+
+    const runWithUsageFallback = Effect.fn("runCodexJson.runWithUsageFallback")(function* () {
+      let result = yield* runCodexCommand(modelSelection.model);
+      if (
+        result.exitCode !== 0 &&
+        normalizeModelSlug(modelSelection.model, ProviderDriverKind.make("codex")) !==
+          CODEX_USAGE_FALLBACK_MODEL &&
+        CODEX_USAGE_LIMIT_ERROR.test(`${result.stderr}\n${result.stdout}`)
+      ) {
+        yield* Effect.logInfo("Codex text generation usage exhausted; retrying with Spark", {
+          operation,
+          model: modelSelection.model,
+        });
+        // Do not let output from the failed attempt satisfy the fallback request.
+        yield* fileSystem.writeFileString(outputPath, "").pipe(
+          Effect.mapError(
+            (cause) =>
+              new TextGenerationError({
+                operation,
+                detail: "Failed to clear Codex output file before retry.",
+                cause,
+              }),
+          ),
+        );
+        result = yield* runCodexCommand(CODEX_USAGE_FALLBACK_MODEL);
+      }
+
+      const { stdout, stderr, exitCode } = result;
       if (exitCode !== 0) {
         const stderrDetail = stderr.trim();
         const stdoutDetail = stdout.trim();
@@ -261,8 +295,7 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     ).pipe(Effect.asVoid);
 
     return yield* Effect.gen(function* () {
-      yield* runCodexCommand().pipe(
-        Effect.scoped,
+      yield* runWithUsageFallback().pipe(
         Effect.timeoutOption(CODEX_TIMEOUT_MS),
         Effect.flatMap(
           Option.match({
