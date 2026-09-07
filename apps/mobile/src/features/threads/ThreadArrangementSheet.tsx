@@ -317,7 +317,13 @@ export function ThreadArrangementSheet(props: {
                   </Text>
                   <DragHandle
                     title={item.title}
-                    disabled={!canMoveUp && !canMoveDown}
+                    disabled={
+                      pendingOrder !== null ||
+                      (props.section === "pinned"
+                        ? configs.get(item.environmentId)?.environment.capabilities.threadPinReorder
+                        : configs.get(item.environmentId)?.environment.capabilities
+                            .threadActiveReorder) !== true
+                    }
                     canMoveUp={canMoveUp}
                     canMoveDown={canMoveDown}
                     onStep={(direction) => {

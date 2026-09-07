@@ -1366,3 +1366,25 @@ describe("thread drag destinations", () => {
     ).toBeNull();
   });
 });
+
+it("allows a long drop past an old server even when both adjacent moves fail", () => {
+  const old = EnvironmentId.make("old-server");
+  const ordered = [
+    makeThread({ id: ThreadId.make("a"), title: "a" }),
+    makeThread({ id: ThreadId.make("b"), title: "b", environmentId: old }),
+    makeThread({ id: ThreadId.make("c"), title: "c", activeOrderKey: "h" }),
+    makeThread({ id: ThreadId.make("d"), title: "d", activeOrderKey: "p" }),
+  ];
+  const planner = createThreadMovePlanner({
+    ordered,
+    section: "active",
+    reorderableEnvironmentIds: new Set([environmentId]),
+  });
+  const movedId = `${environmentId}:a`;
+  expect(planner(movedId, "up")).toBeNull();
+  expect(planner(movedId, "down")).toBeNull();
+  const assignments = planner(movedId, { targetId: `${environmentId}:d`, placement: "after" });
+  expect(assignments).toHaveLength(1);
+  expect(assignments![0]!.id).toBe(movedId);
+  expect(assignments![0]!.orderKey > "p").toBe(true);
+});
