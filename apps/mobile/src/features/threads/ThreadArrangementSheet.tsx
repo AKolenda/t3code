@@ -340,7 +340,7 @@ export function ThreadArrangementSheet(props: {
             <Animated.View
               pointerEvents="none"
               className="absolute left-5 right-5 justify-center rounded-xl bg-subtle-strong px-4"
-              style={{ height: ROW_HEIGHT, transform: [{ translateY }] }}
+              style={{ top: 0, height: ROW_HEIGHT, transform: [{ translateY }] }}
             >
               <Text numberOfLines={2} className="text-base font-t3-medium">
                 {preview.thread.title}
