@@ -643,7 +643,6 @@ function threadDetail(projection: OrchestrationV2ThreadProjection): Orchestrator
       (request) => request.status === "pending",
     ).length,
     archived: projection.thread.archivedAt !== null,
-    linkedPullRequest: projection.thread.linkedPullRequest ?? null,
     archivedAt: iso(projection.thread.archivedAt),
     pinnedAt: iso(projection.thread.pinnedAt),
     pinOrderKey: projection.thread.pinOrderKey ?? null,

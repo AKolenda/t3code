@@ -389,7 +389,6 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   itemCount: NonNegativeInt,
   pendingRequestCount: NonNegativeInt,
   archived: Schema.Boolean,
-  linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
   archivedAt: Schema.NullOr(IsoDateTime),
   pinnedAt: Schema.NullOr(IsoDateTime),
   pinOrderKey: Schema.NullOr(Schema.String),
