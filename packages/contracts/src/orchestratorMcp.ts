@@ -29,7 +29,6 @@ import {
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
 } from "./orchestrationV2.ts";
-import { ThreadLinkedPullRequest } from "./orchestration.ts";
 import {
   ProviderOptionDescriptor,
   ProviderOptionSelection,
