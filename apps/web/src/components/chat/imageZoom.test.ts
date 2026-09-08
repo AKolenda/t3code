@@ -9,7 +9,14 @@ import {
   zoomImageAt,
 } from "./imageZoom";
 
-const frame = { width: 400, height: 300, viewportWidth: 1000, viewportHeight: 800 };
+const frame = {
+  width: 400,
+  height: 300,
+  viewportWidth: 1000,
+  viewportHeight: 800,
+  centerX: 0,
+  centerY: 0,
+};
 
 describe("zoomImageAt", () => {
   it("keeps the anchored point fixed on screen", () => {
@@ -56,6 +63,14 @@ describe("clampImagePan", () => {
       x: 300,
       y: -200,
     });
+  });
+
+  it("shifts the bounds by the image center offset so the viewport stays covered", () => {
+    // The caption sits the image 12px above the viewport center. Dragging down
+    // must stop 12px earlier and dragging up may go 12px further.
+    const offset = { ...frame, centerY: -12 };
+    expect(clampImagePan({ scale: 4, x: 0, y: 900 }, offset).y).toBe(212);
+    expect(clampImagePan({ scale: 4, x: 0, y: -900 }, offset).y).toBe(-188);
   });
 });
 

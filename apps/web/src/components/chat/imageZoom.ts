@@ -9,12 +9,19 @@ export interface ImageZoomState {
   readonly y: number;
 }
 
-/** The untransformed image size and the viewport it must stay visible in. */
+/**
+ * The untransformed image size, the viewport it must stay visible in, and the
+ * offset of the untransformed image center from the viewport center. The
+ * caption below the image pushes the image above the viewport center, so the
+ * pan bounds are not symmetric.
+ */
 export interface ImageZoomFrame {
   readonly width: number;
   readonly height: number;
   readonly viewportWidth: number;
   readonly viewportHeight: number;
+  readonly centerX: number;
+  readonly centerY: number;
 }
 
 export interface Point {
@@ -28,19 +35,26 @@ export const MAX_IMAGE_ZOOM = 8;
 /** Zoom applied by a double click on an unzoomed image. */
 export const DOUBLE_CLICK_IMAGE_ZOOM = 2.5;
 
-function clampAxis(translate: number, scaledSize: number, viewportSize: number): number {
-  // An image that fits on this axis stays centered. One that overflows may be
-  // panned until its far edge meets the viewport edge, never past it.
-  const overflow = Math.max(0, (scaledSize - viewportSize) / 2);
+function clampAxis(
+  translate: number,
+  scaledSize: number,
+  viewportSize: number,
+  center: number,
+): number {
+  // An image that fits on this axis keeps its layout position. One that
+  // overflows may be panned until its far edge meets the viewport edge, never
+  // past it, so it always covers the viewport on this axis.
+  if (scaledSize <= viewportSize) return 0;
+  const overflow = (scaledSize - viewportSize) / 2;
   // `|| 0` turns a -0 from clamping into 0 so identity states compare equal.
-  return Math.min(overflow, Math.max(-overflow, translate)) || 0;
+  return Math.min(overflow - center, Math.max(-overflow - center, translate)) || 0;
 }
 
 export function clampImagePan(state: ImageZoomState, frame: ImageZoomFrame): ImageZoomState {
   return {
     scale: state.scale,
-    x: clampAxis(state.x, frame.width * state.scale, frame.viewportWidth),
-    y: clampAxis(state.y, frame.height * state.scale, frame.viewportHeight),
+    x: clampAxis(state.x, frame.width * state.scale, frame.viewportWidth, frame.centerX),
+    y: clampAxis(state.y, frame.height * state.scale, frame.viewportHeight, frame.centerY),
   };
 }
 

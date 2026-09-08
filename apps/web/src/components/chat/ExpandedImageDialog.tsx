@@ -17,6 +17,7 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { composerFloatingLayerProps } from "./composerEventScope";
 import {
+  clampImagePan,
   DOUBLE_CLICK_IMAGE_ZOOM,
   IMAGE_ZOOM_IDENTITY,
   type ImageZoomFrame,
@@ -67,27 +68,25 @@ function ExpandedVideo({ item }: { readonly item: ExpandedImageItem }) {
   );
 }
 
-function zoomFrame(image: HTMLImageElement): ImageZoomFrame {
+function zoomFrame(image: HTMLImageElement, zoom: ImageZoomState): ImageZoomFrame {
+  // The rect is already transformed. Scaling around the center leaves the
+  // center put, so subtracting the translate gives the untransformed center.
+  const rect = image.getBoundingClientRect();
   return {
     width: image.offsetWidth,
     height: image.offsetHeight,
     viewportWidth: window.innerWidth,
     viewportHeight: window.innerHeight,
+    centerX: rect.left + rect.width / 2 - zoom.x - window.innerWidth / 2,
+    centerY: rect.top + rect.height / 2 - zoom.y - window.innerHeight / 2,
   };
 }
 
 /** Pointer position relative to the untransformed center of the image box. */
-function zoomAnchor(
-  image: HTMLImageElement,
-  zoom: ImageZoomState,
-  event: { clientX: number; clientY: number },
-) {
-  // The rect is already transformed. Undo the translate so the anchor is
-  // measured against the untransformed center, which the transform origin uses.
-  const rect = image.getBoundingClientRect();
+function zoomAnchor(frame: ImageZoomFrame, event: { clientX: number; clientY: number }) {
   return {
-    x: event.clientX - (rect.left + rect.width / 2 - zoom.x),
-    y: event.clientY - (rect.top + rect.height / 2 - zoom.y),
+    x: event.clientX - frame.viewportWidth / 2 - frame.centerX,
+    y: event.clientY - frame.viewportHeight / 2 - frame.centerY,
   };
 }
 
@@ -107,11 +106,6 @@ function ZoomableImage({
 }) {
   const imageRef = useRef<HTMLImageElement | null>(null);
   const [zoom, setZoom] = useState<ImageZoomState>(IMAGE_ZOOM_IDENTITY);
-  // Mirrors `zoom` for the native wheel listener, which is registered once.
-  const zoomRef = useRef(zoom);
-  useEffect(() => {
-    zoomRef.current = zoom;
-  }, [zoom]);
   const dragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
 
   // Wheel must be non-passive to stop the page from scrolling or, in the
@@ -125,11 +119,23 @@ function ZoomableImage({
       // macOS reports trackpad pinch as ctrl+wheel with small deltas. A plain
       // wheel zooms too, since the dialog has nothing else to scroll.
       const factor = wheelZoomFactor(event.ctrlKey ? event.deltaY * 3 : event.deltaY);
-      const anchor = zoomAnchor(image, zoomRef.current, event);
-      setZoom((current) => zoomImageAt(current, factor, anchor, zoomFrame(image)));
+      setZoom((current) => {
+        const frame = zoomFrame(image, current);
+        return zoomImageAt(current, factor, zoomAnchor(frame, event), frame);
+      });
     };
     image.addEventListener("wheel", onWheel, { passive: false });
     return () => image.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // A resize changes the pan bounds. Reclamp so a grown window does not leave
+  // the image offset with backdrop showing at one edge.
+  useEffect(() => {
+    const image = imageRef.current;
+    if (!image) return;
+    const onResize = () => setZoom((current) => clampImagePan(current, zoomFrame(image, current)));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
   }, []);
 
   const zoomed = zoom.scale > 1;
@@ -156,8 +162,8 @@ function ZoomableImage({
         const dy = event.clientY - drag.y;
         drag.x = event.clientX;
         drag.y = event.clientY;
-        const frame = zoomFrame(event.currentTarget);
-        setZoom((current) => panImage(current, dx, dy, frame));
+        const image = event.currentTarget;
+        setZoom((current) => panImage(current, dx, dy, zoomFrame(image, current)));
       }}
       onPointerUp={(event) => {
         if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
@@ -167,16 +173,11 @@ function ZoomableImage({
       }}
       onDoubleClick={(event) => {
         const image = event.currentTarget;
-        setZoom((current) =>
-          current.scale > 1
-            ? IMAGE_ZOOM_IDENTITY
-            : zoomImageAt(
-                current,
-                DOUBLE_CLICK_IMAGE_ZOOM,
-                zoomAnchor(image, current, event),
-                zoomFrame(image),
-              ),
-        );
+        setZoom((current) => {
+          if (current.scale > 1) return IMAGE_ZOOM_IDENTITY;
+          const frame = zoomFrame(image, current);
+          return zoomImageAt(current, DOUBLE_CLICK_IMAGE_ZOOM, zoomAnchor(frame, event), frame);
+        });
       }}
     />
   );
