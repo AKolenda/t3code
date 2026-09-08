@@ -533,6 +533,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
       ),
     supportsAck: true,
     supportsTransferables: false,
+    codecFor: parserFactory.codecFor,
   });
 
   const serverProtocol = RpcServer.Protocol.of({
@@ -548,7 +549,9 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     initialMessage: Effect.succeedNone,
     supportsAck: true,
     supportsTransferables: false,
+    codecFor: parserFactory.codecFor,
     supportsSpanPropagation: true,
+    supportsNotifications: true,
   });
 
   // JSON-RPC notifications carry no `id`. The generic Request encoder emits `id: ""` plus
