@@ -1,3 +1,4 @@
+import { appAtomRegistry } from "../../state/atom-registry";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
@@ -11,7 +12,11 @@ import { SymbolView } from "../../components/AppSymbol";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { environmentThreadShells } from "../../state/threads";
-import { pendingThreadOrderAtom, threadDropBusyAtom } from "../../state/thread-order";
+import {
+  pendingThreadOrderAtom,
+  threadDropBusyAtom,
+  threadArrangementOpenAtom,
+} from "../../state/thread-order";
 import { queuedThreadKeysAtom } from "../../state/use-thread-outbox";
 import { useThreadListActions } from "../home/useThreadListActions";
 import { createThreadMovePlanner, type ThreadMoveDestination } from "./threadOrder";
@@ -58,6 +63,7 @@ function DragHandle(props: {
         .runOnJS(true)
         .onStart(() => latest.current.onStart())
         .onUpdate((event) => latest.current.onMove(event.translationY))
+        .onEnd((event) => latest.current.onMove(event.translationY))
         .onFinalize((_, success) => latest.current.onEnd(!success)),
     [props.disabled],
   );
@@ -437,4 +443,11 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
       </GestureHandlerRootView>
     </Modal>
   );
+}
+
+export function ThreadArrangementHost() {
+  const open = useAtomValue(threadArrangementOpenAtom);
+  return open ? (
+    <ThreadArrangementSheet onClose={() => appAtomRegistry.set(threadArrangementOpenAtom, false)} />
+  ) : null;
 }
