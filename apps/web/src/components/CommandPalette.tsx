@@ -1,5 +1,7 @@
 "use client";
 
+import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
+
 import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   canCreateProjectInEnvironment,
@@ -1598,7 +1600,7 @@ function OpenCommandPaletteDialog(props: {
 
   if (
     activeThread !== null &&
-    activeThreadServerConfig?.environment.capabilities.threadPullRequests === true
+    threadPullRequestLinkMode(activeThreadServerConfig?.environment.capabilities) !== "unsupported"
   ) {
     const threadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
     actionItems.push({
@@ -1611,16 +1613,18 @@ function OpenCommandPaletteDialog(props: {
         openLinkPullRequestDialog(threadRef);
       },
     });
-    actionItems.push({
-      kind: "action",
-      value: "action:open-thread-pull-requests",
-      searchTerms: ["pull requests", "linked", "stack", "prs"],
-      title: "Show linked pull requests",
-      icon: <GitPullRequestArrowIcon className={ITEM_ICON_CLASS} />,
-      run: async () => {
-        useRightPanelStore.getState().open(threadRef, "pull-requests");
-      },
-    });
+    if (activeThreadServerConfig?.environment.capabilities.threadPullRequests === true) {
+      actionItems.push({
+        kind: "action",
+        value: "action:open-thread-pull-requests",
+        searchTerms: ["pull requests", "linked", "stack", "prs"],
+        title: "Show linked pull requests",
+        icon: <GitPullRequestArrowIcon className={ITEM_ICON_CLASS} />,
+        run: async () => {
+          useRightPanelStore.getState().open(threadRef, "pull-requests");
+        },
+      });
+    }
   }
 
   actionItems.push({

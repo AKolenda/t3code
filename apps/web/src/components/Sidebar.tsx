@@ -201,6 +201,7 @@ import {
   terminalStatusFromRunningIds,
   type TerminalStatusIndicator,
   useLinkedThreadPullRequest,
+  useSupportsMultiplePullRequests,
 } from "./ThreadStatusIndicators";
 import {
   resolveSnoozePresets,
@@ -340,6 +341,7 @@ function SidebarThreadTooltip({
   terminalProcessCount: number;
 }) {
   const driverKind = providerEntry?.driverKind ?? null;
+  const supportsMultiplePullRequests = useSupportsMultiplePullRequests(thread.environmentId);
   return (
     <TooltipPopup
       side="right"
@@ -421,7 +423,7 @@ function SidebarThreadTooltip({
             </div>
           ) : null}
         </div>
-        {thread.pullRequests.length > 0 ? (
+        {supportsMultiplePullRequests && thread.pullRequests.length > 0 ? (
           <div className="border-t border-border/60 pt-2 pl-0.5 text-xs text-muted-foreground">
             <ThreadPullRequestsMiniList pullRequests={thread.pullRequests} />
           </div>
@@ -1080,7 +1082,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     gitStatus.data,
   );
   const pr = linkedPullRequestStatus?.pr ?? null;
-  const currentLinkedPr = resolveThreadCurrentPullRequestLink(thread.pullRequests);
+  const supportsMultiplePullRequests = useSupportsMultiplePullRequests(thread.environmentId);
+  const currentLinkedPr = supportsMultiplePullRequests
+    ? resolveThreadCurrentPullRequestLink(thread.pullRequests)
+    : null;
 
   // Same semantics as the legacy sidebar (never-visited counts as read):
   // switching sidebars must not light up every historical thread as unread.
@@ -1486,7 +1491,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   // One badge shape for every thread: the glyph says stack or not, the number is the current
   // pull request, and "+N" counts the others behind it. A real link so cmd/ctrl+click and
   // middle-click open the host in the browser; a plain click opens T3's pull request view.
-  const prBadgeShape = resolveThreadPullRequestBadge(thread.pullRequests);
+  const prBadgeShape = supportsMultiplePullRequests
+    ? resolveThreadPullRequestBadge(thread.pullRequests)
+    : null;
   const prBadgeClassName = (state: "open" | "merged" | "closed", colorClass: string) =>
     cn(
       // Sidebar chrome follows the interface font; tabular digits keep the number from
@@ -1527,7 +1534,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         className={cn(
           // Sidebar chrome follows the interface font; tabular digits keep the
           // number from reflowing as PR states stream in.
-          "shrink-0 text-xs tabular-nums hover:underline",
+          "inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap text-xs tabular-nums hover:underline",
           variant === "slim" && variantAction === "unsettle"
             ? cn("text-secondary-label transition-colors", settledPrHoverClass)
             : prStatus.colorClass,
@@ -1671,7 +1678,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               remain visible AND clickable while the row is hovered. Only
               the time/jump label yields to the settle affordance. */}
             {prBadge}
-            {prBadge && pr && visibleThreadPullRequests(thread.pullRequests).length === 0 ? (
+            {prBadge &&
+            pr &&
+            (supportsMultiplePullRequests
+              ? visibleThreadPullRequests(thread.pullRequests).length === 0
+              : thread.linkedPullRequest == null) ? (
               <LinkBranchPullRequestButton threadRef={threadRef} url={pr.url} />
             ) : null}
             {sortable?.isDragging ? (
@@ -1974,7 +1985,11 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               )}
               {terminalStatusIcon}
               {prBadge}
-              {prBadge && pr && visibleThreadPullRequests(thread.pullRequests).length === 0 ? (
+              {prBadge &&
+              pr &&
+              (supportsMultiplePullRequests
+                ? visibleThreadPullRequests(thread.pullRequests).length === 0
+                : thread.linkedPullRequest == null) ? (
                 <LinkBranchPullRequestButton threadRef={threadRef} url={pr.url} />
               ) : null}
               {diff ? (

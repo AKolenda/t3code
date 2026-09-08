@@ -3,18 +3,13 @@ import {
   type ScopedThreadRef,
   type SourceControlProviderKind,
 } from "@t3tools/contracts";
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
 import { useAtomValue } from "@effect/atom-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { findProjectOnChangeRequestHost, parseChangeRequestUrl } from "~/lib/openPullRequestLink";
 import { parsePullRequestReference } from "~/pullRequestReference";
 import { useProjects, useThreadShell } from "~/state/entities";
-import { threadEnvironment } from "~/state/threads";
-import { useAtomCommand } from "~/state/use-atom-command";
+import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
 import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { Atom } from "effect/unstable/reactivity";
 import { Button } from "../ui/button";
@@ -55,7 +50,8 @@ interface LinkPullRequestDialogProps {
 export function LinkPullRequestDialogHost() {
   const threadRef = useAtomValue(linkPullRequestDialogThreadAtom);
   const thread = useThreadShell(threadRef);
-  if (threadRef === null) return null;
+  const linking = usePullRequestLinking(threadRef?.environmentId);
+  if (threadRef === null || linking.mode === "unsupported") return null;
   return (
     <LinkPullRequestDialog
       open
@@ -166,7 +162,7 @@ function LinkPullRequestDialog({
       webUrl: (number: number) => changeRequestWebUrl(kind, host, repository, number),
     };
   }, [environmentProjects, projectId]);
-  const link = useAtomCommand(threadEnvironment.linkPullRequest, { reportFailure: false });
+  const linking = usePullRequestLinking(threadRef.environmentId);
   const [pending, setPending] = useState(false);
 
   useEffect(() => {
@@ -198,19 +194,16 @@ function LinkPullRequestDialog({
     if (resolved === null || "error" in resolved) return;
     setSubmitError(null);
     setPending(true);
-    const result = await link({
-      environmentId: threadRef.environmentId,
-      input: { threadId: threadRef.threadId, ...resolved.link, source: "manual" },
-    }).finally(() => setPending(false));
-    if (result._tag === "Failure") {
-      if (!isAtomCommandInterrupted(result)) {
-        const cause = squashAtomCommandFailure(result);
-        setSubmitError(cause instanceof Error ? cause.message : "Could not link the pull request.");
-      }
+    try {
+      await linking.changeLink(threadRef, resolved.link.url, true);
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : "Could not link the pull request.");
       return;
+    } finally {
+      setPending(false);
     }
     onOpenChange(false);
-  }, [link, onOpenChange, resolved, threadRef]);
+  }, [linking, onOpenChange, resolved, threadRef]);
 
   const validation = !dirty
     ? null

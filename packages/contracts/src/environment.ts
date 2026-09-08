@@ -123,8 +123,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** Server understands regenerateTitle on thread.meta.update. Absent on
       older servers, so clients hide the action instead of sending it. */
   threadTitleRegeneration: Schema.optionalKey(Schema.Boolean),
-  /** Server persists a pull request reference on thread.meta.update. Superseded by
-      threadPullRequests; servers that set the new flag no longer set this one. */
+  /** Server supports legacy linkedPullRequest updates through thread.meta.update.
+      Independent of threadPullRequests; servers supporting both advertise both. */
   threadPullRequestLinking: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.pull-request.link / .unlink, exposes `pullRequests` on
       threads, and routes PullRequestRef.host across projects on the same host. Same

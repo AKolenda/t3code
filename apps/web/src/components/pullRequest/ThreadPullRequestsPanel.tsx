@@ -15,7 +15,8 @@ import { useCallback, useMemo } from "react";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { useOpenPrLink } from "~/lib/openPullRequestLink";
 import { cn } from "~/lib/utils";
-import { useThreadShell } from "~/state/entities";
+import { useServerConfigs, useThreadShell } from "~/state/entities";
+import { PullRequestsUnavailableState } from "./PullRequestsUnavailableState";
 import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
@@ -204,6 +205,19 @@ function LinkRow({
 }
 
 export function ThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThreadRef }) {
+  const configs = useServerConfigs();
+  if (configs.get(threadRef.environmentId)?.environment.capabilities.threadPullRequests !== true) {
+    return (
+      <PullRequestsUnavailableState
+        title="Linked pull requests unavailable"
+        error="This environment does not support multiple linked pull requests."
+      />
+    );
+  }
+  return <EnabledThreadPullRequestsPanel threadRef={threadRef} />;
+}
+
+function EnabledThreadPullRequestsPanel({ threadRef }: { threadRef: ScopedThreadRef }) {
   const thread = useThreadShell(threadRef);
   const openLinkDialog = useCallback(() => openLinkPullRequestDialog(threadRef), [threadRef]);
   const unlink = useAtomCommand(threadEnvironment.unlinkPullRequest, { reportFailure: true });

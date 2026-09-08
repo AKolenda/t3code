@@ -13,7 +13,7 @@ import { appAtomRegistry } from "./atom-registry";
 import { serverEnvironment } from "./server";
 import { useEnvironmentQuery } from "./query";
 import {
-  presentThreadLinkedPullRequests,
+  resolveThreadPrSource,
   presentThreadPr,
   type ThreadPrPresentation,
 } from "./thread-pr-presentation";
@@ -48,16 +48,18 @@ export function useThreadPr(thread: EnvironmentThreadShell): ThreadPrPresentatio
     serverEnvironment.configValueAtom(thread.environmentId),
     (config) => config?.environment.capabilities.threadPullRequests === true,
   );
-  const linkedPresentation = useMemo(
-    () => presentThreadLinkedPullRequests(thread.pullRequests),
-    [thread.pullRequests],
+  const { linkedPresentation, pullRequestRef } = useMemo(
+    () =>
+      resolveThreadPrSource(
+        {
+          pullRequests: thread.pullRequests,
+          linkedPullRequest: thread.linkedPullRequest,
+          branchPullRequest: thread.branchPullRequest,
+        },
+        { threadPullRequests: supportsLinks },
+      ),
+    [thread.pullRequests, thread.linkedPullRequest, thread.branchPullRequest, supportsLinks],
   );
-  // Legacy servers decode an empty link array. Keep their single-PR reference,
-  // but never revive a dismissed link from a modern server's compat field.
-  const legacyPullRequest =
-    !supportsLinks && thread.pullRequests.length === 0 ? thread.linkedPullRequest : null;
-  const pullRequestRef =
-    linkedPresentation !== null ? null : (legacyPullRequest ?? thread.branchPullRequest ?? null);
   const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
   const snapshotIdentity = JSON.stringify(pullRequestRef);
   // Select this row's entry so writes for other rows do not re-render it.

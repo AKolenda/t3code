@@ -1,4 +1,9 @@
-import type { ThreadPullRequestLink, VcsStatusResult } from "@t3tools/contracts";
+import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import type {
+  ExecutionEnvironmentCapabilities,
+  ThreadPullRequestLink,
+  VcsStatusResult,
+} from "@t3tools/contracts";
 import { resolveChangeRequestPresentation } from "@t3tools/shared/sourceControl";
 
 import {
@@ -76,4 +81,24 @@ export function presentThreadLinkedPullRequests(
         : `#${link.number} pull request ${state === null ? "status pending" : isDraft ? "draft" : state}${badge.others > 0 ? `, ${badge.others} more linked` : ""}`,
     textClassName: state === null || isDraft ? "text-foreground-muted" : PR_STATE_TEXT_CLASS[state],
   };
+}
+
+/** Only the array capability replaces legacy references with persisted snapshots. */
+export function resolveThreadPrSource(
+  thread: Pick<EnvironmentThreadShell, "pullRequests" | "linkedPullRequest" | "branchPullRequest">,
+  capabilities:
+    | Pick<ExecutionEnvironmentCapabilities, "threadPullRequests" | "threadPullRequestLinking">
+    | undefined,
+) {
+  const supportsSnapshots = capabilities?.threadPullRequests === true;
+  const linkedPresentation = supportsSnapshots
+    ? presentThreadLinkedPullRequests(thread.pullRequests)
+    : null;
+  const pullRequestRef =
+    linkedPresentation !== null
+      ? null
+      : ((supportsSnapshots
+          ? thread.branchPullRequest
+          : (thread.linkedPullRequest ?? thread.branchPullRequest)) ?? null);
+  return { linkedPresentation, pullRequestRef };
 }

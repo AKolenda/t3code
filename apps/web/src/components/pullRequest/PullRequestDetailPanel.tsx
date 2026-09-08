@@ -66,7 +66,7 @@ import { cn } from "~/lib/utils";
 import { readLocalApi } from "~/localApi";
 import type { ReviewCommentContext } from "~/reviewCommentContext";
 import { buildPhysicalToLogicalProjectKeyMap } from "~/sidebarProjectGrouping";
-import { useProjects } from "~/state/entities";
+import { useProjects, useServerConfigs } from "~/state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { useLiveRefresh } from "~/hooks/useLiveRefresh";
@@ -451,7 +451,7 @@ function PullRequestBaseFreshnessWarning({
 export function PullRequestDetailPanel({
   environmentId,
   threadRef = null,
-  reference,
+  reference: requestedReference,
   listEntry = null,
   refreshToken: forcedRefreshToken = 0,
   onActed,
@@ -502,6 +502,20 @@ export function PullRequestDetailPanel({
    */
   onBack?: (() => void) | undefined;
 }) {
+  const environmentConfigs = useServerConfigs();
+  const supportsThreadPullRequests =
+    environmentConfigs.get(environmentId)?.environment.capabilities.threadPullRequests === true;
+  const reference = useMemo(
+    () =>
+      supportsThreadPullRequests
+        ? requestedReference
+        : {
+            projectId: requestedReference.projectId,
+            repository: requestedReference.repository,
+            number: requestedReference.number,
+          },
+    [requestedReference, supportsThreadPullRequests],
+  );
   const pullRequestKey = `${reference.projectId}:${reference.host ?? ""}:${reference.repository}#${reference.number}`;
   const matchingListEntry =
     listEntry?.projectId === reference.projectId &&
@@ -716,7 +730,7 @@ export function PullRequestDetailPanel({
   // The host's own stack, where it keeps one. Only asked for once the detail has landed so a
   // pull request nobody can read costs one request rather than two.
   const nativeStack = useEnvironmentQuery(
-    detail === null || detail.capabilities.stacks !== true
+    detail === null || detail.capabilities.stacks !== true || !supportsThreadPullRequests
       ? null
       : pullRequestStackAtom({ environmentId, input: reference }),
   ).data;

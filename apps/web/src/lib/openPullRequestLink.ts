@@ -241,9 +241,19 @@ export function useOpenChangeRequestLink(
                   Number(right.environmentId === primaryEnvironmentId) -
                   Number(left.environmentId === primaryEnvironmentId),
               );
-      const project = resolvedPanelRef
-        ? findProjectOnChangeRequestHost(projects, parsed)
-        : findProjectForChangeRequest(projects, parsed);
+      const exactProject = findProjectForChangeRequest(projects, parsed);
+      const project =
+        exactProject ??
+        (resolvedPanelRef
+          ? findProjectOnChangeRequestHost(
+              projects.filter(
+                (candidate) =>
+                  serverConfigs.get(candidate.environmentId)?.environment.capabilities
+                    .threadPullRequests === true,
+              ),
+              parsed,
+            )
+          : undefined);
       if (project === undefined || !reads(project.environmentId)) return false;
       event.preventDefault();
       event.stopPropagation();
@@ -254,7 +264,10 @@ export function useOpenChangeRequestLink(
             ? {}
             : { environmentId: project.environmentId }),
           projectId: project.id,
-          host: parsed.host,
+          ...(serverConfigs.get(project.environmentId)?.environment.capabilities
+            .threadPullRequests === true
+            ? { host: parsed.host }
+            : {}),
           repository: parsed.repository,
           url: targetUrl,
           number: parsed.number,

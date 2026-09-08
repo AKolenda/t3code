@@ -26,6 +26,7 @@ import {
   OrchestrationMessage,
   ThreadMessageSentPayload,
   ThreadMetaUpdatedPayload,
+  ThreadLinkedPullRequest,
   ThreadTurnStartCommand,
   ThreadCreatedPayload,
   ThreadTurnDiff,
@@ -685,6 +686,46 @@ it.effect("defaults settled fields when decoding historical thread data", () =>
     // Pre-link servers omit the array entirely.
     assert.deepStrictEqual(thread.pullRequests, []);
     assert.deepStrictEqual(shell.pullRequests, []);
+
+    const legacyLink = {
+      projectId: ProjectId.make("project-1"),
+      repository: "acme/web",
+      number: 42,
+      url: "https://github.com/acme/web/pull/42",
+    };
+    const oldServerShell = yield* decodeOrchestrationThreadShell({
+      ...common,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+      linkedPullRequest: legacyLink,
+    });
+    assert.deepStrictEqual(oldServerShell.pullRequests, []);
+    assert.deepStrictEqual(oldServerShell.linkedPullRequest, legacyLink);
+
+    // A decoder from before the array must still read its single-link field
+    // after a new server encodes the expanded snapshot.
+    const oldLinkFields = Schema.Struct({
+      linkedPullRequest: Schema.optional(ThreadLinkedPullRequest),
+    });
+    const newServerWire = yield* Schema.encodeEffect(OrchestrationThreadShell)({
+      ...oldServerShell,
+      pullRequests: [
+        {
+          host: "github.com",
+          repository: legacyLink.repository,
+          number: legacyLink.number,
+          url: legacyLink.url,
+          source: "agent",
+          linkedAt: common.createdAt,
+          snapshot: null,
+          stack: null,
+        },
+      ],
+    });
+    const oldClientFields = yield* Schema.decodeUnknownEffect(oldLinkFields)(newServerWire);
+    assert.deepStrictEqual(oldClientFields.linkedPullRequest, legacyLink);
   }),
 );
 

@@ -14,7 +14,10 @@ import {
   type ThreadPullRequestLink,
   type OrchestrationThreadActivity,
 } from "@t3tools/contracts";
-import { threadPullRequestKeysEqual } from "@t3tools/shared/threadPullRequests";
+import {
+  resolveThreadCurrentPullRequestLink,
+  threadPullRequestKeysEqual,
+} from "@t3tools/shared/threadPullRequests";
 import { compareDateTimeStrings } from "@t3tools/shared/dateTime";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
@@ -895,6 +898,27 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      // Old clients only see the derived single link. Unlink that request through
+      // the same command path as modern clients, including stack dismissal, while
+      // retaining other links they cannot see. Historical metadata events still replay unchanged.
+      const currentPullRequest = resolveThreadCurrentPullRequestLink(thread.pullRequests);
+      if (command.linkedPullRequest === null && currentPullRequest !== null) {
+        const { linkedPullRequest: _linkedPullRequest, ...metadata } = command;
+        return yield* decideCommandSequence({
+          readModel,
+          commands: [
+            metadata,
+            {
+              type: "thread.pull-request.unlink",
+              commandId: command.commandId,
+              threadId: command.threadId,
+              host: currentPullRequest.host,
+              repository: currentPullRequest.repository,
+              number: currentPullRequest.number,
+            },
+          ],
+        });
+      }
       const branch =
         command.branch !== undefined &&
         command.expectedBranch !== undefined &&

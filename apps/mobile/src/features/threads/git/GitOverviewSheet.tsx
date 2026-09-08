@@ -53,11 +53,16 @@ export function GitOverviewSheet(props: GitOverviewSheetProps) {
   const isInspector = presentation === "inspector";
   const environmentId = EnvironmentId.make(props.route.params.environmentId);
   const threadId = ThreadId.make(props.route.params.threadId);
-  const { selectedThread } = useThreadSelection();
+  const { selectedThread, selectedEnvironmentRuntime } = useThreadSelection();
   const { selectedThreadCwd, selectedThreadWorktreePath } = useSelectedThreadWorktree();
+  const supportsLinkedPrSnapshots =
+    selectedEnvironmentRuntime?.serverConfig?.environment.capabilities.threadPullRequests === true;
   const linkedPrChains = useMemo(
-    () => resolveThreadPullRequestChains(selectedThread?.pullRequests ?? []),
-    [selectedThread?.pullRequests],
+    () =>
+      resolveThreadPullRequestChains(
+        supportsLinkedPrSnapshots ? (selectedThread?.pullRequests ?? []) : [],
+      ),
+    [selectedThread?.pullRequests, supportsLinkedPrSnapshots],
   );
   const gitState = useSelectedThreadGitState();
   const gitActions = useSelectedThreadGitActions();

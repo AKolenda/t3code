@@ -3,7 +3,8 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
-  type OrchestrationEvent,
+  OrchestrationEvent,
+  OrchestrationCommand,
   type OrchestrationReadModel,
   type ThreadPullRequestLink,
   type ThreadPullRequestSnapshot,
@@ -11,8 +12,11 @@ import {
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 
 import { decideOrchestrationCommand } from "./decider.ts";
+import { projectEvent } from "./projector.ts";
+import { isThreadDetailEvent } from "../ws.ts";
 
 type PlannedEvent = Omit<OrchestrationEvent, "sequence">;
 
@@ -88,6 +92,41 @@ const snapshot: ThreadPullRequestSnapshot = {
 };
 
 it.layer(NodeServices.layer)("pull request link decider", (it) => {
+  for (const source of ["manual", "agent", "created", "stack"] as const) {
+    it.effect(`legacy unlink removes the visible ${source} link and preserves other requests`, () =>
+      Effect.gen(function* () {
+        const other = makeLink({ number: 7, snapshot: { ...snapshot, state: "merged" } });
+        const current = makeLink({ source, linkedAt: "2026-01-02T00:00:00.000Z" });
+        let model = makeReadModel([other, current]);
+        // This is the pre-array command shape sent by older clients.
+        const command = yield* Schema.decodeUnknownEffect(OrchestrationCommand)({
+          type: "thread.meta.update",
+          commandId: "legacy-unlink",
+          threadId: THREAD_ID,
+          linkedPullRequest: null,
+          title: "Renamed by old client",
+        });
+        const decided = yield* decideOrchestrationCommand({ readModel: model, command });
+        const events = Array.isArray(decided) ? decided : [decided];
+        for (const planned of events) {
+          const event = { ...planned, sequence: model.snapshotSequence + 1 };
+          const encoded = yield* Schema.encodeEffect(OrchestrationEvent)(event);
+          const decoded = yield* Schema.decodeUnknownEffect(OrchestrationEvent)(encoded);
+          // Older detail-event unions must never receive the new PR discriminants.
+          expect(isThreadDetailEvent(decoded)).toBe(false);
+          model = yield* projectEvent(model, decoded);
+        }
+        const thread = model.threads[0]!;
+        expect(thread.title).toBe("Renamed by old client");
+        expect(thread.pullRequests).toEqual(
+          source === "stack" ? [other, { ...current, source: "stack-dismissed" }] : [other],
+        );
+        // The old single-link field continues to track the remaining visible request.
+        expect(thread.linkedPullRequest?.number).toBe(7);
+      }),
+    );
+  }
+
   it.effect("links a pull request with a normalized key and empty host state", () =>
     Effect.gen(function* () {
       const decided = yield* decideOrchestrationCommand({

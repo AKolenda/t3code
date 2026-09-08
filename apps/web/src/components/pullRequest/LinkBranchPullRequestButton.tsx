@@ -1,14 +1,7 @@
 import type { ScopedThreadRef } from "@t3tools/contracts";
-import {
-  isAtomCommandInterrupted,
-  squashAtomCommandFailure,
-} from "@t3tools/client-runtime/state/runtime";
 import { Link2 } from "lucide-react";
 import { useState } from "react";
-import { parseChangeRequestUrl } from "~/lib/openPullRequestLink";
-import { useServerConfigs } from "~/state/entities";
-import { threadEnvironment } from "~/state/threads";
-import { useAtomCommand } from "~/state/use-atom-command";
+import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -21,15 +14,9 @@ export function LinkBranchPullRequestButton({
   threadRef: ScopedThreadRef;
   url: string;
 }) {
-  const configs = useServerConfigs();
-  const link = useAtomCommand(threadEnvironment.linkPullRequest, { reportFailure: false });
+  const linking = usePullRequestLinking(threadRef.environmentId);
   const [pending, setPending] = useState(false);
-  const reference = parseChangeRequestUrl(url);
-  if (
-    !reference ||
-    configs.get(threadRef.environmentId)?.environment.capabilities.threadPullRequests !== true
-  )
-    return null;
+  if (!linking.canLink(url)) return null;
   return (
     <Tooltip>
       <TooltipTrigger
@@ -45,17 +32,16 @@ export function LinkBranchPullRequestButton({
               event.preventDefault();
               event.stopPropagation();
               setPending(true);
-              const result = await link({
-                environmentId: threadRef.environmentId,
-                input: { threadId: threadRef.threadId, ...reference, url, source: "manual" },
-              }).finally(() => setPending(false));
-              if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
-                const error = squashAtomCommandFailure(result);
+              try {
+                await linking.changeLink(threadRef, url, true);
+              } catch (error) {
                 toastManager.add({
                   type: "error",
                   title: "Could not link pull request",
                   description: error instanceof Error ? error.message : String(error),
                 });
+              } finally {
+                setPending(false);
               }
             }}
           >

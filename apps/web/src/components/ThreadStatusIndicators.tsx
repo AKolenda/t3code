@@ -53,6 +53,14 @@ export interface LinkedThreadPullRequestStatus {
   readonly sourceControlProvider: NonNullable<VcsStatusResult["sourceControlProvider"]>;
 }
 
+export function useSupportsMultiplePullRequests(environmentId: EnvironmentId | null): boolean {
+  const configs = useServerConfigs();
+  return (
+    environmentId !== null &&
+    configs.get(environmentId)?.environment.capabilities.threadPullRequests === true
+  );
+}
+
 /** Linked badges use persisted snapshots; only branch and legacy fallbacks lease summary reads. */
 export function useLinkedThreadPullRequest(
   environmentId: EnvironmentId | null,
@@ -61,19 +69,13 @@ export function useLinkedThreadPullRequest(
   pullRequests?: ReadonlyArray<ThreadPullRequestLink>,
   branchPullRequest?: ThreadLinkedPullRequest | null,
 ): LinkedThreadPullRequestStatus | null {
-  const configs = useServerConfigs();
-  const supportsLinks =
-    environmentId !== null &&
-    configs.get(environmentId)?.environment.capabilities.threadPullRequests === true;
+  const supportsLinks = useSupportsMultiplePullRequests(environmentId);
   const current = useMemo(
-    () => resolveThreadCurrentPullRequestLink(pullRequests ?? []),
-    [pullRequests],
+    () => (supportsLinks ? resolveThreadCurrentPullRequestLink(pullRequests ?? []) : null),
+    [pullRequests, supportsLinks],
   );
   const fallback =
-    current === null
-      ? ((!supportsLinks && (pullRequests?.length ?? 0) === 0 ? linkedPullRequest : null) ??
-        branchPullRequest)
-      : null;
+    current === null ? ((!supportsLinks ? linkedPullRequest : null) ?? branchPullRequest) : null;
   const host = fallback == null ? undefined : parseChangeRequestUrl(fallback.url)?.host;
   const reference =
     fallback == null ? null : { ...fallback, ...(host === undefined ? {} : { host }) };
@@ -421,7 +423,11 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
     },
   });
 
-  const pendingLink = pr === null ? resolveThreadCurrentPullRequestLink(thread.pullRequests) : null;
+  const supportsMultiplePullRequests = useSupportsMultiplePullRequests(thread.environmentId);
+  const pendingLink =
+    pr === null && supportsMultiplePullRequests
+      ? resolveThreadCurrentPullRequestLink(thread.pullRequests)
+      : null;
   if (!prStatus && !threadStatus && !pendingLink) {
     return null;
   }

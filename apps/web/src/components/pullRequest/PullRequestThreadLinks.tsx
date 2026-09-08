@@ -1,19 +1,15 @@
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { Link } from "@tanstack/react-router";
 import type { EnvironmentId, PullRequestRef, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
-import {
-  threadPullRequestKeysEqual,
-  visibleThreadPullRequests,
-} from "@t3tools/shared/threadPullRequests";
 import { CheckIcon, LinkIcon, MessageSquareIcon, UnlinkIcon } from "lucide-react";
 import { useState } from "react";
+import { threadPullRequestLinkMode } from "@t3tools/client-runtime/thread-pull-request-compatibility";
+import { usePullRequestLinking } from "~/hooks/usePullRequestLinking";
 
 import { parseChangeRequestUrl } from "~/lib/openPullRequestLink";
 import { useProjects, useServerConfigs, useThreadShell, useThreadShells } from "~/state/entities";
 import { pullRequestEnvironment } from "~/state/pullRequests";
 import { useEnvironmentQuery } from "~/state/query";
-import { threadEnvironment } from "~/state/threads";
-import { useAtomCommand } from "~/state/use-atom-command";
 import { buildThreadRouteParams } from "~/threadRoutes";
 import { Button } from "../ui/button";
 import { Command, CommandInput, CommandItem, CommandList } from "../ui/command";
@@ -31,7 +27,10 @@ interface PullRequestThreadLinksProps {
 /** Thread relations belong to the detail environment, including when another environment is active. */
 export function PullRequestThreadLinks(props: PullRequestThreadLinksProps) {
   const configs = useServerConfigs();
-  if (configs.get(props.environmentId)?.environment.capabilities.threadPullRequests !== true) {
+  if (
+    threadPullRequestLinkMode(configs.get(props.environmentId)?.environment.capabilities) ===
+    "unsupported"
+  ) {
     return null;
   }
   return <EnabledPullRequestThreadLinks key={`${props.environmentId}:${props.url}`} {...props} />;
@@ -46,16 +45,15 @@ function EnabledPullRequestThreadLinks({
   const parsed = parseChangeRequestUrl(url);
   const currentThreadRef = threadRef?.environmentId === environmentId ? threadRef : null;
   const thread = useThreadShell(currentThreadRef);
-  const linkedHere =
-    parsed !== null &&
-    visibleThreadPullRequests(thread?.pullRequests ?? []).some((link) =>
-      threadPullRequestKeysEqual(link, parsed),
-    );
+  const linking = usePullRequestLinking(environmentId);
+  const linkedHere = linking.isLinked(thread, url);
   const relations = useEnvironmentQuery(
-    pullRequestEnvironment.linkedThreads({
-      environmentId,
-      input: parsed === null ? reference : { ...reference, ...parsed },
-    }),
+    linking.mode === "multiple"
+      ? pullRequestEnvironment.linkedThreads({
+          environmentId,
+          input: parsed === null ? reference : { ...reference, ...parsed },
+        })
+      : null,
   );
   // Refreshes can briefly clear the query value. Keep the last response so polling
   // does not unmount an open menu or move its highlighted thread.
@@ -63,38 +61,31 @@ function EnabledPullRequestThreadLinks({
   if (relations.data !== null && relations.data !== lastRelations) {
     setLastRelations(relations.data);
   }
-  const link = useAtomCommand(threadEnvironment.linkPullRequest);
-  const unlink = useAtomCommand(threadEnvironment.unlinkPullRequest);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pending, setPending] = useState(false);
 
   const changeLink = async (threadId: ThreadId, remove: boolean) => {
     if (parsed === null || pending) return;
     setPending(true);
-    const input = {
-      threadId,
-      host: parsed.host,
-      repository: parsed.repository,
-      number: parsed.number,
-    };
-    const result = await (
-      remove
-        ? unlink({ environmentId, input })
-        : link({ environmentId, input: { ...input, url, source: "manual" } })
-    ).finally(() => setPending(false));
-    if (result._tag === "Failure") {
+    try {
+      await linking.changeLink(scopeThreadRef(environmentId, threadId), url, !remove);
+    } catch (error) {
       toastManager.add({
         type: "error",
         title: remove ? "Could not unlink the pull request" : "Could not link the pull request",
+        description: error instanceof Error ? error.message : String(error),
       });
       return;
+    } finally {
+      setPending(false);
     }
     relations.refresh();
     setPickerOpen(false);
   };
 
-  if (parsed === null) return null;
-  const linkedThreads = (relations.data ?? lastRelations)?.threads ?? [];
+  if (parsed === null || (!linkedHere && !linking.canLink(url))) return null;
+  const linkedThreads =
+    linking.mode === "multiple" ? ((relations.data ?? lastRelations)?.threads ?? []) : [];
   const linkedThreadsLabel =
     linkedThreads.length > 0
       ? `Linked from ${linkedThreads.length} ${linkedThreads.length === 1 ? "thread" : "threads"}`
@@ -201,9 +192,9 @@ function ThreadPicker({
   onSelect: (threadId: ThreadId) => void;
 }) {
   const threads = useThreadShells();
+  const linking = usePullRequestLinking(environmentId);
   const projects = useProjects();
   const [query, setQuery] = useState("");
-  const parsed = parseChangeRequestUrl(url);
   const projectNames = new Map(
     projects
       .filter((project) => project.environmentId === environmentId)
@@ -230,11 +221,7 @@ function ThreadPicker({
           </div>
         ) : (
           candidates.map((thread) => {
-            const linked =
-              parsed !== null &&
-              visibleThreadPullRequests(thread.pullRequests).some((link) =>
-                threadPullRequestKeysEqual(link, parsed),
-              );
+            const linked = linking.isLinked(thread, url);
             return (
               <CommandItem
                 key={thread.id}

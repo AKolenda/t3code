@@ -1,6 +1,6 @@
 import { pullRequestHostOf, type SourceControlProviderKind } from "@t3tools/contracts";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
-import { useProjects, useThreadShells } from "~/state/entities";
+import { useProjects, useServerConfigs, useThreadShells } from "~/state/entities";
 import {
   threadPullRequestKeysEqual,
   visibleThreadPullRequests,
@@ -767,15 +767,25 @@ function PullRequestSurfaceIcon({
     (identity?.provider
       ? pullRequestHostOf(identity, identity.provider as SourceControlProviderKind)
       : null);
-  const linked = resolvePullRequestTabLink(threads, resolvedEnvironmentId, host, surface);
+  const configs = useServerConfigs();
+  const capabilities =
+    resolvedEnvironmentId === null
+      ? undefined
+      : configs.get(resolvedEnvironmentId)?.environment.capabilities;
+  const linked =
+    capabilities?.threadPullRequests === true
+      ? resolvePullRequestTabLink(threads, resolvedEnvironmentId, host, surface)
+      : undefined;
   const detail = useEnvironmentQuery(
-    resolvedEnvironmentId === null || linked !== undefined
+    resolvedEnvironmentId === null || capabilities?.pullRequests !== true || linked !== undefined
       ? null
       : pullRequestEnvironment.detail({
           environmentId: resolvedEnvironmentId,
           input: {
             projectId: surface.projectId as ProjectId,
-            ...(surface.host === undefined ? {} : { host: surface.host }),
+            ...(capabilities?.threadPullRequests === true && surface.host !== undefined
+              ? { host: surface.host }
+              : {}),
             repository: surface.repository,
             number: surface.number,
           },
