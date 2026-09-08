@@ -357,10 +357,7 @@ import {
   hasDismissedResumeCompaction,
   shouldOfferResumeCompaction,
 } from "./chat/ContextWindowMeter.logic";
-import {
-  deriveLatestContextWindowSnapshot,
-  formatContextWindowTokens,
-} from "../lib/contextWindow";
+import { deriveLatestContextWindowSnapshot, formatContextWindowTokens } from "../lib/contextWindow";
 import {
   DRAFT_HERO_TRANSITION_ANIMATION_ID,
   DRAFT_HERO_TRANSITION_DURATION_MS,
@@ -446,6 +443,7 @@ import {
 } from "./ui/alert-dialog";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { ServerUpdateAction } from "./ServerUpdateAction";
+import { useAutoBalanceUpdateBanner } from "./chat/useAutoBalanceUpdateBanner";
 import {
   ComposerServerUpdateIcon,
   ComposerServerUpdateStatus,
@@ -2515,6 +2513,31 @@ export default function ChatView(props: ChatViewProps) {
     advertisedFileAttachmentBytes === null
       ? null
       : clampFileAttachmentUploadBytes(advertisedFileAttachmentBytes);
+  const envLocked = Boolean(activeThread && (activeMessageCount > 0 || activeRuntime !== null));
+
+  const loadBalancingSettings = useClientSettings();
+  const automaticEnvironment = Boolean(
+    clientSettingsHydrated &&
+    draftId &&
+    !envLocked &&
+    hasMultipleEnvironments &&
+    loadBalancingSettings.loadBalancingEnabled &&
+    draftThread?.environmentSelection !== "manual" &&
+    (!composerHasAttachments || Boolean(draftThread?.loadBalancedEnvironmentId)) &&
+    (!draftThread?.branch || draftThread.environmentSelection === "auto") &&
+    !draftThread?.worktreePath,
+  );
+  const autoUpdateEnvironments = useMemo(
+    () =>
+      automaticEnvironment
+        ? logicalProjectEnvironments.flatMap(({ environmentId }) => {
+            const environment = environmentById.get(environmentId);
+            return environment ? [environment] : [];
+          })
+        : [],
+    [automaticEnvironment, logicalProjectEnvironments, environmentById],
+  );
+  const autoBalanceUpdateBanner = useAutoBalanceUpdateBanner(autoUpdateEnvironments);
   const versionMismatch = resolveServerConfigVersionMismatch(serverConfig);
   const versionMismatchDismissKey =
     versionMismatch && activeThread
@@ -2630,6 +2653,7 @@ export default function ChatView(props: ChatViewProps) {
       }
     }
     if (
+      !automaticEnvironment &&
       serverUpdateEnvironmentId &&
       !reconnectingThroughVersionSkew &&
       (serverUpdateState.status === "idle"
@@ -2708,8 +2732,11 @@ export default function ChatView(props: ChatViewProps) {
             }),
       });
     }
+    if (autoBalanceUpdateBanner) items.push(autoBalanceUpdateBanner);
     return items;
   }, [
+    automaticEnvironment,
+    autoBalanceUpdateBanner,
     activeEnvironmentUnavailableState,
     handleReconnectActiveEnvironment,
     navigate,
@@ -3306,8 +3333,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const timelineEntries = isServerThread ? serverTimelineEntries : draftTimelineEntries;
   const timelineMessages = useMemo(
-    () =>
-      timelineEntries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
+    () => timelineEntries.flatMap((entry) => (entry.kind === "message" ? [entry.message] : [])),
     [timelineEntries],
   );
   const [dockedDraftHeroThreadKey, setDockedDraftHeroThreadKey] = useState<string | null>(null);
@@ -3504,20 +3530,6 @@ export default function ChatView(props: ChatViewProps) {
     }
   }, [activeThreadRef, diffOpen, isServerThread, onDiffPanelOpen]);
 
-  const envLocked = Boolean(activeThread && (activeMessageCount > 0 || activeRuntime !== null));
-
-  const loadBalancingSettings = useClientSettings();
-  const automaticEnvironment = Boolean(
-    clientSettingsHydrated &&
-    draftId &&
-    !envLocked &&
-    hasMultipleEnvironments &&
-    loadBalancingSettings.loadBalancingEnabled &&
-    draftThread?.environmentSelection !== "manual" &&
-    (!composerHasAttachments || Boolean(draftThread?.loadBalancedEnvironmentId)) &&
-    (!draftThread?.branch || draftThread.environmentSelection === "auto") &&
-    !draftThread?.worktreePath,
-  );
   const needsLoadBalancing = automaticEnvironment && !draftThread?.loadBalancedEnvironmentId;
   const loadBalancingCandidates = useMemo(
     () =>
