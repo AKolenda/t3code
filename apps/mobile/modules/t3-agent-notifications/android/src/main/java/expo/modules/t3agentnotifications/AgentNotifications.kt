@@ -134,7 +134,8 @@ object AgentNotifications {
     // Queue retries carry the same alert id. Keep a bounded history even when
     // notification A is retried after notification B has already arrived.
     val alertId = data["alert_id"]
-    val seen = prefs.getStringSet("seenAlerts", emptySet()).orEmpty()
+    val seen = prefs.getString("seenAlertsOrdered", null)?.split('\n')
+      ?: prefs.getStringSet("seenAlerts", emptySet()).orEmpty().toList()
     if (alertId != null && alertId !in seen) {
       // Match iOS foreground presentation. Consume suppressed alerts as well,
       // so a delivery retry cannot surface them after the app backgrounds.
@@ -151,9 +152,9 @@ object AgentNotifications {
           .build()
         manager(context).notify(ALERT_TAG, id, notification)
       }
-      prefs.edit().putStringSet(
-        "seenAlerts",
-        (seen.toList().takeLast(63) + alertId).toSet()
+      prefs.edit().remove("seenAlerts").putString(
+        "seenAlertsOrdered",
+        (seen.takeLast(63) + alertId).joinToString("\n")
       ).apply()
     }
   }
@@ -318,11 +319,12 @@ object AgentNotifications {
     scheme: String,
     path: String?,
     id: Int
-  ): PendingIntent {
+  ): PendingIntent? {
     val threadPath = path?.takeIf { it.startsWith("/threads/") }
     val route = threadPath?.takeUnless { it.contains('?') || it.contains('#') } ?: "/"
-    val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)!!
-      .setAction(Intent.ACTION_VIEW).setData(Uri.parse("$scheme:/$route"))
+    val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+      ?: return null
+    intent.setAction(Intent.ACTION_VIEW).setData(Uri.parse("$scheme:/$route"))
       .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
     return PendingIntent.getActivity(
       context,

@@ -10,20 +10,22 @@ export function resolveApsEnvironment(appVariant: unknown): "sandbox" | "product
   return appVariant === "development" ? "sandbox" : "production";
 }
 
-export function makeRelayDeviceRegistrationRequest(input: {
-  readonly deviceId: string;
-  readonly label: string;
-  readonly platform?: "ios" | "android";
-  readonly iosMajorVersion?: number;
-  readonly androidApiLevel?: number;
-  readonly appVersion?: string;
-  readonly bundleId?: string;
-  readonly apsEnvironment?: "sandbox" | "production";
-  readonly pushToken?: string;
-  readonly pushToStartToken?: string;
-  readonly notificationsEnabled: boolean;
-  readonly preferences: Preferences;
-}): RelayDeviceRegistrationRequest {
+export function makeRelayDeviceRegistrationRequest(
+  input: {
+    readonly deviceId: string;
+    readonly label: string;
+    readonly appVersion?: string;
+    readonly bundleId?: string;
+    readonly apsEnvironment?: "sandbox" | "production";
+    readonly pushToken?: string;
+    readonly pushToStartToken?: string;
+    readonly notificationsEnabled: boolean;
+    readonly preferences: Preferences;
+  } & (
+    | { readonly platform?: "ios"; readonly iosMajorVersion: number }
+    | { readonly platform: "android"; readonly androidApiLevel: number }
+  ),
+): RelayDeviceRegistrationRequest {
   const pushAvailable = supportsAgentAwarenessPush();
   const liveActivitiesEnabled = pushAvailable && input.preferences.liveActivitiesEnabled !== false;
   return {

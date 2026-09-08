@@ -41,6 +41,7 @@ const decodeFcmError = Schema.decodeUnknownOption(
 export class FcmClientError extends Schema.TaggedError<FcmClientError>()("FcmClientError", {
   operation: Schema.Literals(["configuration", "authorize", "send"]),
   status: Schema.NullOr(Schema.Number),
+  cause: Schema.optional(Schema.Defect()),
 }) {
   override get message() {
     return `FCM ${this.operation} failed${this.status === null ? "" : ` (${this.status})`}.`;
@@ -100,7 +101,7 @@ export const makeFcmAssertion = Effect.fn("relay.fcm.assertion")(function* (
       );
       return `${header}.${claims}.${base64Url(new Uint8Array(signature))}`;
     },
-    catch: () => new FcmClientError({ operation: "authorize", status: null }),
+    catch: (cause) => new FcmClientError({ operation: "authorize", status: null, cause }),
   });
 });
 
@@ -129,7 +130,9 @@ export const make = Effect.gen(function* () {
       )
       .pipe(
         Effect.timeout(FCM_HTTP_STAGE_TIMEOUT),
-        Effect.mapError(() => new FcmClientError({ operation: "authorize", status: null })),
+        Effect.mapError(
+          (cause) => new FcmClientError({ operation: "authorize", status: null, cause }),
+        ),
       );
     if (response.status !== 200)
       return yield* new FcmClientError({ operation: "authorize", status: response.status });
@@ -138,7 +141,7 @@ export const make = Effect.gen(function* () {
       Effect.flatMap(decodeAccessToken),
       Effect.map((body) => body.access_token),
       Effect.mapError(
-        () => new FcmClientError({ operation: "authorize", status: response.status }),
+        (cause) => new FcmClientError({ operation: "authorize", status: response.status, cause }),
       ),
     );
   });
@@ -172,13 +175,15 @@ export const make = Effect.gen(function* () {
         }),
         Effect.flatMap(client.execute),
         Effect.timeout(FCM_HTTP_STAGE_TIMEOUT),
-        Effect.mapError(() => new FcmClientError({ operation: "send", status: null })),
+        Effect.mapError((cause) => new FcmClientError({ operation: "send", status: null, cause })),
       );
       if (response.status >= 200 && response.status < 300) return { unregistered: false };
       if (response.status === 401) yield* invalidateToken;
       const body = yield* response.json.pipe(
         Effect.timeout(FCM_HTTP_STAGE_TIMEOUT),
-        Effect.orElseSucceed(() => null),
+        Effect.mapError(
+          (cause) => new FcmClientError({ operation: "send", status: response.status, cause }),
+        ),
       );
       const decoded = decodeFcmError(body);
       const unregistered =

@@ -66,6 +66,24 @@ class AgentNotificationsTest {
   )
 
   @Test
+  fun alertHistoryEvictsOnlyTheOldestEntryAfterCapacity() {
+    lifecycle.currentState = Lifecycle.State.RESUMED
+    for (id in 0..64) AgentNotifications.receive(context, update("alert-$id", false))
+    lifecycle.currentState = Lifecycle.State.CREATED
+    for (id in 1..64) AgentNotifications.receive(context, update("alert-$id", false))
+    assertTrue(manager.activeNotifications.isEmpty())
+    AgentNotifications.receive(context, update("alert-0", false))
+    assertEquals("alert-0".hashCode(), manager.activeNotifications.single().id)
+  }
+
+  @Test
+  fun missingLauncherDoesNotDiscardTheAlert() {
+    shadowOf(context.packageManager).removeActivity(ComponentName(context, Activity::class.java))
+    AgentNotifications.receive(context, update("no-launcher", false))
+    assertEquals("Test thread", manager.activeNotifications.single().notification.extras.getString(Notification.EXTRA_TITLE))
+  }
+
+  @Test
   fun foregroundSuppressesAlertsWhileOngoingActivityStillUpdatesAndClears() {
     lifecycle.currentState = Lifecycle.State.RESUMED
 

@@ -221,7 +221,15 @@ export const ApiLive = Api.make(
       Layer.provideMerge(DpopProofs.layer),
       Layer.provideMerge(ApnsDeliveries.layer),
       Layer.provideMerge(
-        FcmDeliveries.layerCloudflareQueues(fcmDeliveryQueueSender, alchemyRuntimeContext).pipe(
+        FcmDeliveries.layer.pipe(
+          Layer.provide(
+            Layer.succeed(FcmDeliveries.FcmDeliveryQueueSender, {
+              send: (body) =>
+                fcmDeliveryQueueSender
+                  .send(body)
+                  .pipe(Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext)),
+            }),
+          ),
           Layer.provideMerge(FcmClient.layer),
         ),
       ),

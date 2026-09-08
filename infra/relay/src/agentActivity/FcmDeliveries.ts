@@ -1,4 +1,3 @@
-import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import { and, eq } from "drizzle-orm";
 import {
@@ -222,7 +221,12 @@ export const make = Effect.gen(function* () {
               })
             : [];
           const deliveryUser = deliveryUsers.find((user) => user.userId === job.userId);
-          if (preferences.value.liveActivitiesEnabled && previousAggregate && aggregate) {
+          if (
+            deliveryUser?.liveActivitiesEnabled &&
+            preferences.value.liveActivitiesEnabled &&
+            previousAggregate &&
+            aggregate
+          ) {
             const environmentIds = [
               ...new Set(aggregate.activities.map((row) => row.environmentId)),
             ];
@@ -322,15 +326,3 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(FcmDeliveries, make);
-export const layerCloudflareQueues = (
-  sender: Cloudflare.Queues.WriteQueueClient,
-  runtime: Alchemy.BaseRuntimeContext,
-) =>
-  layer.pipe(
-    Layer.provide(
-      Layer.succeed(FcmDeliveryQueueSender, {
-        send: (body) =>
-          sender.send(body).pipe(Effect.provideService(Alchemy.RuntimeContext, runtime)),
-      }),
-    ),
-  );

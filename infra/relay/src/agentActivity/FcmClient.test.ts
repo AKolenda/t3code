@@ -106,6 +106,7 @@ describe("FCM delivery", () => {
           _tag: "FcmClientError",
           operation: scenario.operation,
           status: scenario.status,
+          cause: expect.objectContaining({ _tag: "TimeoutError" }),
         });
         expect(yield* client.send(input)).toEqual({ unregistered: false });
       }).pipe(

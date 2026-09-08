@@ -62,11 +62,18 @@ export function fitFcmData(input: Readonly<Record<string, string>>): Record<stri
     const key = textKeys.sort(
       (a, b) => encoder.encode(data[b]!).length - encoder.encode(data[a]!).length,
     )[0];
-    if (!key || data[key]!.length <= 8) break;
+    if (!key) break;
+    if (data[key]!.length <= 8) {
+      textKeys.splice(textKeys.indexOf(key), 1);
+      continue;
+    }
     const parts = key.startsWith("activity_line_") ? data[key]!.split("\t") : [data[key]!];
     const part = parts.length === 3 ? (parts[1]!.length > parts[2]!.length ? 1 : 2) : 0;
     const characters = Array.from(parts[part]!);
-    if (characters.length <= 4) break;
+    if (characters.length <= 4) {
+      textKeys.splice(textKeys.indexOf(key), 1);
+      continue;
+    }
     parts[part] =
       characters
         .slice(0, Math.floor(characters.length * 0.8))

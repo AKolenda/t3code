@@ -94,6 +94,7 @@ function harness() {
     state: { ...state } as RelayAgentActivityState | null,
     otherStates: [] as RelayAgentActivityState[],
     mutedEnvironments: [] as string[],
+    notificationOnlyEnvironments: [] as string[],
     revokedEnvironments: [] as string[],
     linked: true,
   };
@@ -132,7 +133,9 @@ function harness() {
         Effect.sync(() =>
           current.linked
             ? [...(current.state ? [current.state] : []), ...current.otherStates].filter(
-                (row) => !current.revokedEnvironments.includes(row.environmentId),
+                (row) =>
+                  !current.revokedEnvironments.includes(row.environmentId) &&
+                  !current.notificationOnlyEnvironments.includes(row.environmentId),
               )
             : [],
         ),
@@ -156,7 +159,9 @@ function harness() {
                 {
                   userId: "user",
                   notificationsEnabled: !current.mutedEnvironments.includes(input.environmentId),
-                  liveActivitiesEnabled: true,
+                  liveActivitiesEnabled: !current.notificationOnlyEnvironments.includes(
+                    input.environmentId,
+                  ),
                 },
               ]
             : [],
@@ -673,4 +678,36 @@ describe("delivery policy regressions", () => {
       }),
     ).not.toBeNull();
   });
+});
+
+describe("notification-only environments", () => {
+  it.effect("alerts independently while another environment has a live card", () => {
+    const h = harness();
+    const other = {
+      ...state,
+      environmentId: EnvironmentId.make("other"),
+      threadId: ThreadId.make("other"),
+    };
+    h.current.target.last_aggregate_json = encodeJson(aggregateFor([other]));
+    h.current.otherStates = [other];
+    h.current.state = { ...state, phase: "waiting_for_input" };
+    h.current.notificationOnlyEnvironments = [state.environmentId];
+    return Effect.gen(function* () {
+      const deliveries = yield* FcmDeliveries;
+      yield* deliveries.process({ ...h.job, state: h.current.state });
+      expect(h.sent).toHaveLength(1);
+      expect(h.sent[0]?.alert).toBe(true);
+      expect(h.sent[0]?.data.alert_path).toBe(state.deepLink);
+    }).pipe(Effect.provide(h.layer));
+  });
+});
+
+it("continues shrinking text when a longer activity line is already minimal", () => {
+  const data = fitFcmData({
+    activity_line_0: "Approval\t😀😀😀😀\t😀😀😀😀",
+    alert_body: "x".repeat(30),
+    device_id: "x".repeat(3680),
+  });
+  expect(new TextEncoder().encode(encodeJson(data)).length).toBeLessThanOrEqual(3800);
+  expect(data.activity_line_0).toBe("Approval\t😀😀😀😀\t😀😀😀😀");
 });

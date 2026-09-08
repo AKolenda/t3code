@@ -307,7 +307,16 @@ function ConfiguredSettingsRouteScreen() {
       const permission = await settleAsyncResult(() =>
         runtime.runPromiseExit(requestAgentNotificationPermission),
       );
-      if (permission._tag === "Failure" || permission.value.type !== "granted") {
+      if (permission._tag === "Failure") {
+        setLiveActivityStatus("disabled");
+        const error = squashAtomCommandFailure(permission);
+        Alert.alert(
+          "Ongoing activity unavailable",
+          error instanceof Error ? error.message : "Could not enable agent notifications.",
+        );
+        return;
+      }
+      if (permission.value.type !== "granted") {
         setLiveActivityStatus("disabled");
         Alert.alert(
           "Notification permission needed",
