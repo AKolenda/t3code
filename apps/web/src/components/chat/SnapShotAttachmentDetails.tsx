@@ -202,26 +202,26 @@ export function SnapShotAttachmentDetails({
   return (
     <div
       className={cn(
-        "pointer-events-none absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1.5 bg-linear-to-t from-black/85 via-black/55 to-transparent px-2.5 pb-2 pt-6",
+        "pointer-events-none absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1.5 bg-linear-to-t from-white/85 via-white/55 to-transparent px-2.5 pb-2 pt-6 dark:from-black/85 dark:via-black/55",
         className,
       )}
     >
       {source.appIconDataUrl ? (
         <img src={source.appIconDataUrl} alt="" className="size-7 shrink-0 rounded-md" />
       ) : (
-        <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-white/20 text-[10px] font-medium text-white uppercase">
+        <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-black/10 text-[10px] font-medium text-foreground uppercase dark:bg-white/20 dark:text-white">
           {source.appName.slice(0, 1)}
         </div>
       )}
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium leading-3.5 text-white">
+        <div className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium leading-3.5 text-foreground dark:text-white">
           <span className="truncate">{source.appName}</span>
           <SnapShotContentsButton
             source={source}
-            className="pointer-events-auto text-white/60 hover:bg-white/10 hover:text-white focus-visible:ring-white/70"
+            className="pointer-events-auto text-foreground/60 hover:bg-black/10 hover:text-foreground focus-visible:ring-foreground/70 dark:text-white/60 dark:hover:bg-white/10 dark:hover:text-white dark:focus-visible:ring-white/70"
           />
         </div>
-        <div className="truncate text-[9px] leading-3.5 text-white/70">
+        <div className="truncate text-[9px] leading-3.5 text-foreground/70 dark:text-white/70">
           {source.windowTitle || "Captured window"}
         </div>
       </div>
