@@ -16,7 +16,10 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { makeCodexTextGeneration } from "../src/textGeneration/CodexTextGeneration.ts";
 import { threadTitleEvaluationCases } from "../src/textGeneration/ThreadTitleEvaluation.ts";
-import { formatThreadTitleContext } from "../src/textGeneration/ThreadTitleContext.ts";
+import {
+  formatThreadTitleContext,
+  type ThreadTitleMessage,
+} from "../src/textGeneration/ThreadTitleContext.ts";
 import { resolveThreadTitleLinks } from "../src/textGeneration/ThreadTitleLinks.ts";
 import * as ProcessRunner from "../src/processRunner.ts";
 import * as ServerConfig from "../src/config.ts";
@@ -59,8 +62,10 @@ await Effect.runPromise(
     const review = [];
     const answerKey = [];
     for (const fixture of threadTitleEvaluationCases) {
+      const firstMessage: ThreadTitleMessage = fixture.messages[0]!;
       const context = formatThreadTitleContext(fixture.messages);
-      const message = values.initial ? fixture.messages[0]!.text : context.message;
+      const message = values.initial ? firstMessage.text : context.message;
+      const attachments = values.initial ? firstMessage.attachments : context.attachments;
       const [elapsed, generated] = yield* Effect.gen(function* () {
         const linkedContext = yield* resolveThreadTitleLinks({
           cwd,
@@ -70,6 +75,7 @@ await Effect.runPromise(
           cwd,
           message,
           previousTitle: values.initial ? undefined : fixture.previousTitle,
+          attachments,
           linkedContext,
           modelSelection: { instanceId: ProviderInstanceId.make("codex"), model },
         });
