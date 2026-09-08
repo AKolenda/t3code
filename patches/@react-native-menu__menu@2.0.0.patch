@@ -258,10 +258,10 @@ index 352d8fa656aac2e39160104df2394ebe6719bac5..937174c8b69c48cf5756fb64946c5138
          didSet {
              guard let actions = self.actions else {
 diff --git a/ios/Shared/MenuViewImplementation.swift b/ios/Shared/MenuViewImplementation.swift
-index 5c4e0da4292b15d3a27b5ea1555f11452a470815..58bebba6c6bb4232f5743326e6eba0c47b180200 100644
+index 5c4e0da4292b15d3a27b5ea1555f11452a470815..42f3081eb587115beced5cc70b79e91cb040c362 100644
 --- a/ios/Shared/MenuViewImplementation.swift
 +++ b/ios/Shared/MenuViewImplementation.swift
-@@ -8,7 +8,127 @@
+@@ -8,7 +8,261 @@
  import UIKit
  @available(iOS 14.0, *)
  @objc(MenuViewImplementation)
@@ -277,11 +277,132 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..58bebba6c6bb4232f5743326e6eba0c4
 +    private var itemDropInteraction: UIDropInteraction?
 +    private let insertionLine = CALayer()
 +    private var scrollTimer: Timer?
++    private var reorderPreview: ReorderPreview?
 +
 +    private final class LocalDragItem {
 +        let id: String
 +        let group: String
++        var preview: ReorderPreview?
 +        init(id: String, group: String) { self.id = id; self.group = group }
++    }
++
++    // Animate temporary pictures, leaving UIKit's drop targets and React Native's
++    // virtualized layout in their original coordinates throughout the gesture.
++    private final class ReorderPreview {
++        private struct Row {
++            weak var menu: MenuViewImplementation?
++            weak var host: UIView?
++            let id: String
++            let frame: CGRect
++            let opacity: Float
++            let picture: UIView?
++        }
++        private weak var scroll: UIScrollView?
++        private let sourceId: String
++        private let group: String
++        private let sourceFrame: CGRect
++        private var rows: [Row] = []
++        private var insertion: CGFloat
++
++        init?(source: MenuViewImplementation, scroll: UIScrollView, item: LocalDragItem) {
++            guard let host = source.itemDragInteraction?.view else { return nil }
++            self.scroll = scroll
++            sourceId = item.id
++            group = item.group
++            sourceFrame = host.convert(host.bounds, to: scroll)
++            insertion = sourceFrame.minY
++            refresh()
++        }
++
++        func refresh() {
++            guard let scroll else { return }
++            // Recycled cells must never retain the old thread's picture or opacity.
++            if rows.contains(where: { $0.menu?.dragItemId as String? != $0.id }) {
++                finish()
++                return
++            }
++            func visit(_ view: UIView) {
++                if let menu = view as? MenuViewImplementation,
++                   menu.dragGroup as String? == group,
++                   let id = menu.dragItemId as String?,
++                   let host = menu.itemDragInteraction?.view,
++                   !rows.contains(where: { $0.host === host }) {
++                    let frame = host.convert(host.bounds, to: scroll)
++                    if frame.intersects(scroll.bounds), frame.height > 0 {
++                        let picture = id == sourceId ? nil : host.snapshotView(afterScreenUpdates: false)
++                        if id == sourceId || picture != nil {
++                            let row = Row(menu: menu, host: host, id: id, frame: frame,
++                                          opacity: host.layer.opacity, picture: picture)
++                            rows.append(row)
++                            if let picture {
++                                picture.isUserInteractionEnabled = false
++                                picture.frame = frame
++                                scroll.addSubview(picture)
++                            }
++                            // UIView.alpha would remove the underlying view from hit testing.
++                            host.layer.opacity = 0
++                        }
++                    }
++                }
++                for child in view.subviews { visit(child) }
++            }
++            visit(scroll)
++            apply(animated: false)
++        }
++
++        func update(location: CGPoint) {
++            guard let scroll else { return }
++            let row = rows.first(where: { $0.frame.contains(location) })
++            if scroll.bounds.contains(location), let row, row.id != sourceId,
++               let menu = row.menu, menu.dropEnabled {
++                update(target: menu, before: location.y < row.frame.midY)
++            } else if insertion != sourceFrame.minY {
++                insertion = sourceFrame.minY
++                apply(animated: true)
++            }
++        }
++
++        func update(target: MenuViewImplementation, before: Bool) {
++            guard let scroll, let host = target.itemDropInteraction?.view,
++                  host.isDescendant(of: scroll) else { return }
++            let frame = host.convert(host.bounds, to: scroll)
++            // Section headings insert below the heading, including empty sections.
++            let next = target.dragEnabled && before ? frame.minY : frame.maxY
++            guard next != insertion else { return }
++            insertion = next
++            apply(animated: true)
++        }
++
++        private func apply(animated: Bool) {
++            let changes = {
++                for row in self.rows {
++                    var shift: CGFloat = 0
++                    if row.id != self.sourceId {
++                        if self.insertion <= self.sourceFrame.minY {
++                            if row.frame.minY >= self.insertion && row.frame.minY < self.sourceFrame.minY {
++                                shift = self.sourceFrame.height
++                            }
++                        } else if row.frame.minY > self.sourceFrame.minY && row.frame.minY < self.insertion {
++                            shift = -self.sourceFrame.height
++                        }
++                    }
++                    row.picture?.transform = CGAffineTransform(translationX: 0, y: shift)
++                }
++            }
++            if animated && !UIAccessibility.isReduceMotionEnabled {
++                UIView.animate(withDuration: 0.16, delay: 0,
++                               options: [.beginFromCurrentState, .allowUserInteraction], animations: changes)
++            } else { changes() }
++        }
++
++        func finish() {
++            for row in rows {
++                row.host?.layer.opacity = row.opacity
++                row.picture?.removeFromSuperview()
++            }
++            rows.removeAll()
++            scroll = nil
++        }
 +    }
 +
 +    private func updateDragInteractions() {
@@ -319,11 +440,17 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..58bebba6c6bb4232f5743326e6eba0c4
 +        while let view = ancestor, !(view is UIScrollView) { ancestor = view.superview }
 +        guard let scroll = ancestor as? UIScrollView else { return }
 +        scrollTimer?.invalidate()
++        if let item = session.items.first?.localObject as? LocalDragItem {
++            let preview = ReorderPreview(source: self, scroll: scroll, item: item)
++            item.preview = preview
++            reorderPreview = preview
++        }
 +        // Run only during a drag, including when the finger is stationary at
 +        // the edge. The scroll delegate keeps React Native's list in sync.
-+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak scroll] _ in
++        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak scroll, weak self] _ in
 +            guard let scroll else { return }
 +            let location = session.location(in: scroll)
++            self?.reorderPreview?.update(location: location)
 +            guard location.x >= scroll.bounds.minX, location.x <= scroll.bounds.maxX else { return }
 +            let y = location.y - scroll.bounds.minY
 +            let edge: CGFloat = 48
@@ -335,6 +462,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..58bebba6c6bb4232f5743326e6eba0c4
 +            let offset = max(minimum, min(maximum, scroll.contentOffset.y + speed * 8))
 +            if offset != scroll.contentOffset.y {
 +                scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: offset), animated: false)
++                self?.reorderPreview?.refresh()
 +            }
 +        }
 +        scrollTimer = timer
@@ -344,9 +472,11 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..58bebba6c6bb4232f5743326e6eba0c4
 +    public func dragInteraction(_ interaction: UIDragInteraction, session: UIDragSession, didEndWith operation: UIDropOperation) {
 +        scrollTimer?.invalidate()
 +        scrollTimer = nil
++        reorderPreview?.finish()
++        reorderPreview = nil
 +    }
 +
-+    deinit { scrollTimer?.invalidate() }
++    deinit { scrollTimer?.invalidate(); reorderPreview?.finish() }
 +
 +    private func localItem(_ session: UIDropSession) -> LocalDragItem? {
 +        guard dropEnabled, session.localDragSession != nil, session.items.count == 1,
@@ -360,10 +490,14 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..58bebba6c6bb4232f5743326e6eba0c4
 +    }
 +
 +    public func dropInteraction(_ interaction: UIDropInteraction, sessionDidUpdate session: UIDropSession) -> UIDropProposal {
-+        guard localItem(session) != nil, let host = interaction.view else {
++        guard let item = localItem(session), let host = interaction.view else {
 +            return UIDropProposal(operation: .forbidden)
 +        }
 +        let before = session.location(in: host).y < host.bounds.midY
++        if let preview = item.preview {
++            preview.update(target: self, before: before)
++            return UIDropProposal(operation: .move)
++        }
 +        CATransaction.begin()
 +        CATransaction.setDisableActions(true)
 +        insertionLine.backgroundColor = host.tintColor.cgColor
@@ -390,7 +524,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..58bebba6c6bb4232f5743326e6eba0c4
  
      @objc public var actions: [NSDictionary]? {
          didSet {
-@@ -60,17 +180,46 @@ public class MenuViewImplementation: UIButton {
+@@ -60,17 +314,46 @@ public class MenuViewImplementation: UIButton {
      }
     
      public override func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
@@ -439,7 +573,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..58bebba6c6bb4232f5743326e6eba0c4
      func setup () {
          let menu = UIMenu(title: _title,
              identifier: nil,
-@@ -86,8 +235,99 @@ public class MenuViewImplementation: UIButton {
+@@ -86,8 +369,99 @@ public class MenuViewImplementation: UIButton {
              }
          }
  
@@ -539,7 +673,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..58bebba6c6bb4232f5743326e6eba0c4
      }
  
      public override func reactSetFrame(_ frame: CGRect) {
-@@ -124,4 +364,8 @@ public class MenuViewImplementation: UIButton {
+@@ -124,4 +498,8 @@ public class MenuViewImplementation: UIButton {
      @objc func sendMenuOpen() {
          // NO-OP (should be overriden by parent)
      }
