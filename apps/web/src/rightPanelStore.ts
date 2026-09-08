@@ -19,11 +19,6 @@ import { createJSONStorage, persist } from "zustand/middleware";
 
 import { resolveStorage } from "./lib/storage";
 
-export const PULL_REQUESTS_PANEL_REF = {
-  environmentId: "pull-requests-panel",
-  threadId: "pull-requests-panel",
-} as ScopedThreadRef;
-
 const RIGHT_PANEL_KINDS = [
   "diff",
   "files",

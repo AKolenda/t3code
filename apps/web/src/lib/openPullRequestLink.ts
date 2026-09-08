@@ -337,15 +337,29 @@ export function useOpenChangeRequestLink(
         if (!resolvedThreadRef) {
           void navigate({
             to: "/pull-requests",
-            search: (previous) => ({
-              ...previous,
-              involvement: previous.involvement ?? "all",
-              state: previous.state ?? "all",
-              repository: reference.repository,
-              number: parsed.number,
-              selectedProjectId: reference.projectId ?? undefined,
-              selectedEnvironmentId: environmentId,
-            }),
+            search: (previous) => {
+              const {
+                repository: _repository,
+                number: _number,
+                selectedProjectId: _projectId,
+                selectedEnvironmentId: _environmentId,
+                ...filters
+              } = previous;
+              return {
+                ...filters,
+                involvement: previous.involvement ?? "all",
+                state: previous.state ?? "all",
+                // Unlinked tabs must not resolve against the list's selected project.
+                ...(reference.projectId === null
+                  ? {}
+                  : {
+                      repository: reference.repository,
+                      number: parsed.number,
+                      selectedProjectId: reference.projectId,
+                      selectedEnvironmentId: environmentId,
+                    }),
+              };
+            },
             replace: true,
           });
         }
