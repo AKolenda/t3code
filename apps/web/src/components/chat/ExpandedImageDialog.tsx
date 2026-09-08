@@ -127,7 +127,14 @@ function ZoomableImage({
 }) {
   const imageRef = useRef<HTMLImageElement | null>(null);
   const [zoom, setZoom] = useState<ImageZoomState>(IMAGE_ZOOM_IDENTITY);
-  const dragRef = useRef<{ pointerId: number; x: number; y: number; moved: boolean } | null>(null);
+  const dragRef = useRef<{
+    pointerId: number;
+    x: number;
+    y: number;
+    startX: number;
+    startY: number;
+    moved: boolean;
+  } | null>(null);
 
   // Wheel and gesture listeners must be non-passive to stop the page from
   // scrolling and the browser from zooming the whole window. React registers
@@ -209,6 +216,8 @@ function ZoomableImage({
           pointerId: event.pointerId,
           x: event.clientX,
           y: event.clientY,
+          startX: event.clientX,
+          startY: event.clientY,
           moved: false,
         };
         if (zoomed) event.currentTarget.setPointerCapture(event.pointerId);
@@ -220,7 +229,10 @@ function ZoomableImage({
         const dy = event.clientY - drag.y;
         drag.x = event.clientX;
         drag.y = event.clientY;
-        if (dx !== 0 || dy !== 0) drag.moved = true;
+        // A few pixels of jitter during a click still count as a click.
+        if (Math.abs(event.clientX - drag.startX) + Math.abs(event.clientY - drag.startY) > 4) {
+          drag.moved = true;
+        }
         if (!zoomed) return;
         const image = event.currentTarget;
         setZoom((current) => panImage(current, dx, dy, zoomFrame(image, current)));
@@ -230,7 +242,7 @@ function ZoomableImage({
         if (drag?.pointerId !== event.pointerId) return;
         dragRef.current = null;
         // A drag that moved is a pan, not a click.
-        if (drag.moved && zoomed) return;
+        if (drag.moved) return;
         const image = event.currentTarget;
         setZoom((current) => {
           if (current.scale > 1) return IMAGE_ZOOM_IDENTITY;
