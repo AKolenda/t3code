@@ -20,7 +20,6 @@ import * as Option from "effect/Option";
 
 import * as OrchestrationEngine from "../../../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { repositoryIdentityOf } from "../../../pullRequest/PullRequestService.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import {
   type ListThreadPullRequestsResult,
@@ -39,21 +38,16 @@ interface ResolvedTarget {
   readonly url: string;
 }
 
-/**
- * The host and repository a thread's project is checked out from, so a bare
- * repository+number can be completed and a URL rebuilt for it.
- */
-function projectHostAndRepository(project: OrchestrationProjectShell | undefined): {
+/** The project's host and provider supply defaults for a repository-and-number input. */
+function projectHostAndProvider(project: OrchestrationProjectShell | undefined): {
   readonly host: string | null;
-  readonly repository: string | null;
   readonly kind: SourceControlProviderKind | null;
 } {
   const identity = project?.repositoryIdentity;
   const kind = (identity?.provider as SourceControlProviderKind | undefined) ?? null;
-  if (!identity || kind === null) return { host: null, repository: null, kind: null };
+  if (!identity || kind === null) return { host: null, kind: null };
   return {
     host: pullRequestHostOf(identity, kind),
-    repository: project ? repositoryIdentityOf(project) : null,
     kind,
   };
 }
@@ -82,7 +76,7 @@ const resolveTarget = Effect.fn("PullRequestsToolkit.resolveTarget")(function* (
       detail: "Pass either url, or both repository and number.",
     });
   }
-  const projectHost = projectHostAndRepository(project);
+  const projectHost = projectHostAndProvider(project);
   const host = (input.host ?? projectHost.host)?.toLowerCase();
   if (host === undefined) {
     return yield* new PullRequestTargetError({

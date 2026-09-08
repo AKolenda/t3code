@@ -1,9 +1,4 @@
-import type {
-  EnvironmentId,
-  RepositoryIdentity,
-  ScopedThreadRef,
-  ThreadLinkedPullRequest,
-} from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { type MouseEvent, useCallback } from "react";
 
@@ -18,110 +13,14 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { useProjects, useServerConfigs } from "../state/entities";
 import { usePrimaryEnvironmentId } from "../state/environments";
 
-/** Builds a GitHub URL that remains available when the pull request API cannot be read. */
-export function gitHubPullRequestBrowserUrl(
-  identity: RepositoryIdentity | null | undefined,
-  repository: string,
-  number: number,
-): string | null {
-  if (identity?.provider !== "github" || !Number.isSafeInteger(number) || number < 1) return null;
-  const repositoryPath = repository.split("/");
-  if (
-    repositoryPath.length !== 2 ||
-    repositoryPath.some((segment) => segment.length === 0 || segment === "." || segment === "..")
-  ) {
-    return null;
-  }
-
-  let origin: string | null = null;
-  try {
-    const remoteUrl = new URL(identity.locator.remoteUrl.trim());
-    if (remoteUrl.protocol === "http:" || remoteUrl.protocol === "https:") {
-      origin = remoteUrl.origin;
-    }
-  } catch {
-    // SCP-style remotes are read from their normalized identity below.
-  }
-  const hostname = identity.canonicalKey.split("/")[0];
-  if (origin === null && !hostname) return null;
-
-  try {
-    const url = new URL(origin ?? `https://${hostname}`);
-    url.pathname = `/${repositoryPath.join("/")}/pull/${number}`;
-    return url.toString();
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The parser is shared with the server (the `create_pr` auto-link and the MCP link tool read the
- * same URLs), so there is exactly one opinion on which links are change requests. On the page a
- * null result means the system browser: a doubtful match is worse than no match, since it takes
- * the reader out of their browser and into a page that cannot find the change request.
- */
-export { parseChangeRequestUrl, type ChangeRequestLink };
-
-/**
- * The pull-request URL a GitHub-style `#123` autolink might name. GitHub writes every bare
- * reference through `/issues/`, including pull requests, so this only builds a candidate: the
- * caller must successfully read it as a pull request before treating it as one.
- */
-export function pullRequestCandidateUrlFromReferenceAutolink(targetUrl: string): string | null {
-  let url: URL;
-  try {
-    url = new URL(targetUrl);
-  } catch {
-    return null;
-  }
-  if (
-    (url.protocol !== "https:" && url.protocol !== "http:") ||
-    !(
-      url.hostname.toLowerCase() === "github.com" ||
-      url.hostname.toLowerCase().endsWith(".github.com") ||
-      url.hostname.toLowerCase().startsWith("github.")
-    )
-  ) {
-    return null;
-  }
-  const match = /^\/([^/]+\/[^/]+)\/issues\/(\d+)(?:\/|$)/u.exec(url.pathname);
-  if (match?.[1] === undefined || match[2] === undefined) return null;
-  url.pathname = `/${match[1]}/pull/${match[2]}`;
-  return url.toString();
-}
-
-/** Match a stored PR without requiring its project to remain available. */
-export function matchesLinkedPullRequestUrl(
-  linkedPullRequest: ThreadLinkedPullRequest,
-  targetUrl: string,
-): boolean {
-  const linked = parseChangeRequestUrl(linkedPullRequest.url);
-  const target = parseChangeRequestUrl(targetUrl);
-  return (
-    linked !== null &&
-    target !== null &&
-    linked.host === target.host &&
-    linked.repository === target.repository &&
-    linked.number === target.number
-  );
-}
-
-/** The repository root behind a recognised change-request URL, without PR-specific state. */
-export function changeRequestRepositoryUrl(targetUrl: string): string | null {
-  const changeRequest = parseChangeRequestUrl(targetUrl);
-  if (changeRequest === null) return null;
-  const url = new URL(targetUrl);
-  const repositoryPath =
-    /^(.*?)\/-\/merge_requests\/\d+(?:\/|$)/iu.exec(url.pathname)?.[1] ??
-    /^(.*?)(?:\/pull\/\d+|\/-\/merge_requests\/\d+|\/pull-requests\/\d+|\/pullrequest\/\d+)(?:\/|$)/iu.exec(
-      url.pathname,
-    )?.[1];
-  if (!repositoryPath) return null;
-  url.pathname = repositoryPath;
-  url.search = "";
-  url.hash = "";
-  return url.toString();
-}
+export {
+  parseChangeRequestUrl,
+  type ChangeRequestLink,
+  gitHubPullRequestBrowserUrl,
+  pullRequestCandidateUrlFromReferenceAutolink,
+  matchesLinkedPullRequestUrl,
+  changeRequestRepositoryUrl,
+} from "@t3tools/shared/changeRequestUrl";
 
 /**
  * Returns a click handler that opens a pull request URL in the system browser.

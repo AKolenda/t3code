@@ -1,3 +1,4 @@
+import { siblingPullRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import {
   CommandId,
   type OrchestrationThreadShell,
@@ -121,11 +122,6 @@ function isUnsettled(thread: OrchestrationThreadShell): boolean {
 }
 
 /** `.../pull/42` → `.../pull/43`; null when the linked url carries no trailing number. */
-function siblingPullRequestUrl(url: string, number: number): string | null {
-  const match = /^(.*\/)\d+\/?$/.exec(url);
-  return match === null ? null : `${match[1]}${number}`;
-}
-
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const engine = yield* OrchestrationEngine.OrchestrationEngineService;

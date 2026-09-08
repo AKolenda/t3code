@@ -3802,43 +3802,6 @@ it.effect("carries an armed auto-merge through to the detail, and silence as sil
   }),
 );
 
-it("names an Azure DevOps repository by its own name, not its project path", () => {
-  // `az repos pr list --repository` takes a name and detects the organisation and project from
-  // the checkout; the recorded `org/project/_git/repo` path is refused, and the repository then
-  // reads as unavailable on the page.
-  const selector = PullRequestService.repositoryIdentityOf({
-    repositoryIdentity: {
-      provider: "azure-devops",
-      displayName: "contoso/payments/_git/checkout",
-      owner: "contoso",
-      name: "checkout",
-    },
-  } as never);
-  assert.strictEqual(selector, "checkout");
-});
-
-it("falls back to the path's last segment where an Azure identity has no name", () => {
-  const selector = PullRequestService.repositoryIdentityOf({
-    repositoryIdentity: {
-      provider: "azure-devops",
-      displayName: "contoso/payments/_git/checkout",
-    },
-  } as never);
-  assert.strictEqual(selector, "checkout");
-});
-
-it("keeps a GitLab identity's whole path, because a nested group is part of the name", () => {
-  const selector = PullRequestService.repositoryIdentityOf({
-    repositoryIdentity: {
-      provider: "gitlab",
-      displayName: "group/subgroup/service",
-      owner: "group",
-      name: "service",
-    },
-  } as never);
-  assert.strictEqual(selector, "group/subgroup/service");
-});
-
 it.effect("narrows the rows of a host that ignored the filters it was handed", () =>
   Effect.gen(function* () {
     const service = yield* makeService({

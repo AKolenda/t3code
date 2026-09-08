@@ -1,3 +1,4 @@
+import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import {
   type CommandId,
   pullRequestHostOf,
@@ -13,7 +14,6 @@ import * as Option from "effect/Option";
 
 import * as OrchestrationEngine from "../orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { repositoryIdentityOf } from "../pullRequest/PullRequestService.ts";
 
 export interface CreatedPullRequestKey {
   readonly host: string;
@@ -41,7 +41,7 @@ export function createdPullRequestKey(
   if (parsed !== null) return { ...parsed, url };
   const identity = project?.repositoryIdentity;
   const kind = identity?.provider as SourceControlProviderKind | undefined;
-  const repository = project === undefined ? null : repositoryIdentityOf(project);
+  const repository = sourceControlRepositorySelector(identity);
   if (!identity || kind === undefined || repository === null) return null;
   return {
     host: pullRequestHostOf(identity, kind),

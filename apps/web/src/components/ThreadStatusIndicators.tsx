@@ -1,3 +1,4 @@
+import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { pullRequestDetailToVcsStatus } from "@t3tools/client-runtime/state/pull-requests";
 import {
@@ -17,7 +18,6 @@ import { useMemo } from "react";
 import { cn } from "../lib/utils";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
-import { useServerConfigs } from "../state/entities";
 import { parseChangeRequestUrl } from "../lib/openPullRequestLink";
 import { useEnvironmentQuery } from "../state/query";
 import { linkedPullRequestDetailAtom, useSharedPullRequestSummary } from "../state/pullRequests";
@@ -51,14 +51,6 @@ export type ThreadPr = VcsStatusResult["pr"];
 export interface LinkedThreadPullRequestStatus {
   readonly pr: NonNullable<ThreadPr>;
   readonly sourceControlProvider: NonNullable<VcsStatusResult["sourceControlProvider"]>;
-}
-
-export function useSupportsMultiplePullRequests(environmentId: EnvironmentId | null): boolean {
-  const configs = useServerConfigs();
-  return (
-    environmentId !== null &&
-    configs.get(environmentId)?.environment.capabilities.threadPullRequests === true
-  );
 }
 
 /** Linked badges use persisted snapshots; only branch and legacy fallbacks lease summary reads. */

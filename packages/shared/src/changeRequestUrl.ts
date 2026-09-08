@@ -1,4 +1,4 @@
-import type { SourceControlProviderKind } from "@t3tools/contracts";
+import type { RepositoryIdentity, ThreadLinkedPullRequest } from "@t3tools/contracts";
 
 /**
  * A change request named the way a thread link names one: the host below which the repository
@@ -78,7 +78,7 @@ function claim(host: string, match: RegExpExecArray | null): ChangeRequestLink |
 
 /** The web URL a host writes for a change request; null when the host shape is unknown. */
 export function changeRequestUrlFor(
-  kind: SourceControlProviderKind | null,
+  kind: string | null | undefined,
   host: string,
   repository: string,
   number: number,
@@ -95,4 +95,106 @@ export function changeRequestUrlFor(
     default:
       return null;
   }
+}
+
+/** Builds a GitHub URL that remains available when the pull request API cannot be read. */
+export function gitHubPullRequestBrowserUrl(
+  identity: RepositoryIdentity | null | undefined,
+  repository: string,
+  number: number,
+): string | null {
+  if (identity?.provider !== "github" || !Number.isSafeInteger(number) || number < 1) return null;
+  const repositoryPath = repository.split("/");
+  if (
+    repositoryPath.length !== 2 ||
+    repositoryPath.some((segment) => segment.length === 0 || segment === "." || segment === "..")
+  ) {
+    return null;
+  }
+
+  let origin: string | null = null;
+  try {
+    const remoteUrl = new URL(identity.locator.remoteUrl.trim());
+    if (remoteUrl.protocol === "http:" || remoteUrl.protocol === "https:") {
+      origin = remoteUrl.origin;
+    }
+  } catch {
+    // SCP-style remotes are read from their normalized identity below.
+  }
+  const hostname = identity.canonicalKey.split("/")[0];
+  if (origin === null && !hostname) return null;
+
+  try {
+    const url = new URL(origin ?? `https://${hostname}`);
+    url.pathname = `/${repositoryPath.join("/")}/pull/${number}`;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The pull-request URL a GitHub-style `#123` autolink might name. GitHub writes every bare
+ * reference through `/issues/`, including pull requests, so this only builds a candidate: the
+ * caller must successfully read it as a pull request before treating it as one.
+ */
+export function pullRequestCandidateUrlFromReferenceAutolink(targetUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(targetUrl);
+  } catch {
+    return null;
+  }
+  if (
+    (url.protocol !== "https:" && url.protocol !== "http:") ||
+    !(
+      url.hostname.toLowerCase() === "github.com" ||
+      url.hostname.toLowerCase().endsWith(".github.com") ||
+      url.hostname.toLowerCase().startsWith("github.")
+    )
+  ) {
+    return null;
+  }
+  const match = /^\/([^/]+\/[^/]+)\/issues\/(\d+)(?:\/|$)/u.exec(url.pathname);
+  if (match?.[1] === undefined || match[2] === undefined) return null;
+  url.pathname = `/${match[1]}/pull/${match[2]}`;
+  return url.toString();
+}
+
+/** Match a stored PR without requiring its project to remain available. */
+export function matchesLinkedPullRequestUrl(
+  linkedPullRequest: ThreadLinkedPullRequest,
+  targetUrl: string,
+): boolean {
+  const linked = parseChangeRequestUrl(linkedPullRequest.url);
+  const target = parseChangeRequestUrl(targetUrl);
+  return (
+    linked !== null &&
+    target !== null &&
+    linked.host === target.host &&
+    linked.repository === target.repository &&
+    linked.number === target.number
+  );
+}
+
+/** The repository root behind a recognised change-request URL, without PR-specific state. */
+export function changeRequestRepositoryUrl(targetUrl: string): string | null {
+  const changeRequest = parseChangeRequestUrl(targetUrl);
+  if (changeRequest === null) return null;
+  const url = new URL(targetUrl);
+  const repositoryPath =
+    /^(.*?)\/-\/merge_requests\/\d+(?:\/|$)/iu.exec(url.pathname)?.[1] ??
+    /^(.*?)(?:\/pull\/\d+|\/-\/merge_requests\/\d+|\/pull-requests\/\d+|\/pullrequest\/\d+)(?:\/|$)/iu.exec(
+      url.pathname,
+    )?.[1];
+  if (!repositoryPath) return null;
+  url.pathname = repositoryPath;
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+export function siblingPullRequestUrl(url: string, number: number): string | null {
+  const match = /^(.*\/)\d+\/?$/.exec(url);
+  return match === null ? null : `${match[1]}${number}`;
 }

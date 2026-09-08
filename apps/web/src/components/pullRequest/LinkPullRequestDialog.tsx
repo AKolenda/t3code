@@ -1,3 +1,5 @@
+import { changeRequestUrlFor as changeRequestWebUrl } from "@t3tools/shared/changeRequestUrl";
+export { changeRequestUrlFor as changeRequestWebUrl } from "@t3tools/shared/changeRequestUrl";
 import {
   pullRequestHostOf,
   type ScopedThreadRef,
@@ -108,27 +110,6 @@ export function resolveLinkPullRequestInput(input: {
   return {
     link: { host: input.project.host, repository: input.project.repository, number, url: webUrl },
   };
-}
-
-/** The pull request page for a number on the hosts whose URL shape is known. */
-export function changeRequestWebUrl(
-  provider: string | undefined,
-  host: string,
-  repository: string,
-  number: number,
-): string | null {
-  switch (provider) {
-    case "github":
-      return `https://${host}/${repository}/pull/${number}`;
-    case "gitlab":
-      return `https://${host}/${repository}/-/merge_requests/${number}`;
-    case "bitbucket":
-      return `https://${host}/${repository}/pull-requests/${number}`;
-    case "azure-devops":
-      return `https://${host}/${repository}/pullrequest/${number}`;
-    default:
-      return null;
-  }
 }
 
 function LinkPullRequestDialog({

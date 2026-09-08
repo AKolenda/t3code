@@ -1,3 +1,4 @@
+import { sourceControlRepositorySelector } from "@t3tools/shared/sourceControl";
 import * as Cache from "effect/Cache";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -522,30 +523,6 @@ function withRateLimitBackoff(
     Record<Exclude<keyof PullRequestProviderApi, keyof typeof wrapped>, never>;
 }
 
-/**
- * The provider-native repository selector. `displayName` is the full path below the host, which
- * is what nested GitLab groups need; owner/name is the two-segment fallback for identities
- * recorded before that field existed.
- *
- * Azure DevOps is the exception: `az repos pr list --repository` takes a repository name, and
- * takes the organisation and project from the checkout it detects — so the recorded
- * `org/project/_git/repo` path is refused outright and the whole repository reads as
- * unavailable. Its name is the last segment, which is what this hands over.
- *
- * One function because everything downstream is keyed by what it answers: the rows' own
- * `repository`, the per-repository cursors, and the detail and diff reads a row leads to.
- */
-export function repositoryIdentityOf(project: OrchestrationProjectShell): string | null {
-  const identity = project.repositoryIdentity;
-  if (!identity) return null;
-  if (identity.provider === "azure-devops") {
-    const segments = (identity.displayName ?? "").split("/").filter((part) => part !== "_git");
-    return identity.name || segments.at(-1) || null;
-  }
-  if (identity.displayName) return identity.displayName;
-  return identity.owner && identity.name ? `${identity.owner}/${identity.name}` : null;
-}
-
 export const make = Effect.gen(function* () {
   const mergedPullRequests = yield* PubSub.sliding<PullRequestMergeEvent>(64);
   const pullRequestRefreshes = yield* SubscriptionRef.make(0);
@@ -568,7 +545,11 @@ export const make = Effect.gen(function* () {
     for (const project of projects) {
       if (filter.projectId !== undefined && project.id !== filter.projectId) continue;
       const identity = project.repositoryIdentity;
-      if (identity?.provider !== "unknown" || repositoryIdentityOf(project) === null) continue;
+      if (
+        identity?.provider !== "unknown" ||
+        sourceControlRepositorySelector(project.repositoryIdentity) === null
+      )
+        continue;
       const host = pullRequestHostOf(identity, "unknown");
       // A legacy identity has no canonical host until its provider is refined, so it must reach
       // the refinement before a host filter can decide whether it belongs in the result.
@@ -642,7 +623,7 @@ export const make = Effect.gen(function* () {
           if (filter.projectIds !== undefined && !filter.projectIds.includes(project.id)) continue;
           const identity = project.repositoryIdentity;
           let kind = identity?.provider as SourceControlProviderKind | undefined;
-          const repository = repositoryIdentityOf(project);
+          const repository = sourceControlRepositorySelector(project.repositoryIdentity);
           if (!identity || kind === undefined || repository === null) continue;
           // Worktrees of one repository are separate projects; reading the remote once keeps
           // the page from repeating every change request per local checkout. The host is part

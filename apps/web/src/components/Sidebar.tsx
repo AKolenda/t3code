@@ -1,3 +1,4 @@
+import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { LinkBranchPullRequestButton } from "./pullRequest/LinkBranchPullRequestButton";
 import {
   resolveThreadCurrentPullRequestLink,
@@ -201,7 +202,6 @@ import {
   terminalStatusFromRunningIds,
   type TerminalStatusIndicator,
   useLinkedThreadPullRequest,
-  useSupportsMultiplePullRequests,
 } from "./ThreadStatusIndicators";
 import {
   resolveSnoozePresets,
