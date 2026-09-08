@@ -27,8 +27,15 @@ const TEXT_LUMINANCE_THRESHOLD = 0.179;
 /** How far the scrim is pushed toward its text's opposite pole. */
 const SCRIM_PUSH = 0.35;
 
-/** Fraction of the image height, measured from the bottom, that the overlay covers. */
+/** Fraction of the visible thumbnail height, from the bottom, that the overlay covers. */
 const SAMPLE_BAND = 0.3;
+
+/**
+ * Aspect ratio of the frame the thumbnail is rendered into with `object-cover`
+ * (see `SNAP_SHOT_ATTACHMENT_FRAME_CLASS`: w-52 by h-28). Sampling must use the
+ * centered crop that ratio imposes, not the full source image.
+ */
+export const SNAP_SHOT_FRAME_ASPECT = 52 / 28;
 
 function relativeLuminance(color: RgbColor): number {
   const linearize = (channel: number) => {
@@ -82,7 +89,25 @@ const SAMPLE_HEIGHT = 4;
 const CACHE_LIMIT = 256;
 const sampleCache = new Map<string, Promise<RgbColor | null>>();
 
-function readBottomBand(image: HTMLImageElement): RgbColor | null {
+/**
+ * Source rectangle that `object-cover` shows for an image of the given size in
+ * a frame of the given aspect ratio: the largest centered region of that ratio.
+ */
+export function coverCrop(
+  width: number,
+  height: number,
+  frameAspect: number,
+): { x: number; y: number; width: number; height: number } {
+  const imageAspect = width / height;
+  if (imageAspect > frameAspect) {
+    const cropWidth = height * frameAspect;
+    return { x: (width - cropWidth) / 2, y: 0, width: cropWidth, height };
+  }
+  const cropHeight = width / frameAspect;
+  return { x: 0, y: (height - cropHeight) / 2, width, height: cropHeight };
+}
+
+function readBottomBand(image: HTMLImageElement, frameAspect: number): RgbColor | null {
   const { naturalWidth: width, naturalHeight: height } = image;
   if (width === 0 || height === 0) return null;
   const canvas = document.createElement("canvas");
@@ -90,13 +115,14 @@ function readBottomBand(image: HTMLImageElement): RgbColor | null {
   canvas.height = SAMPLE_HEIGHT;
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (context === null) return null;
-  const bandHeight = Math.max(1, Math.round(height * SAMPLE_BAND));
+  const crop = coverCrop(width, height, frameAspect);
+  const bandHeight = Math.max(1, crop.height * SAMPLE_BAND);
   // Drawing the band into a tiny canvas lets the rasterizer do the averaging.
   context.drawImage(
     image,
-    0,
-    height - bandHeight,
-    width,
+    crop.x,
+    crop.y + crop.height - bandHeight,
+    crop.width,
     bandHeight,
     0,
     0,
@@ -112,18 +138,23 @@ function readBottomBand(image: HTMLImageElement): RgbColor | null {
 }
 
 /**
- * Average color of the image's bottom band, or null when the image cannot be
- * loaded or read. Results are memoized per URL so the three surfaces that
- * show the same capture decode it once.
+ * Average color of the bottom band of the region the thumbnail frame shows, or
+ * null when the image cannot be loaded or read. Results are memoized per URL
+ * so the surfaces that show the same capture decode it once.
  */
-export function sampleSnapShotBottomColor(src: string): Promise<RgbColor | null> {
+export function sampleSnapShotBottomColor(
+  src: string,
+  frameAspect = SNAP_SHOT_FRAME_ASPECT,
+): Promise<RgbColor | null> {
   const cached = sampleCache.get(src);
   if (cached) return cached;
   const pending = new Promise<RgbColor | null>((resolve) => {
     const image = new Image();
     image.crossOrigin = "anonymous";
     image.decoding = "async";
-    image.addEventListener("load", () => resolve(readBottomBand(image)), { once: true });
+    image.addEventListener("load", () => resolve(readBottomBand(image, frameAspect)), {
+      once: true,
+    });
     image.addEventListener("error", () => resolve(null), { once: true });
     image.src = src;
   });

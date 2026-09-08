@@ -135,10 +135,12 @@ export function SnapShotContentsButton({
   source,
   className,
   side = "top",
+  variant = "ghost-muted",
 }: {
   source: SnapShotSource;
   className?: string;
   side?: "top" | "right" | "bottom" | "left";
+  variant?: "ghost-muted" | "overlay";
 }) {
   const includesAccessibility = snapShotIncludesAccessibility(source);
   const ContentsIcon = includesAccessibility ? TextIcon : ImageIcon;
@@ -159,7 +161,7 @@ export function SnapShotContentsButton({
                   className={cn("[--control-icon-color:currentColor]", className)}
                   onClick={(event) => event.stopPropagation()}
                   size="icon-micro"
-                  variant="ghost-muted"
+                  variant={variant}
                 />
               }
             />
@@ -269,7 +271,8 @@ export function SnapShotAttachmentDetails({
           <span className="truncate">{source.appName}</span>
           <SnapShotContentsButton
             source={source}
-            className="pointer-events-auto text-(--snap-shot-text-muted) hover:bg-(--snap-shot-badge) hover:text-(--snap-shot-text)"
+            variant="overlay"
+            className="pointer-events-auto"
           />
         </div>
         <div className="truncate text-[9px] leading-3.5 text-(--snap-shot-text-muted)">

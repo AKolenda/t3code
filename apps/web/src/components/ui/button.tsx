@@ -49,6 +49,10 @@ const buttonVariants = cva(
         glass:
           "surface-glass [--control-icon-color:var(--contrast-muted-foreground)] border-border/60 text-foreground shadow-sm [:hover,[data-pressed]]:border-border",
         link: "border-transparent underline-offset-4 [:hover,[data-pressed]]:underline",
+        /** For controls placed over imagery: inherits the surrounding text color
+         * and tints its hover from it, so the host decides the tone. */
+        overlay:
+          "border-transparent text-current opacity-72 [:hover,[data-pressed]]:bg-current/14 [:hover,[data-pressed]]:opacity-100",
         outline:
           "[--control-icon-color:var(--contrast-muted-foreground)] border-input bg-popover not-dark:bg-clip-padding text-foreground shadow-xs/5 not-disabled:not-active:not-data-pressed:before:shadow-[0_1px_--theme(--color-black/4%)] dark:bg-input/32 dark:not-disabled:before:shadow-[0_-1px_--theme(--color-white/2%)] dark:not-disabled:not-active:not-data-pressed:before:shadow-[0_-1px_--theme(--color-white/6%)] [:disabled,:active,[data-pressed]]:shadow-none [:hover,[data-pressed]]:bg-accent/50 dark:[:hover,[data-pressed]]:bg-input/64",
         secondary:
