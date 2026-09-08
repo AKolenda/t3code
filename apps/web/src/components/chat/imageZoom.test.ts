@@ -2,6 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   clampImagePan,
+  clickZoomScale,
   IMAGE_ZOOM_IDENTITY,
   MAX_IMAGE_ZOOM,
   panImage,
@@ -89,9 +90,25 @@ describe("panImage", () => {
 });
 
 describe("wheelZoomFactor", () => {
-  it("zooms in on negative deltas and caps a mouse notch", () => {
-    expect(wheelZoomFactor(-5)).toBeGreaterThan(1);
-    expect(wheelZoomFactor(5)).toBeLessThan(1);
-    expect(wheelZoomFactor(-100)).toBe(wheelZoomFactor(-50));
+  it("matches the native pinch rate for small deltas", () => {
+    // Chromium encodes a 5% pinch as deltaY -5.
+    expect(wheelZoomFactor(-5)).toBeCloseTo(1.05, 2);
+    expect(wheelZoomFactor(5)).toBeCloseTo(0.95, 2);
+  });
+
+  it("caps a mouse wheel notch", () => {
+    expect(wheelZoomFactor(-100)).toBe(wheelZoomFactor(-25));
+  });
+});
+
+describe("clickZoomScale", () => {
+  it("zooms to the actual pixel size of a large image", () => {
+    expect(clickZoomScale(3000, 1000)).toBe(3);
+  });
+
+  it("zooms to 2x when the image already shows near its actual size", () => {
+    expect(clickZoomScale(1000, 1000)).toBe(2);
+    expect(clickZoomScale(1500, 1000)).toBe(2);
+    expect(clickZoomScale(0, 1000)).toBe(2);
   });
 });

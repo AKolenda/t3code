@@ -1,4 +1,12 @@
-import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { createPortal } from "react-dom";
 import { ChevronLeftIcon, ChevronRightIcon, ImageIcon, TextIcon, XIcon } from "lucide-react";
 import { Button } from "../ui/button";
@@ -18,7 +26,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { composerFloatingLayerProps } from "./composerEventScope";
 import {
   clampImagePan,
-  DOUBLE_CLICK_IMAGE_ZOOM,
+  clickZoomScale,
   IMAGE_ZOOM_IDENTITY,
   type ImageZoomFrame,
   type ImageZoomState,
@@ -90,46 +98,88 @@ function zoomAnchor(frame: ImageZoomFrame, event: { clientX: number; clientY: nu
   };
 }
 
+/** Safari reports trackpad pinch as gesture events instead of ctrl+wheel. */
+interface SafariGestureEvent extends UIEvent {
+  readonly scale: number;
+  readonly clientX: number;
+  readonly clientY: number;
+}
+
 /**
- * The screenshot with pinch, wheel and double-click zoom plus drag to pan.
- * Only the transform changes while zooming, so Chromium keeps the work on the
+ * The screenshot with the zoom model of a native image viewer: pinch or
+ * ctrl+wheel zooms around the pointer, two-finger scroll or drag pans, and a
+ * click toggles between fitted and actual size. Gestures are read from the
+ * whole dialog so the pointer does not have to sit on the image. Only the
+ * transform changes while zooming, so Chromium keeps the work on the
  * compositor and never repaints the bitmap.
  */
 function ZoomableImage({
   src,
   alt,
+  surfaceRef,
   onError,
 }: {
   readonly src: string;
   readonly alt: string;
+  /** The dialog element that receives pinch and wheel gestures. */
+  readonly surfaceRef: RefObject<HTMLElement | null>;
   readonly onError: () => void;
 }) {
   const imageRef = useRef<HTMLImageElement | null>(null);
   const [zoom, setZoom] = useState<ImageZoomState>(IMAGE_ZOOM_IDENTITY);
-  const dragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const dragRef = useRef<{ pointerId: number; x: number; y: number; moved: boolean } | null>(null);
 
-  // Wheel must be non-passive to stop the page from scrolling or, in the
-  // desktop app, from zooming the whole window. React registers wheel as
-  // passive, so attach it by hand.
+  // Wheel and gesture listeners must be non-passive to stop the page from
+  // scrolling and the browser from zooming the whole window. React registers
+  // wheel as passive, so attach them by hand.
   useEffect(() => {
+    const surface = surfaceRef.current;
     const image = imageRef.current;
-    if (!image) return;
+    if (!surface || !image) return;
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
-      // macOS reports trackpad pinch as ctrl+wheel with small deltas. A plain
-      // wheel zooms too, since the dialog has nothing else to scroll. Firefox
-      // reports mouse wheels in lines, not pixels, so scale those up first.
-      const deltaY =
-        event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY * 16 : event.deltaY;
-      const factor = wheelZoomFactor(event.ctrlKey ? deltaY * 3 : deltaY);
+      const lineScale = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : 1;
+      if (event.ctrlKey) {
+        // Chromium and Firefox report a trackpad pinch as ctrl+wheel.
+        const factor = wheelZoomFactor(event.deltaY * lineScale);
+        setZoom((current) => {
+          const frame = zoomFrame(image, current);
+          return zoomImageAt(current, factor, zoomAnchor(frame, event), frame);
+        });
+        return;
+      }
+      // A plain two-finger scroll pans the zoomed image, like a native viewer.
+      const dx = -event.deltaX * lineScale;
+      const dy = -event.deltaY * lineScale;
+      setZoom((current) => panImage(current, dx, dy, zoomFrame(image, current)));
+    };
+    // Safari's `scale` is cumulative from the start of the gesture.
+    let gestureStartScale = 1;
+    const onGestureStart = (event: Event) => {
+      event.preventDefault();
       setZoom((current) => {
-        const frame = zoomFrame(image, current);
-        return zoomImageAt(current, factor, zoomAnchor(frame, event), frame);
+        gestureStartScale = current.scale;
+        return current;
       });
     };
-    image.addEventListener("wheel", onWheel, { passive: false });
-    return () => image.removeEventListener("wheel", onWheel);
-  }, []);
+    const onGestureChange = (event: Event) => {
+      event.preventDefault();
+      const gesture = event as SafariGestureEvent;
+      setZoom((current) => {
+        const frame = zoomFrame(image, current);
+        const factor = (gestureStartScale * gesture.scale) / current.scale;
+        return zoomImageAt(current, factor, zoomAnchor(frame, gesture), frame);
+      });
+    };
+    surface.addEventListener("wheel", onWheel, { passive: false });
+    surface.addEventListener("gesturestart", onGestureStart, { passive: false });
+    surface.addEventListener("gesturechange", onGestureChange, { passive: false });
+    return () => {
+      surface.removeEventListener("wheel", onWheel);
+      surface.removeEventListener("gesturestart", onGestureStart);
+      surface.removeEventListener("gesturechange", onGestureChange);
+    };
+  }, [surfaceRef]);
 
   // A resize changes the pan bounds. Reclamp so a grown window does not leave
   // the image offset with backdrop showing at one edge.
@@ -147,16 +197,21 @@ function ZoomableImage({
       ref={imageRef}
       src={src}
       alt={alt}
-      className={`max-h-[86vh] max-w-[92vw] animate-[snap-shot-contents-enter_140ms_ease-out] select-none rounded-lg border border-border/70 bg-background object-contain shadow-2xl motion-reduce:animate-none ${
-        zoomed ? "cursor-grab touch-none active:cursor-grabbing" : "cursor-zoom-in"
+      className={`max-h-[86vh] max-w-[92vw] animate-[snap-shot-contents-enter_140ms_ease-out] touch-none select-none rounded-lg border border-border/70 bg-background object-contain shadow-2xl motion-reduce:animate-none ${
+        zoomed ? "cursor-grab active:cursor-grabbing" : "cursor-zoom-in"
       }`}
       style={{ transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})` }}
       draggable={false}
       onError={onError}
       onPointerDown={(event) => {
-        if (!zoomed || event.button !== 0) return;
-        dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
-        event.currentTarget.setPointerCapture(event.pointerId);
+        if (event.button !== 0) return;
+        dragRef.current = {
+          pointerId: event.pointerId,
+          x: event.clientX,
+          y: event.clientY,
+          moved: false,
+        };
+        if (zoomed) event.currentTarget.setPointerCapture(event.pointerId);
       }}
       onPointerMove={(event) => {
         const drag = dragRef.current;
@@ -165,22 +220,27 @@ function ZoomableImage({
         const dy = event.clientY - drag.y;
         drag.x = event.clientX;
         drag.y = event.clientY;
+        if (dx !== 0 || dy !== 0) drag.moved = true;
+        if (!zoomed) return;
         const image = event.currentTarget;
         setZoom((current) => panImage(current, dx, dy, zoomFrame(image, current)));
       }}
       onPointerUp={(event) => {
-        if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
-      }}
-      onPointerCancel={() => {
+        const drag = dragRef.current;
+        if (drag?.pointerId !== event.pointerId) return;
         dragRef.current = null;
-      }}
-      onDoubleClick={(event) => {
+        // A drag that moved is a pan, not a click.
+        if (drag.moved && zoomed) return;
         const image = event.currentTarget;
         setZoom((current) => {
           if (current.scale > 1) return IMAGE_ZOOM_IDENTITY;
           const frame = zoomFrame(image, current);
-          return zoomImageAt(current, DOUBLE_CLICK_IMAGE_ZOOM, zoomAnchor(frame, event), frame);
+          const scale = clickZoomScale(image.naturalWidth, image.offsetWidth);
+          return zoomImageAt(current, scale, zoomAnchor(frame, event), frame);
         });
+      }}
+      onPointerCancel={() => {
+        dragRef.current = null;
       }}
     />
   );
@@ -190,6 +250,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
   preview,
   onClose,
 }: ExpandedImageDialogProps) {
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
   const [imageOffset, setImageOffset] = useState(0);
   const [failedImageSrc, setFailedImageSrc] = useState<string | null>(null);
   const [accessibilityDetailsSrc, setAccessibilityDetailsSrc] = useState<string | null>(null);
@@ -280,6 +341,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
   return createPortal(
     <div
       {...composerFloatingLayerProps}
+      ref={surfaceRef}
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 px-4 py-6 [-webkit-app-region:no-drag]"
       role="dialog"
       aria-modal="true"
@@ -339,6 +401,7 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
               key={item.src}
               src={item.src}
               alt={item.name}
+              surfaceRef={surfaceRef}
               onError={() => setFailedImageSrc(item.src)}
             />
           )}

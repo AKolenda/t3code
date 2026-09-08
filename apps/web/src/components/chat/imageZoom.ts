@@ -32,8 +32,6 @@ export interface Point {
 export const IMAGE_ZOOM_IDENTITY: ImageZoomState = { scale: 1, x: 0, y: 0 };
 const MIN_IMAGE_ZOOM = 1;
 export const MAX_IMAGE_ZOOM = 8;
-/** Zoom applied by a double click on an unzoomed image. */
-export const DOUBLE_CLICK_IMAGE_ZOOM = 2.5;
 
 function clampAxis(
   translate: number,
@@ -92,10 +90,20 @@ export function panImage(
 }
 
 /**
- * Converts a wheel delta into a zoom factor. Trackpad pinch on macOS arrives
- * as ctrl+wheel with small deltas, mouse wheels send about 100 per notch, so
- * the delta is capped to keep a notch from jumping more than about 1.6x.
+ * Converts a ctrl+wheel delta into a zoom factor. Chromium reports a trackpad
+ * pinch as ctrl+wheel where `1 - deltaY / 100` is the scale change, so this
+ * matches the native pinch rate. A mouse wheel with ctrl sends about 100 per
+ * notch, so the delta is capped to keep a notch near a 1.3x step.
  */
 export function wheelZoomFactor(deltaY: number): number {
-  return Math.exp(-Math.max(-50, Math.min(50, deltaY)) * 0.01);
+  return Math.exp(-Math.max(-25, Math.min(25, deltaY)) * 0.01);
+}
+
+/**
+ * The scale a click zooms to from the fitted size: the image's actual pixel
+ * size, or 2x when the image is already shown at or near its actual size.
+ */
+export function clickZoomScale(naturalWidth: number, displayedWidth: number): number {
+  if (naturalWidth <= 0 || displayedWidth <= 0) return 2;
+  return Math.max(2, naturalWidth / displayedWidth);
 }
