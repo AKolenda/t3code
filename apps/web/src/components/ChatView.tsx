@@ -4132,9 +4132,9 @@ export default function ChatView(props: ChatViewProps) {
     useRightPanelStore.getState().open(activeThreadRef, "agents");
   }, [activeThreadRef]);
   const addDeviceSurface = useCallback(() => {
-    if (!activeThreadRef || !isServerThread) return;
+    if (!activeThreadRef) return;
     useRightPanelStore.getState().open(activeThreadRef, "device");
-  }, [activeThreadRef, isServerThread]);
+  }, [activeThreadRef]);
   // An agent's `device_open` surfaces in every client the same way a
   // `preview_open` does: the thread gains a device session and the panel
   // opens on it. Closing the last session leaves the tab in place so the
@@ -8661,7 +8661,7 @@ export default function ChatView(props: ChatViewProps) {
           filesAvailable={activeProject !== null}
           pullRequestAvailable={pullRequestSurfaceAvailable}
           agentsAvailable
-          deviceAvailable={isServerThread}
+          deviceAvailable={activeThreadRef !== null}
           liveAgentCount={agentPanelModel.liveCount}
         >
           {rightPanelContent}
@@ -8713,7 +8713,7 @@ export default function ChatView(props: ChatViewProps) {
             filesAvailable={activeProject !== null}
             pullRequestAvailable={pullRequestSurfaceAvailable}
             agentsAvailable
-            deviceAvailable={isServerThread}
+            deviceAvailable={activeThreadRef !== null}
             liveAgentCount={agentPanelModel.liveCount}
           >
             {rightPanelContent}
