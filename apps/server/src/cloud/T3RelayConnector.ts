@@ -132,6 +132,11 @@ function localWebSocketUrl(originUrl: string, publicUrl: string): string {
   return origin.toString();
 }
 
+// Node's fetch decompresses gzip and brotli bodies but leaves the origin's
+// content-encoding and content-length headers in place. Forwarding those with
+// the decoded bytes makes the browser fail to decode the response, so the
+// connector asks the loopback origin for identity encoding and drops any
+// encoding headers that still show up. Cloudflare compresses at the edge.
 function relayResponseHeaders(headers: Headers): ReadonlyArray<readonly [string, string]> {
   const hopByHop = new Set([
     "connection",
@@ -140,9 +145,12 @@ function relayResponseHeaders(headers: Headers): ReadonlyArray<readonly [string,
     "transfer-encoding",
     "upgrade",
   ]);
-  const forwarded = [...headers].filter(
-    ([name]) => name.toLowerCase() !== "set-cookie" && !hopByHop.has(name.toLowerCase()),
-  );
+  const decoded = headers.has("content-encoding");
+  const forwarded = [...headers].filter(([name]) => {
+    const lower = name.toLowerCase();
+    if (lower === "set-cookie" || hopByHop.has(lower)) return false;
+    return !(decoded && (lower === "content-encoding" || lower === "content-length"));
+  });
   for (const cookie of headers.getSetCookie()) {
     forwarded.push(["set-cookie", cookie]);
   }
@@ -483,6 +491,7 @@ export class T3RelayConnectorSession {
         headers.append(name, value);
       }
       for (const name of [
+        "accept-encoding",
         "connection",
         "content-length",
         "host",
@@ -494,6 +503,7 @@ export class T3RelayConnectorSession {
       ]) {
         headers.delete(name);
       }
+      headers.set("accept-encoding", "identity");
       const body = request.body.length === 0 ? undefined : new Blob(request.body);
       const response = await this.#fetch(localUrl, {
         method: request.method,

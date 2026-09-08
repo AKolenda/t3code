@@ -643,4 +643,70 @@ describe("T3RelayConnectorSession", () => {
     });
     expect(controls.at(-1)).toEqual({ type: "http_response_end" });
   });
+
+  it("forwards decoded bodies without the origin's content-encoding headers", async () => {
+    const sockets: Array<TestSocket> = [];
+    const requests: Array<Request> = [];
+    const session = new T3RelayConnectorSession(
+      {
+        connectorUrl: "wss://endpoint.edge.test/.well-known/t3-relay/connect",
+        connectorToken: "token",
+        originUrl: "http://127.0.0.1:7331/",
+      },
+      () => {
+        const socket = new TestSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      async (input, init) => {
+        const request =
+          input instanceof Request ? new Request(input, init) : new Request(input.toString(), init);
+        if (new URL(request.url).pathname === "/.well-known/t3-relay/connect") {
+          return connectorTicketResponse();
+        }
+        requests.push(request);
+        // Node's fetch hands back decoded bytes while keeping the origin's
+        // encoding headers, so the fake mirrors that shape.
+        return new Response("decoded body", {
+          status: 200,
+          headers: {
+            "content-type": "text/plain",
+            "content-encoding": "gzip",
+            "content-length": "42",
+            etag: '"abc"',
+          },
+        });
+      },
+    );
+    session.start();
+    await waitForConnector();
+    readyConnector(sockets[0]!);
+    sockets[0]!.message(
+      encodeRelayTransportControlFrame(3, {
+        type: "http_request_start",
+        method: "GET",
+        url: "https://endpoint.edge.test/assets/app.js",
+        headers: [["accept-encoding", "gzip, br"]],
+      }),
+    );
+    sockets[0]!.message(encodeRelayTransportControlFrame(3, { type: "http_request_end" }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.headers.get("accept-encoding")).toBe("identity");
+    const controls = sockets[0]!.sent
+      .filter((value) => {
+        const frame = decodeRelayTransportFrame(value as Uint8Array);
+        return Result.isSuccess(frame) && frame.success.kind === RelayTransportFrameKind.control;
+      })
+      .map((value) => decodedControl(value));
+    const responseStart = controls.find((message) => message.type === "http_response_start");
+    expect(responseStart).toBeDefined();
+    if (responseStart?.type !== "http_response_start") throw new Error("missing response start");
+    const names = responseStart.headers.map(([name]) => name.toLowerCase());
+    expect(names).toContain("content-type");
+    expect(names).toContain("etag");
+    expect(names).not.toContain("content-encoding");
+    expect(names).not.toContain("content-length");
+  });
 });

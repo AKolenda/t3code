@@ -93,6 +93,10 @@ const webcryptoLayer = Layer.succeed(
   }),
 );
 
+function responseStatusForbidsBody(status: number): boolean {
+  return status < 200 || status === 204 || status === 205 || status === 304;
+}
+
 function tryOrUndefined<A>(operation: () => A): A | undefined {
   try {
     return operation();
@@ -489,6 +493,16 @@ export default class RelayEnvironment extends Cloudflare.DurableObject<RelayEnvi
                 }),
               ),
             );
+            // The Fetch API rejects a body on 1xx, 204, 205, and 304. The
+            // host never sends body frames for those, so drain the queue
+            // rather than handing the runtime a stream it cannot attach.
+            if (responseStatusForbidsBody(response.status)) {
+              yield* Stream.runDrain(responseStream);
+              return HttpServerResponse.empty({
+                status: response.status,
+                headers: response.headers,
+              });
+            }
             return HttpServerResponse.stream(responseStream, {
               status: response.status,
               headers: response.headers,

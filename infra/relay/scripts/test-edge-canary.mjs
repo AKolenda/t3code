@@ -84,6 +84,26 @@ const origin = Bun.serve({
         headers: { "content-type": "application/octet-stream" },
       });
     }
+    if (url.pathname === "/no-content") {
+      return new Response(null, { status: 204, headers: { "x-canary-empty": "yes" } });
+    }
+    if (url.pathname === "/not-modified") {
+      return new Response(null, { status: 304, headers: { etag: '"canary"' } });
+    }
+    if (url.pathname === "/compressed") {
+      // The connector must ask for identity encoding. If it does not, Node's
+      // fetch decodes this body but keeps content-encoding, and the browser
+      // then fails to decode plain bytes as gzip.
+      const acceptEncoding = request.headers.get("accept-encoding") ?? "";
+      if (acceptEncoding.includes("gzip")) {
+        return new Response(Bun.gzipSync(new TextEncoder().encode("compressed-canary")), {
+          headers: { "content-type": "text/plain", "content-encoding": "gzip" },
+        });
+      }
+      return new Response("compressed-canary", {
+        headers: { "content-type": "text/plain", "x-canary-encoding": acceptEncoding },
+      });
+    }
     const body = new Uint8Array(await request.arrayBuffer());
     return Response.json({
       method: request.method,
@@ -159,6 +179,25 @@ try {
     "Response bytes changed.",
   );
 
+  const noContent = await fetch(new URL("/no-content", workerUrl));
+  assert(noContent.status === 204, `204 response became ${noContent.status}.`);
+  assert(noContent.headers.get("x-canary-empty") === "yes", "204 response lost its headers.");
+  await noContent.arrayBuffer();
+  const notModified = await fetch(new URL("/not-modified", workerUrl), { cache: "no-store" });
+  assert(notModified.status === 304, `304 response became ${notModified.status}.`);
+  await notModified.arrayBuffer();
+
+  const compressed = await fetch(new URL("/compressed", workerUrl));
+  assert(compressed.ok, `Compressed origin response failed with ${compressed.status}.`);
+  assert(
+    (await compressed.text()) === "compressed-canary",
+    "Compressed origin response was not decoded correctly.",
+  );
+  assert(
+    compressed.headers.get("x-canary-encoding") === "identity",
+    "Connector did not request identity encoding from the origin.",
+  );
+
   const textResult = await websocketRoundTrip(
     new URL("/ws", workerUrl).href.replace(/^http/u, "ws"),
     "relay-canary-text",
@@ -218,6 +257,8 @@ try {
     JSON.stringify({
       http: "passed",
       flowControl: "passed",
+      emptyBodyStatuses: "passed",
+      identityEncoding: "passed",
       websocketText: "passed",
       websocketFragmentation: "passed",
       websocketAutoResponse: "passed",

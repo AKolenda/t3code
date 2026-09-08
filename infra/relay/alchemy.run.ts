@@ -2,7 +2,7 @@
 import * as Alchemy from "alchemy";
 import * as Axiom from "alchemy/Axiom";
 import * as Cloudflare from "alchemy/Cloudflare";
-import { providers as drizzleProviders } from "alchemy/Drizzle/Providers";
+import * as Drizzle from "alchemy/Drizzle";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Planetscale from "alchemy/Planetscale";
@@ -19,7 +19,7 @@ export default Alchemy.Stack(
     providers: Layer.mergeAll(
       Axiom.providers(),
       Cloudflare.providers(),
-      drizzleProviders(),
+      Drizzle.providers(),
       Planetscale.providers(),
     ),
     state: Cloudflare.state(),
