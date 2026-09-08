@@ -16,6 +16,15 @@ import {
 } from "./SnapShotAttachmentDetails";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { composerFloatingLayerProps } from "./composerEventScope";
+import {
+  DOUBLE_CLICK_IMAGE_ZOOM,
+  IMAGE_ZOOM_IDENTITY,
+  type ImageZoomFrame,
+  type ImageZoomState,
+  panImage,
+  wheelZoomFactor,
+  zoomImageAt,
+} from "./imageZoom";
 
 interface ExpandedImageDialogProps {
   preview: ExpandedImagePreview;
@@ -54,6 +63,123 @@ function ExpandedVideo({ item }: { readonly item: ExpandedImageItem }) {
       videoClassName="aspect-auto max-h-[86vh] w-auto max-w-[92vw] rounded-lg border border-border/70 shadow-2xl"
       stateClassName={EXPANDED_MEDIA_STATE_CLASS_NAME}
       onRetry={asset ? refreshAssetUrl : undefined}
+    />
+  );
+}
+
+function zoomFrame(image: HTMLImageElement): ImageZoomFrame {
+  return {
+    width: image.offsetWidth,
+    height: image.offsetHeight,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+  };
+}
+
+/** Pointer position relative to the untransformed center of the image box. */
+function zoomAnchor(
+  image: HTMLImageElement,
+  zoom: ImageZoomState,
+  event: { clientX: number; clientY: number },
+) {
+  // The rect is already transformed. Undo the translate so the anchor is
+  // measured against the untransformed center, which the transform origin uses.
+  const rect = image.getBoundingClientRect();
+  return {
+    x: event.clientX - (rect.left + rect.width / 2 - zoom.x),
+    y: event.clientY - (rect.top + rect.height / 2 - zoom.y),
+  };
+}
+
+/**
+ * The screenshot with pinch, wheel and double-click zoom plus drag to pan.
+ * Only the transform changes while zooming, so Chromium keeps the work on the
+ * compositor and never repaints the bitmap.
+ */
+function ZoomableImage({
+  src,
+  alt,
+  onError,
+}: {
+  readonly src: string;
+  readonly alt: string;
+  readonly onError: () => void;
+}) {
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const [zoom, setZoom] = useState<ImageZoomState>(IMAGE_ZOOM_IDENTITY);
+  // Mirrors `zoom` for the native wheel listener, which is registered once.
+  const zoomRef = useRef(zoom);
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+  const dragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+
+  // Wheel must be non-passive to stop the page from scrolling or, in the
+  // desktop app, from zooming the whole window. React registers wheel as
+  // passive, so attach it by hand.
+  useEffect(() => {
+    const image = imageRef.current;
+    if (!image) return;
+    const onWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      // macOS reports trackpad pinch as ctrl+wheel with small deltas. A plain
+      // wheel zooms too, since the dialog has nothing else to scroll.
+      const factor = wheelZoomFactor(event.ctrlKey ? event.deltaY * 3 : event.deltaY);
+      const anchor = zoomAnchor(image, zoomRef.current, event);
+      setZoom((current) => zoomImageAt(current, factor, anchor, zoomFrame(image)));
+    };
+    image.addEventListener("wheel", onWheel, { passive: false });
+    return () => image.removeEventListener("wheel", onWheel);
+  }, []);
+
+  const zoomed = zoom.scale > 1;
+  return (
+    <img
+      // A new image starts unzoomed.
+      key={src}
+      ref={imageRef}
+      src={src}
+      alt={alt}
+      className={`max-h-[86vh] max-w-[92vw] animate-[snap-shot-contents-enter_140ms_ease-out] select-none rounded-lg border border-border/70 bg-background object-contain shadow-2xl motion-reduce:animate-none ${
+        zoomed ? "cursor-grab touch-none active:cursor-grabbing" : "cursor-zoom-in"
+      }`}
+      style={{ transform: `translate(${zoom.x}px, ${zoom.y}px) scale(${zoom.scale})` }}
+      draggable={false}
+      onError={onError}
+      onPointerDown={(event) => {
+        if (!zoomed || event.button !== 0) return;
+        dragRef.current = { pointerId: event.pointerId, x: event.clientX, y: event.clientY };
+        event.currentTarget.setPointerCapture(event.pointerId);
+      }}
+      onPointerMove={(event) => {
+        const drag = dragRef.current;
+        if (!drag || drag.pointerId !== event.pointerId) return;
+        const dx = event.clientX - drag.x;
+        const dy = event.clientY - drag.y;
+        drag.x = event.clientX;
+        drag.y = event.clientY;
+        const frame = zoomFrame(event.currentTarget);
+        setZoom((current) => panImage(current, dx, dy, frame));
+      }}
+      onPointerUp={(event) => {
+        if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
+      }}
+      onPointerCancel={() => {
+        dragRef.current = null;
+      }}
+      onDoubleClick={(event) => {
+        const image = event.currentTarget;
+        setZoom((current) =>
+          current.scale > 1
+            ? IMAGE_ZOOM_IDENTITY
+            : zoomImageAt(
+                current,
+                DOUBLE_CLICK_IMAGE_ZOOM,
+                zoomAnchor(image, current, event),
+                zoomFrame(image),
+              ),
+        );
+      }}
     />
   );
 }
@@ -206,11 +332,9 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
               {openOriginalLink}
             </ExpandedMediaFailure>
           ) : (
-            <img
+            <ZoomableImage
               src={item.src}
               alt={item.name}
-              className="max-h-[86vh] max-w-[92vw] animate-[snap-shot-contents-enter_140ms_ease-out] select-none rounded-lg border border-border/70 bg-background object-contain shadow-2xl motion-reduce:animate-none"
-              draggable={false}
               onError={() => setFailedImageSrc(item.src)}
             />
           )}
