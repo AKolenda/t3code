@@ -268,6 +268,7 @@ export interface ThreadListV2SettledShelfListItem {
 }
 
 export type ThreadListV2ListItem =
+  | { readonly type: "v2-drop-header"; readonly key: string; readonly section: "pinned" | "active" }
   | ThreadListV2ThreadListItem
   | ThreadListV2PendingListItem
   | ThreadListV2SnoozedShelfListItem
@@ -279,6 +280,7 @@ export type ThreadListV2ListItem =
  * reachable without competing with either the inbox or settled history.
  */
 export function buildThreadListV2ListItems(input: {
+  readonly arrangementTargets?: boolean;
   readonly items: ReadonlyArray<ThreadListV2Item>;
   readonly pendingTasks: ReadonlyArray<PendingNewTask>;
   readonly snoozedCount?: number;
@@ -310,7 +312,18 @@ export function buildThreadListV2ListItems(input: {
   const settledShelfHeaderIndex = input.settledShelfHeaderIndex ?? null;
   const activeEnd = snoozedShelfHeaderIndex ?? settledShelfHeaderIndex ?? threadItems.length;
   const snoozedEnd = settledShelfHeaderIndex ?? threadItems.length;
-  const result: ThreadListV2ListItem[] = [...threadItems.slice(0, activeEnd), ...pendingItems];
+  const live = threadItems.slice(0, activeEnd);
+  const firstActive = live.findIndex((item) => item.type === "v2-thread" && !item.item.pinned);
+  const split = firstActive === -1 ? live.length : firstActive;
+  const result: ThreadListV2ListItem[] = input.arrangementTargets
+    ? [
+        { type: "v2-drop-header", key: "v2-pinned-drop", section: "pinned" },
+        ...live.slice(0, split),
+        { type: "v2-drop-header", key: "v2-active-drop", section: "active" },
+        ...live.slice(split),
+        ...pendingItems,
+      ]
+    : [...live, ...pendingItems];
   if (snoozedShelfHeaderIndex !== null && snoozedCount > 0) {
     result.push({
       type: "v2-snoozed-shelf",

@@ -1,8 +1,8 @@
 diff --git a/ios/MenuViewManager.mm b/ios/MenuViewManager.mm
-index 3d149b3e7426b8f7c999603ddf1e15e12331c33a..64e9b739b50a32bd6cb97e944e3491c04f5fca2b 100644
+index 3d149b3e7426b8f7c999603ddf1e15e12331c33a..0983ecc26684e3767bfc6b3b9fbe8324fd5ab3d3 100644
 --- a/ios/MenuViewManager.mm
 +++ b/ios/MenuViewManager.mm
-@@ -65,6 +65,15 @@ RCT_EXPORT_VIEW_PROPERTY(onCloseMenu, RCTDirectEventBlock);
+@@ -65,6 +65,16 @@ RCT_EXPORT_VIEW_PROPERTY(onCloseMenu, RCTDirectEventBlock);
   * onOpenMenu: callback to be called when the menu is opened
   */
  RCT_EXPORT_VIEW_PROPERTY(onOpenMenu, RCTDirectEventBlock);
@@ -12,6 +12,7 @@ index 3d149b3e7426b8f7c999603ddf1e15e12331c33a..64e9b739b50a32bd6cb97e944e3491c0
 +RCT_EXPORT_VIEW_PROPERTY(onMenuInteractionStart, RCTDirectEventBlock);
 +RCT_EXPORT_VIEW_PROPERTY(dragItemId, NSString);
 +RCT_EXPORT_VIEW_PROPERTY(dragEnabled, BOOL);
++RCT_EXPORT_VIEW_PROPERTY(dropEnabled, BOOL);
 +RCT_EXPORT_VIEW_PROPERTY(dragGroup, NSString);
 +RCT_EXPORT_VIEW_PROPERTY(onDragBegin, RCTDirectEventBlock);
 +RCT_EXPORT_VIEW_PROPERTY(onItemDrop, RCTDirectEventBlock);
@@ -66,13 +67,14 @@ index 33d27c5a66593ae1a9b143804413578eb79f1a7d..155cae6d627c917681b54038639429e8
 +
  }
 diff --git a/ios/NewArch/FabricViewImplementationProtocol.swift b/ios/NewArch/FabricViewImplementationProtocol.swift
-index 2cef2fb8c74497da46775a490edc58cf8cbf29cc..f4555d61ab74769c528bef2b1cf8f01eeda4f0a2 100644
+index 2cef2fb8c74497da46775a490edc58cf8cbf29cc..19f8e73ab6e7f1af5453c059b3d18baea3e72f52 100644
 --- a/ios/NewArch/FabricViewImplementationProtocol.swift
 +++ b/ios/NewArch/FabricViewImplementationProtocol.swift
-@@ -1,5 +1,10 @@
+@@ -1,5 +1,11 @@
  import Foundation
  @objc public protocol FabricViewImplementationProtocol {
 +    var dragEnabled: Bool { get set }
++    var dropEnabled: Bool { get set }
 +    var dragItemId: NSString? { get set }
 +    var dragGroup: NSString? { get set }
 +    var onDragBegin: (() -> Void)? { get set }
@@ -80,14 +82,14 @@ index 2cef2fb8c74497da46775a490edc58cf8cbf29cc..f4555d61ab74769c528bef2b1cf8f01e
      var actions: [NSDictionary]? { get set }
      var title: NSString? { get set }
      var themeVariant: NSString? { get set }
-@@ -8,4 +13,5 @@ import Foundation
+@@ -8,4 +14,5 @@ import Foundation
      var onPressAction: ((String) -> Void)? { get set }
      var onCloseMenu: (() -> Void)? { get set }
      var onOpenMenu: (() -> Void)? { get set }
 +    var onMenuInteractionStart: (() -> Void)? { get set }
  }
 diff --git a/ios/NewArch/MenuView.mm b/ios/NewArch/MenuView.mm
-index a54e619eb39e3402fa63f2ee4f734063d4f8fc58..39067bc83619bda083a82a21cde4ee161073c522 100644
+index a54e619eb39e3402fa63f2ee4f734063d4f8fc58..429cfaf19b6c11a815818f68a44bcdb9c05dd13d 100644
 --- a/ios/NewArch/MenuView.mm
 +++ b/ios/NewArch/MenuView.mm
 @@ -46,6 +46,19 @@ using namespace facebook::react;
@@ -171,10 +173,13 @@ index a54e619eb39e3402fa63f2ee4f734063d4f8fc58..39067bc83619bda083a82a21cde4ee16
              },
              @"subactions": subactionsArray,
          };
-@@ -153,6 +198,16 @@ using namespace facebook::react;
+@@ -153,6 +198,19 @@ using namespace facebook::react;
      const auto &newViewProps = *std::static_pointer_cast<MenuViewProps const>(props);
  
  
++    if (oldViewProps.dropEnabled != newViewProps.dropEnabled) {
++        _view.dropEnabled = newViewProps.dropEnabled;
++    }
 +    if (oldViewProps.dragEnabled != newViewProps.dragEnabled) {
 +        _view.dragEnabled = newViewProps.dragEnabled;
 +    }
@@ -238,13 +243,14 @@ index 6a2a205f95c1001f3fdf6fb835815fa7c4c02c16..5fcce7d003d2ff0c6b725e81c6380269
 +
  }
 diff --git a/ios/Shared/ActionSheetView.swift b/ios/Shared/ActionSheetView.swift
-index 352d8fa656aac2e39160104df2394ebe6719bac5..63fadae0319fd39dd2cf3bc9df0d1581094a0320 100644
+index 352d8fa656aac2e39160104df2394ebe6719bac5..937174c8b69c48cf5756fb64946c5138d4c8b1e9 100644
 --- a/ios/Shared/ActionSheetView.swift
 +++ b/ios/Shared/ActionSheetView.swift
-@@ -17,6 +17,9 @@ public class ActionSheetView: UIView {
+@@ -17,6 +17,10 @@ public class ActionSheetView: UIView {
      }
  
      private var _actions: [UIAlertAction] = []
++    @objc public var dropEnabled: Bool = false
 +    @objc public var dragEnabled: Bool = false
 +    @objc public var dragItemId: NSString?
 +    @objc public var dragGroup: NSString?
@@ -252,15 +258,16 @@ index 352d8fa656aac2e39160104df2394ebe6719bac5..63fadae0319fd39dd2cf3bc9df0d1581
          didSet {
              guard let actions = self.actions else {
 diff --git a/ios/Shared/MenuViewImplementation.swift b/ios/Shared/MenuViewImplementation.swift
-index 5c4e0da4292b15d3a27b5ea1555f11452a470815..2fda7f8f9efd677739a91ae86ee5cf93689c50aa 100644
+index 5c4e0da4292b15d3a27b5ea1555f11452a470815..58bebba6c6bb4232f5743326e6eba0c47b180200 100644
 --- a/ios/Shared/MenuViewImplementation.swift
 +++ b/ios/Shared/MenuViewImplementation.swift
-@@ -8,7 +8,126 @@
+@@ -8,7 +8,127 @@
  import UIKit
  @available(iOS 14.0, *)
  @objc(MenuViewImplementation)
 -public class MenuViewImplementation: UIButton {
 +public class MenuViewImplementation: UIButton, UIDragInteractionDelegate, UIDropInteractionDelegate {
++    @objc public var dropEnabled: Bool = false
 +    @objc public var dragEnabled: Bool = false { didSet { itemDragInteraction?.isEnabled = dragEnabled } }
 +    @objc public var dragItemId: NSString? { didSet { updateDragInteractions() } }
 +    @objc public var dragGroup: NSString? { didSet { updateDragInteractions() } }
@@ -342,7 +349,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..2fda7f8f9efd677739a91ae86ee5cf93
 +    deinit { scrollTimer?.invalidate() }
 +
 +    private func localItem(_ session: UIDropSession) -> LocalDragItem? {
-+        guard session.localDragSession != nil, session.items.count == 1,
++        guard dropEnabled, session.localDragSession != nil, session.items.count == 1,
 +              let item = session.items.first?.localObject as? LocalDragItem,
 +              item.group == dragGroup as String?, item.id != dragItemId as String? else { return nil }
 +        return item
@@ -383,7 +390,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..2fda7f8f9efd677739a91ae86ee5cf93
  
      @objc public var actions: [NSDictionary]? {
          didSet {
-@@ -60,17 +179,46 @@ public class MenuViewImplementation: UIButton {
+@@ -60,17 +180,46 @@ public class MenuViewImplementation: UIButton {
      }
     
      public override func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
@@ -432,7 +439,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..2fda7f8f9efd677739a91ae86ee5cf93
      func setup () {
          let menu = UIMenu(title: _title,
              identifier: nil,
-@@ -86,8 +234,99 @@ public class MenuViewImplementation: UIButton {
+@@ -86,8 +235,99 @@ public class MenuViewImplementation: UIButton {
              }
          }
  
@@ -532,7 +539,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..2fda7f8f9efd677739a91ae86ee5cf93
      }
  
      public override func reactSetFrame(_ frame: CGRect) {
-@@ -124,4 +363,8 @@ public class MenuViewImplementation: UIButton {
+@@ -124,4 +364,8 @@ public class MenuViewImplementation: UIButton {
      @objc func sendMenuOpen() {
          // NO-OP (should be overriden by parent)
      }
@@ -566,15 +573,16 @@ index bb6bb2b7ad56135089f267587c974b166760539d..949b3f7ec49af7ba26d966a8923a51f6
  
              if #available(iOS 16.0, *) {
 diff --git a/lib/commonjs/NativeModuleSpecs/UIMenuNativeComponent.ts b/lib/commonjs/NativeModuleSpecs/UIMenuNativeComponent.ts
-index e6509355275596c451f9d082223cc16bfe504e1a..85159d3396e36d28cbce70b21282c0e00d326993 100644
+index e6509355275596c451f9d082223cc16bfe504e1a..e269b74212a9f226462c0c52fca57e7d9ba0b30c 100644
 --- a/lib/commonjs/NativeModuleSpecs/UIMenuNativeComponent.ts
 +++ b/lib/commonjs/NativeModuleSpecs/UIMenuNativeComponent.ts
-@@ -45,9 +45,15 @@ type MenuAction = {
+@@ -45,9 +45,16 @@ type MenuAction = {
  	subactions?: Array<SubAction>;
  };
  export interface NativeProps extends ViewProps {
 +    dragItemId?: string;
 +    dragEnabled?: boolean;
++    dropEnabled?: boolean;
 +    dragGroup?: string;
 +    onDragBegin?: DirectEventHandler<{ event: string }>;
 +    onItemDrop?: DirectEventHandler<{ itemId: string; placement: string }>;
@@ -586,15 +594,16 @@ index e6509355275596c451f9d082223cc16bfe504e1a..85159d3396e36d28cbce70b21282c0e0
  	actionsHash: string; // just a workaround to make sure we don't have to manually compare MenuActions manually in C++ (since it's a struct and that's a pain)
  	title?: string;
 diff --git a/lib/module/NativeModuleSpecs/UIMenuNativeComponent.ts b/lib/module/NativeModuleSpecs/UIMenuNativeComponent.ts
-index e6509355275596c451f9d082223cc16bfe504e1a..85159d3396e36d28cbce70b21282c0e00d326993 100644
+index e6509355275596c451f9d082223cc16bfe504e1a..e269b74212a9f226462c0c52fca57e7d9ba0b30c 100644
 --- a/lib/module/NativeModuleSpecs/UIMenuNativeComponent.ts
 +++ b/lib/module/NativeModuleSpecs/UIMenuNativeComponent.ts
-@@ -45,9 +45,15 @@ type MenuAction = {
+@@ -45,9 +45,16 @@ type MenuAction = {
  	subactions?: Array<SubAction>;
  };
  export interface NativeProps extends ViewProps {
 +    dragItemId?: string;
 +    dragEnabled?: boolean;
++    dropEnabled?: boolean;
 +    dragGroup?: string;
 +    onDragBegin?: DirectEventHandler<{ event: string }>;
 +    onItemDrop?: DirectEventHandler<{ itemId: string; placement: string }>;
@@ -606,22 +615,23 @@ index e6509355275596c451f9d082223cc16bfe504e1a..85159d3396e36d28cbce70b21282c0e0
  	actionsHash: string; // just a workaround to make sure we don't have to manually compare MenuActions manually in C++ (since it's a struct and that's a pain)
  	title?: string;
 diff --git a/lib/typescript/src/NativeModuleSpecs/UIMenuNativeComponent.d.ts b/lib/typescript/src/NativeModuleSpecs/UIMenuNativeComponent.d.ts
-index 24ee7fdcd9f81cfe2c813cfca9d4e276b846fb7b..8ee91694b2171b891ed2aa346e6e7a0cbdf2ec92 100644
+index 24ee7fdcd9f81cfe2c813cfca9d4e276b846fb7b..235bea0c43b45ac2f20a4a7796b028e3359d8480 100644
 --- a/lib/typescript/src/NativeModuleSpecs/UIMenuNativeComponent.d.ts
 +++ b/lib/typescript/src/NativeModuleSpecs/UIMenuNativeComponent.d.ts
-@@ -32,6 +32,11 @@ type MenuAction = {
+@@ -32,6 +32,12 @@ type MenuAction = {
      subactions?: Array<SubAction>;
  };
  export interface NativeProps extends ViewProps {
 +    dragItemId?: string;
 +    dragEnabled?: boolean;
++    dropEnabled?: boolean;
 +    dragGroup?: string;
 +    onDragBegin?: DirectEventHandler<{ event: string }>;
 +    onItemDrop?: DirectEventHandler<{ itemId: string; placement: string }>;
      onPressAction?: DirectEventHandler<{
          event: string;
      }>;
-@@ -41,6 +46,9 @@ export interface NativeProps extends ViewProps {
+@@ -41,6 +47,9 @@ export interface NativeProps extends ViewProps {
      onOpenMenu?: DirectEventHandler<{
          event: string;
      }>;
@@ -632,10 +642,10 @@ index 24ee7fdcd9f81cfe2c813cfca9d4e276b846fb7b..8ee91694b2171b891ed2aa346e6e7a0c
      actionsHash: string;
      title?: string;
 diff --git a/lib/typescript/src/index.d.ts b/lib/typescript/src/index.d.ts
-index 61d210aa9364f0354f77bddaecdc0a127b1cdbb4..9dd4b227173bc56f28bbe2c0d3e0a598b8c7729f 100644
+index 61d210aa9364f0354f77bddaecdc0a127b1cdbb4..8c076d62d7443b402550b18d980d1c12ee9f7eec 100644
 --- a/lib/typescript/src/index.d.ts
 +++ b/lib/typescript/src/index.d.ts
-@@ -4,6 +4,13 @@ declare const MenuView: import("react").ForwardRefExoticComponent<{
+@@ -4,6 +4,14 @@ declare const MenuView: import("react").ForwardRefExoticComponent<{
      onPressAction?: ({ nativeEvent }: NativeActionEvent) => void;
      onCloseMenu?: () => void;
      onOpenMenu?: () => void;
@@ -643,6 +653,7 @@ index 61d210aa9364f0354f77bddaecdc0a127b1cdbb4..9dd4b227173bc56f28bbe2c0d3e0a598
 +    /** Local iOS drag identity. Empty values disable drag and drop. */
 +    dragItemId?: string;
 +    dragEnabled?: boolean;
++    dropEnabled?: boolean;
 +    dragGroup?: string;
 +    onDragBegin?: () => void;
 +    onItemDrop?: (event: { nativeEvent: { itemId: string; placement: string } }) => void;
@@ -650,10 +661,10 @@ index 61d210aa9364f0354f77bddaecdc0a127b1cdbb4..9dd4b227173bc56f28bbe2c0d3e0a598
      title?: string;
      isAnchoredToRight?: boolean;
 diff --git a/lib/typescript/src/types.d.ts b/lib/typescript/src/types.d.ts
-index eac7940ab7eb6a69ac329848c9f3eeffdcbaf43d..c94461de4f4ac0b8a3856f7a38fa8cf10709dc1e 100644
+index eac7940ab7eb6a69ac329848c9f3eeffdcbaf43d..4bffed2c35492dbf569f89dd2a7a5c97a434623a 100644
 --- a/lib/typescript/src/types.d.ts
 +++ b/lib/typescript/src/types.d.ts
-@@ -113,6 +113,18 @@ type MenuComponentPropsBase = {
+@@ -113,6 +113,19 @@ type MenuComponentPropsBase = {
       * Callback function that will be called when the menu opens.
       */
      onOpenMenu?: () => void;
@@ -666,13 +677,14 @@ index eac7940ab7eb6a69ac329848c9f3eeffdcbaf43d..c94461de4f4ac0b8a3856f7a38fa8cf1
 +    /** Local iOS drag identity. Empty values disable drag and drop. */
 +    dragItemId?: string;
 +    dragEnabled?: boolean;
++    dropEnabled?: boolean;
 +    dragGroup?: string;
 +    onDragBegin?: () => void;
 +    onItemDrop?: (event: { nativeEvent: { itemId: string; placement: string } }) => void;
      /**
       * Actions to be displayed in the menu.
       */
-@@ -170,6 +182,13 @@ export type NativeMenuComponentProps = {
+@@ -170,6 +183,14 @@ export type NativeMenuComponentProps = {
      onPressAction?: ({ nativeEvent }: NativeActionEvent) => void;
      onCloseMenu?: () => void;
      onOpenMenu?: () => void;
@@ -680,6 +692,7 @@ index eac7940ab7eb6a69ac329848c9f3eeffdcbaf43d..c94461de4f4ac0b8a3856f7a38fa8cf1
 +    /** Local iOS drag identity. Empty values disable drag and drop. */
 +    dragItemId?: string;
 +    dragEnabled?: boolean;
++    dropEnabled?: boolean;
 +    dragGroup?: string;
 +    onDragBegin?: () => void;
 +    onItemDrop?: (event: { nativeEvent: { itemId: string; placement: string } }) => void;
@@ -687,7 +700,7 @@ index eac7940ab7eb6a69ac329848c9f3eeffdcbaf43d..c94461de4f4ac0b8a3856f7a38fa8cf1
      actionsHash: string;
      title?: string;
 diff --git a/src/NativeModuleSpecs/UIMenuNativeComponent.ts b/src/NativeModuleSpecs/UIMenuNativeComponent.ts
-index e6509355275596c451f9d082223cc16bfe504e1a..0d5378c6293194dc12f13131fddf8be885a76df0 100644
+index e6509355275596c451f9d082223cc16bfe504e1a..998cd76e96dd3891b8062abd077072d7401cd787 100644
 --- a/src/NativeModuleSpecs/UIMenuNativeComponent.ts
 +++ b/src/NativeModuleSpecs/UIMenuNativeComponent.ts
 @@ -13,6 +13,22 @@ import codegenNativeComponent from "react-native/Libraries/Utilities/codegenNati
@@ -725,7 +738,7 @@ index e6509355275596c451f9d082223cc16bfe504e1a..0d5378c6293194dc12f13131fddf8be8
  };
  type MenuAction = {
  	id?: string;
-@@ -41,13 +61,20 @@ type MenuAction = {
+@@ -41,13 +61,21 @@ type MenuAction = {
  		destructive?: boolean;
  		disabled?: boolean;
  		hidden?: boolean;
@@ -736,6 +749,7 @@ index e6509355275596c451f9d082223cc16bfe504e1a..0d5378c6293194dc12f13131fddf8be8
  export interface NativeProps extends ViewProps {
 +    dragItemId?: string;
 +    dragEnabled?: boolean;
++    dropEnabled?: boolean;
 +    dragGroup?: string;
 +    onDragBegin?: DirectEventHandler<{ event: string }>;
 +    onItemDrop?: DirectEventHandler<{ itemId: string; placement: string }>;
@@ -747,10 +761,10 @@ index e6509355275596c451f9d082223cc16bfe504e1a..0d5378c6293194dc12f13131fddf8be8
  	actionsHash: string; // just a workaround to make sure we don't have to manually compare MenuActions manually in C++ (since it's a struct and that's a pain)
  	title?: string;
 diff --git a/src/types.ts b/src/types.ts
-index 9c323d9c510e7359c83d4d6633affde673570632..c3458d959b76d5713518bca6b8c7b7c96a05b328 100644
+index 9c323d9c510e7359c83d4d6633affde673570632..ef7d5eace76f1d84973aa636107eaaf86cd25f67 100644
 --- a/src/types.ts
 +++ b/src/types.ts
-@@ -123,6 +123,18 @@ type MenuComponentPropsBase = {
+@@ -123,6 +123,19 @@ type MenuComponentPropsBase = {
  	 * Callback function that will be called when the menu opens.
  	 */
  	onOpenMenu?: () => void;
@@ -763,13 +777,14 @@ index 9c323d9c510e7359c83d4d6633affde673570632..c3458d959b76d5713518bca6b8c7b7c9
 +    /** Local iOS drag identity. Empty values disable drag and drop. */
 +    dragItemId?: string;
 +    dragEnabled?: boolean;
++    dropEnabled?: boolean;
 +    dragGroup?: string;
 +    onDragBegin?: () => void;
 +    onItemDrop?: (event: { nativeEvent: { itemId: string; placement: string } }) => void;
  	/**
  	 * Actions to be displayed in the menu.
  	 */
-@@ -189,6 +201,13 @@ export type NativeMenuComponentProps = {
+@@ -189,6 +202,14 @@ export type NativeMenuComponentProps = {
  	onPressAction?: ({ nativeEvent }: NativeActionEvent) => void;
  	onCloseMenu?: () => void;
  	onOpenMenu?: () => void;
@@ -777,6 +792,7 @@ index 9c323d9c510e7359c83d4d6633affde673570632..c3458d959b76d5713518bca6b8c7b7c9
 +    /** Local iOS drag identity. Empty values disable drag and drop. */
 +    dragItemId?: string;
 +    dragEnabled?: boolean;
++    dropEnabled?: boolean;
 +    dragGroup?: string;
 +    onDragBegin?: () => void;
 +    onItemDrop?: (event: { nativeEvent: { itemId: string; placement: string } }) => void;

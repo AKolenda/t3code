@@ -1,3 +1,6 @@
+import { useThreadListActions } from "../home/useThreadListActions";
+import { useAtomValue } from "@effect/atom-react";
+import { threadDropBusyAtom } from "../../state/thread-order";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { appAtomRegistry } from "../../state/atom-registry";
 import { threadArrangementOpenAtom } from "../../state/thread-order";
@@ -434,6 +437,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     onUnpinThread,
     onMoveThread,
   } = props;
+  const dropBusy = useAtomValue(threadDropBusyAtom);
   const snoozedRow = props.snoozed === true;
   const pinnedRow = props.pinned === true;
 
@@ -1083,20 +1087,22 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
                       : cardMenuActions),
             ]}
             dragItemId={
-              Platform.OS === "ios" && variant === "card" && !snoozedRow
-                ? scopedThreadKey(thread.environmentId, thread.id)
-                : ""
+              Platform.OS === "ios" ? scopedThreadKey(thread.environmentId, thread.id) : ""
             }
-            dragEnabled={props.reorderSupported === true && props.reorderBusy !== true}
-            dragGroup={pinnedRow ? "t3-thread-pinned" : "t3-thread-active"}
+            dragEnabled={props.reorderSupported === true && props.reorderBusy !== true && !dropBusy}
+            dropEnabled={
+              variant === "card" && !snoozedRow && props.reorderBusy !== true && !dropBusy
+            }
+            dragGroup="t3-thread-arrange"
             onItemDrop={({ nativeEvent }) => {
               if (nativeEvent.placement !== "before" && nativeEvent.placement !== "after") return;
               const source = appAtomRegistry
                 .get(environmentThreadShells.threadShellsAtom)
                 .find((row) => scopedThreadKey(row.environmentId, row.id) === nativeEvent.itemId);
-              if (!source || (source.pinnedAt != null) !== pinnedRow) return;
+              if (!source || snoozedRow || variant !== "card") return;
               onMoveThread?.(source, {
                 targetId: scopedThreadKey(thread.environmentId, thread.id),
+                section: pinnedRow ? "pinned" : "active",
                 placement: nativeEvent.placement,
               });
             }}
@@ -1110,3 +1116,32 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
     </>
   );
 });
+
+/** Always present on iOS so an empty section is still a reachable drop target. */
+export function ThreadListV2DropHeader(props: { section: "pinned" | "active" }) {
+  const { moveThread } = useThreadListActions();
+  const busy = useAtomValue(threadDropBusyAtom);
+  return (
+    <ControlPillMenu
+      actions={[]}
+      shouldOpenOnLongPress
+      dragEnabled={false}
+      dropEnabled={!busy}
+      dragItemId={`t3-drop-section:${props.section}`}
+      dragGroup="t3-thread-arrange"
+      onItemDrop={({ nativeEvent }) => {
+        const source = appAtomRegistry
+          .get(environmentThreadShells.threadShellsAtom)
+          .find((row) => scopedThreadKey(row.environmentId, row.id) === nativeEvent.itemId);
+        if (source)
+          void moveThread(source, { section: props.section, targetId: null, placement: "before" });
+      }}
+    >
+      <View style={{ minHeight: 44, justifyContent: "center", paddingHorizontal: 20 }}>
+        <Text className="text-xs font-t3-medium text-foreground-muted">
+          {props.section === "pinned" ? "Pinned" : "Active"}
+        </Text>
+      </View>
+    </ControlPillMenu>
+  );
+}
