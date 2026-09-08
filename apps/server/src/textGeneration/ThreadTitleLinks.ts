@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import type { ProcessRunner } from "../processRunner.ts";
+import * as ProcessRunner from "../processRunner.ts";
 
 const Subject = Schema.fromJsonString(
   Schema.Struct({
@@ -12,10 +12,11 @@ const decodeSubject = Schema.decodeUnknownEffect(Subject);
 const encodeSubject = Schema.encodeEffect(Subject);
 
 /** Read only explicit GitHub references. The issues endpoint also returns PR subjects. */
-export const resolveThreadTitleLinks = Effect.fn("resolveThreadTitleLinks")(function* (
-  runner: ProcessRunner["Service"],
-  input: { message: string; cwd: string },
-) {
+export const resolveThreadTitleLinks = Effect.fn("resolveThreadTitleLinks")(function* (input: {
+  message: string;
+  cwd: string;
+}) {
+  const runner = yield* ProcessRunner.ProcessRunner;
   const references = Array.from(
     input.message.matchAll(
       /https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:pull|issues)\/([1-9]\d*)(?=$|[\s/#?)>.,])/g,

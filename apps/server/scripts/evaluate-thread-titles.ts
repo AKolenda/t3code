@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// This CLI uses Node argument parsing and random ordering at the application boundary.
 // @effect-diagnostics nodeBuiltinImport:off
 // Run with --model <configured-model> --out /tmp/title-eval.
 // Pass --baseline /tmp/previous-eval/results.json to compare two generation runs.
@@ -8,6 +9,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { CodexSettings, ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Duration from "effect/Duration";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -16,8 +18,8 @@ import { makeCodexTextGeneration } from "../src/textGeneration/CodexTextGenerati
 import { threadTitleEvaluationCases } from "../src/textGeneration/ThreadTitleEvaluation.ts";
 import { formatThreadTitleContext } from "../src/textGeneration/ThreadTitleContext.ts";
 import { resolveThreadTitleLinks } from "../src/textGeneration/ThreadTitleLinks.ts";
-import { make as makeProcessRunner } from "../src/processRunner.ts";
-import { layerTest } from "../src/config.ts";
+import * as ProcessRunner from "../src/processRunner.ts";
+import * as ServerConfig from "../src/config.ts";
 
 const { values } = NodeUtil.parseArgs({
   options: {
@@ -50,7 +52,6 @@ await Effect.runPromise(
     const path = yield* Path.Path;
     const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-title-evaluation-" });
     const generation = yield* makeCodexTextGeneration(yield* decodeSettings({}));
-    const runner = yield* makeProcessRunner();
     const baseline = values.baseline
       ? yield* fs.readFileString(values.baseline).pipe(Effect.flatMap(decodeResults))
       : [];
@@ -61,7 +62,7 @@ await Effect.runPromise(
       const context = formatThreadTitleContext(fixture.messages);
       const message = values.initial ? fixture.messages[0]!.text : context.message;
       const [elapsed, generated] = yield* Effect.gen(function* () {
-        const linkedContext = yield* resolveThreadTitleLinks(runner, {
+        const linkedContext = yield* resolveThreadTitleLinks({
           cwd,
           message,
         });
@@ -111,8 +112,12 @@ await Effect.runPromise(
       `Wrote ${results.length} cases to ${outputDirectory}. Score review.json before opening answer-key.json. Latency is in results.json.`,
     );
   }).pipe(
-    Effect.provide(layerTest(process.cwd(), { prefix: "t3-title-evaluation-state-" })),
+    Effect.provide(
+      Layer.mergeAll(
+        ProcessRunner.layer,
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3-title-evaluation-state-" }),
+      ).pipe(Layer.provideMerge(NodeServices.layer)),
+    ),
     Effect.scoped,
-    Effect.provide(NodeServices.layer),
   ),
 );

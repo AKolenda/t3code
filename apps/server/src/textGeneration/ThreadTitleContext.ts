@@ -25,22 +25,29 @@ export function limitTitleMessage(text: string, budget: number): string {
 /** Reserve space for user intent before adding assistant findings, in conversation order. */
 export function formatThreadTitleContext(messages: ReadonlyArray<ThreadTitleMessage>) {
   const sections = messages.flatMap((message, index) => {
-    if (message.role === "system") return [];
-    const text = assistantCitationsToPlainText(message.text).trim();
-    const names = message.attachments?.map((attachment) => attachment.name).join(", ");
+    if (message.role === "system" || (!message.text.trim() && !message.attachments?.length))
+      return [];
+    return [{ index, message, prefix: `${message.role.toUpperCase()}:\n` }];
+  });
+  const formatted = new Map<number, string>();
+  const contentsFor = (section: (typeof sections)[number]) => {
+    const cached = formatted.get(section.index);
+    if (cached !== undefined) return cached;
+    const text = assistantCitationsToPlainText(section.message.text).trim();
+    const names = section.message.attachments?.map((attachment) => attachment.name).join(", ");
     const contents = [text, ...(names ? [`[Attachments: ${names}]`] : [])]
       .filter(Boolean)
       .join("\n");
-    return contents
-      ? [{ index, message, contents, prefix: `${message.role.toUpperCase()}:\n` }]
-      : [];
-  });
+    formatted.set(section.index, contents);
+    return contents;
+  };
   const selected = new Map<number, string>();
   let remaining = MAX_CONTEXT - OMITTED.length;
   const add = (section: (typeof sections)[number], budget: number) => {
     if (selected.has(section.index)) return;
     const limit = Math.min(budget, remaining) - section.prefix.length - 2;
-    const contents = limitTitleMessage(section.contents, limit);
+    if (limit <= TRUNCATED.length) return;
+    const contents = limitTitleMessage(contentsFor(section), limit);
     if (!contents) return;
     const text = section.prefix + contents;
     selected.set(section.index, text);
@@ -65,14 +72,17 @@ export function formatThreadTitleContext(messages: ReadonlyArray<ThreadTitleMess
       if (section.message.role !== role || previous === undefined) continue;
       const expanded =
         section.prefix +
-        limitTitleMessage(section.contents, previous.length + remaining - section.prefix.length);
+        limitTitleMessage(
+          contentsFor(section),
+          previous.length + remaining - section.prefix.length,
+        );
       remaining -= expanded.length - previous.length;
       selected.set(section.index, expanded);
     }
   }
   const retained = sections.filter((section) => selected.has(section.index));
   const truncated = retained.some(
-    (section) => selected.get(section.index) !== section.prefix + section.contents,
+    (section) => selected.get(section.index) !== section.prefix + contentsFor(section),
   );
   const attachments = retained.flatMap((section) => section.message.attachments ?? []);
   const firstAttachment = firstUser?.message.attachments?.[0];
