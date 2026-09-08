@@ -98,11 +98,15 @@ function zoomAnchor(frame: ImageZoomFrame, event: { clientX: number; clientY: nu
   };
 }
 
-/** Safari reports trackpad pinch as gesture events instead of ctrl+wheel. */
+/**
+ * Safari reports trackpad pinch as gesture events instead of ctrl+wheel.
+ * Apple documents `clientX` and `clientY` on them, but they are not in any
+ * standard, so callers must be ready for them to be missing.
+ */
 interface SafariGestureEvent extends UIEvent {
   readonly scale: number;
-  readonly clientX: number;
-  readonly clientY: number;
+  readonly clientX?: number;
+  readonly clientY?: number;
 }
 
 /**
@@ -160,6 +164,12 @@ function ZoomableImage({
       const dy = -event.deltaY * lineScale;
       setZoom((current) => panImage(current, dx, dy, zoomFrame(image, current)));
     };
+    // The last pointer position over the dialog, for gesture events that
+    // arrive without coordinates of their own.
+    let pointer = { clientX: window.innerWidth / 2, clientY: window.innerHeight / 2 };
+    const onPointerMove = (event: PointerEvent) => {
+      pointer = { clientX: event.clientX, clientY: event.clientY };
+    };
     // Safari's `scale` is cumulative from the start of the gesture.
     let gestureStartScale = 1;
     const onGestureStart = (event: Event) => {
@@ -172,17 +182,23 @@ function ZoomableImage({
     const onGestureChange = (event: Event) => {
       event.preventDefault();
       const gesture = event as SafariGestureEvent;
+      const at =
+        Number.isFinite(gesture.clientX) && Number.isFinite(gesture.clientY)
+          ? { clientX: gesture.clientX as number, clientY: gesture.clientY as number }
+          : pointer;
       setZoom((current) => {
         const frame = zoomFrame(image, current);
         const factor = (gestureStartScale * gesture.scale) / current.scale;
-        return zoomImageAt(current, factor, zoomAnchor(frame, gesture), frame);
+        return zoomImageAt(current, factor, zoomAnchor(frame, at), frame);
       });
     };
     surface.addEventListener("wheel", onWheel, { passive: false });
+    surface.addEventListener("pointermove", onPointerMove, { passive: true });
     surface.addEventListener("gesturestart", onGestureStart, { passive: false });
     surface.addEventListener("gesturechange", onGestureChange, { passive: false });
     return () => {
       surface.removeEventListener("wheel", onWheel);
+      surface.removeEventListener("pointermove", onPointerMove);
       surface.removeEventListener("gesturestart", onGestureStart);
       surface.removeEventListener("gesturechange", onGestureChange);
     };
