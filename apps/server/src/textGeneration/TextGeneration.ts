@@ -6,6 +6,8 @@ import { TextGenerationError } from "@t3tools/contracts";
 
 import * as ProviderInstanceRegistry from "../provider/Services/ProviderInstanceRegistry.ts";
 import type { ProviderInstance } from "../provider/ProviderDriver.ts";
+import { ProcessRunner, layer as processRunnerLayer } from "../processRunner.ts";
+import { resolveThreadTitleLinks } from "./ThreadTitleLinks.ts";
 import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
 
 export type TextGenerationProvider = "codex" | "claudeAgent" | "cursor" | "grok" | "opencode";
@@ -60,6 +62,7 @@ export interface BranchNameGenerationResult {
 }
 
 export interface ThreadTitleGenerationInput {
+  linkedContext?: string | undefined;
   cwd: string;
   message: string;
   /** Present when replacing an existing title from the current thread history. */
@@ -71,6 +74,7 @@ export interface ThreadTitleGenerationInput {
 
 export interface ThreadTitleGenerationResult {
   title: string;
+  needsRefinement?: boolean | undefined;
 }
 
 /**
@@ -133,6 +137,7 @@ const resolveInstance = (
 
 export const makeTextGenerationFromRegistry = (
   registry: ProviderInstanceRegistry.ProviderInstanceRegistry["Service"],
+  processRunner?: ProcessRunner["Service"],
 ): TextGeneration["Service"] =>
   TextGeneration.of({
     generateCommitMessage: (input) =>
@@ -149,14 +154,22 @@ export const makeTextGenerationFromRegistry = (
       ),
     generateThreadTitle: (input) =>
       resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(
-        Effect.flatMap((textGeneration) => textGeneration.generateThreadTitle(input)),
+        Effect.flatMap((textGeneration) =>
+          Effect.gen(function* () {
+            const linkedContext = processRunner
+              ? yield* resolveThreadTitleLinks(processRunner, input)
+              : input.linkedContext;
+            return yield* textGeneration.generateThreadTitle({ ...input, linkedContext });
+          }),
+        ),
       ),
   });
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const registry = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
-  return makeTextGenerationFromRegistry(registry);
+  const processRunner = yield* ProcessRunner;
+  return makeTextGenerationFromRegistry(registry, processRunner);
 });
 
-export const layer = Layer.effect(TextGeneration, make);
+export const layer = Layer.effect(TextGeneration, make).pipe(Layer.provide(processRunnerLayer));
