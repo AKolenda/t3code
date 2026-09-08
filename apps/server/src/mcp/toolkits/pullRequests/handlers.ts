@@ -7,7 +7,7 @@ import {
   type ThreadId,
   type ThreadPullRequestLink,
 } from "@t3tools/contracts";
-import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
+import { changeRequestUrlFor, parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
 import {
   resolveThreadPullRequestChains,
   threadPullRequestKeyOf,
@@ -56,27 +56,6 @@ function projectHostAndRepository(project: OrchestrationProjectShell | undefined
     repository: project ? repositoryIdentityOf(project) : null,
     kind,
   };
-}
-
-/** The web URL a host writes for a change request; null when the host shape is unknown. */
-function changeRequestUrlFor(
-  kind: SourceControlProviderKind | null,
-  host: string,
-  repository: string,
-  number: number,
-): string | null {
-  switch (kind) {
-    case "github":
-      return `https://${host}/${repository}/pull/${number}`;
-    case "gitlab":
-      return `https://${host}/${repository}/-/merge_requests/${number}`;
-    case "bitbucket":
-      return `https://${host}/${repository}/pull-requests/${number}`;
-    case "azure-devops":
-      return `https://${host}/${repository}/pullrequest/${number}`;
-    default:
-      return null;
-  }
 }
 
 /**

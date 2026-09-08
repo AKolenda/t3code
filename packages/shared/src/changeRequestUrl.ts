@@ -1,3 +1,5 @@
+import type { SourceControlProviderKind } from "@t3tools/contracts";
+
 /**
  * A change request named the way a thread link names one: the host below which the repository
  * is addressed, the repository path as that host writes it, and the number.
@@ -72,4 +74,25 @@ function claim(host: string, match: RegExpExecArray | null): ChangeRequestLink |
   return repository && Number.isSafeInteger(number) && number > 0
     ? { host, repository: repository.toLowerCase(), number }
     : null;
+}
+
+/** The web URL a host writes for a change request; null when the host shape is unknown. */
+export function changeRequestUrlFor(
+  kind: SourceControlProviderKind | null,
+  host: string,
+  repository: string,
+  number: number,
+): string | null {
+  switch (kind) {
+    case "github":
+      return `https://${host}/${repository}/pull/${number}`;
+    case "gitlab":
+      return `https://${host}/${repository}/-/merge_requests/${number}`;
+    case "bitbucket":
+      return `https://${host}/${repository}/pull-requests/${number}`;
+    case "azure-devops":
+      return `https://${host}/${repository}/pullrequest/${number}`;
+    default:
+      return null;
+  }
 }
