@@ -2691,6 +2691,10 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.deviceConfigure, deviceService.configure(input), {
             "rpc.aggregate": "device",
           }),
+        [WS_METHODS.deviceTestHost]: (input) =>
+          observeRpcEffect(WS_METHODS.deviceTestHost, deviceService.testHost(input), {
+            "rpc.aggregate": "device",
+          }),
         [WS_METHODS.deviceList]: (_input) =>
           observeRpcEffect(WS_METHODS.deviceList, deviceService.list, {
             "rpc.aggregate": "device",
