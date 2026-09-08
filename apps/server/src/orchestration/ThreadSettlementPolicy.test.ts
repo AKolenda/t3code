@@ -20,6 +20,7 @@ const makeThread = (
   interactionMode: "default",
   branch: "feature",
   worktreePath: "/repo",
+  pullRequests: [],
   latestTurn: null,
   createdAt: "2026-08-01T00:00:00.000Z",
   updatedAt: "2026-08-20T00:00:00.000Z",
@@ -34,20 +35,96 @@ const makeThread = (
   ...overrides,
 });
 
+type PullRequest = { state: "open" | "closed" | "merged"; updatedAt: string | null };
+
 const decide = (
   thread: OrchestrationThreadShell,
-  pullRequest: { state: "open" | "closed" | "merged"; updatedAt: string | null } | null = null,
+  pullRequest: PullRequest | ReadonlyArray<PullRequest> | null = null,
   settings: { days?: number | null; merge?: boolean } = {},
 ) =>
   shouldAutoSettleThread({
     thread,
-    pullRequest,
+    pullRequests:
+      pullRequest === null ? [] : Array.isArray(pullRequest) ? pullRequest : [pullRequest],
     now: NOW,
     autoSettleAfterDays: settings.days === undefined ? 3 : settings.days,
     autoSettleOnMerge: settings.merge ?? true,
   });
 
 describe("shouldAutoSettleThread", () => {
+  it("decides across every linked pull request", () => {
+    const recent = makeThread({ latestUserMessageAt: "2026-08-27T00:00:00.000Z" });
+    const merged = (updatedAt: string): PullRequest => ({ state: "merged", updatedAt });
+    const cases: ReadonlyArray<{
+      readonly name: string;
+      readonly thread: OrchestrationThreadShell;
+      readonly pullRequests: ReadonlyArray<PullRequest>;
+      readonly settings?: { days?: number | null; merge?: boolean };
+      readonly expected: boolean;
+    }> = [
+      {
+        name: "one open link blocks even when others merged",
+        thread: makeThread(),
+        pullRequests: [merged(NOW), { state: "open", updatedAt: NOW }],
+        expected: false,
+      },
+      {
+        name: "open link blocks the inactivity rule too",
+        thread: makeThread(),
+        pullRequests: [{ state: "open", updatedAt: null }],
+        expected: false,
+      },
+      {
+        name: "all merged settles on the latest layer",
+        thread: recent,
+        pullRequests: [merged("2026-08-26T00:00:00.000Z"), merged("2026-08-27T12:00:00.000Z")],
+        settings: { days: null },
+        expected: true,
+      },
+      {
+        name: "latest terminal update older than the user keeps the thread active",
+        thread: recent,
+        pullRequests: [merged("2026-08-25T00:00:00.000Z"), merged("2026-08-26T00:00:00.000Z")],
+        settings: { days: null },
+        expected: false,
+      },
+      {
+        name: "merged layers need the merge setting",
+        thread: recent,
+        pullRequests: [merged(NOW), { state: "closed", updatedAt: "2026-08-26T00:00:00.000Z" }],
+        settings: { days: null, merge: false },
+        expected: false,
+      },
+      {
+        name: "closed latest layer settles without the merge setting",
+        thread: recent,
+        pullRequests: [merged("2026-08-26T00:00:00.000Z"), { state: "closed", updatedAt: NOW }],
+        settings: { days: null, merge: false },
+        expected: true,
+      },
+      {
+        name: "terminal links without a timestamp fall through to inactivity",
+        thread: makeThread(),
+        pullRequests: [
+          { state: "closed", updatedAt: null },
+          { state: "merged", updatedAt: null },
+        ],
+        expected: true,
+      },
+      {
+        name: "no links keeps the inactivity rule",
+        thread: makeThread(),
+        pullRequests: [],
+        expected: true,
+      },
+    ];
+    for (const testCase of cases) {
+      expect(decide(testCase.thread, testCase.pullRequests, testCase.settings), testCase.name).toBe(
+        testCase.expected,
+      );
+    }
+  });
+
   it("settles inactive threads and leaves never-used threads active", () => {
     expect(decide(makeThread())).toBe(true);
     expect(decide(makeThread({ latestUserMessageAt: null }))).toBe(false);

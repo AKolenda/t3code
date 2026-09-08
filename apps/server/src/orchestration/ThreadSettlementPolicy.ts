@@ -8,6 +8,12 @@ export interface SettlementPullRequest {
 const DAY_MS = 24 * 60 * 60 * 1_000;
 export const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
 
+function parseMs(value: string | null | undefined): number {
+  if (value == null) return Number.NEGATIVE_INFINITY;
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms;
+}
+
 function latestTimestamp(values: ReadonlyArray<string | null | undefined>): string | null {
   let latest: string | null = null;
   let latestMs = Number.NEGATIVE_INFINITY;
@@ -62,18 +68,26 @@ function pullRequestSettles(
   return pullRequestAt >= userAnchorAt;
 }
 
+/**
+ * Any open pull request keeps the thread active. With only terminal ones, the most recently
+ * updated decides, so a thread whose stack merged layer by layer settles once the last layer
+ * lands. Threads without pull requests fall through to the inactivity rule.
+ */
 export function shouldAutoSettleThread(input: {
   readonly thread: OrchestrationThreadShell;
-  readonly pullRequest: SettlementPullRequest | null;
+  readonly pullRequests: ReadonlyArray<SettlementPullRequest>;
   readonly now: string;
   readonly autoSettleAfterDays: number | null;
   readonly autoSettleOnMerge: boolean;
 }): boolean {
-  const { thread, pullRequest } = input;
+  const { thread, pullRequests } = input;
   if (!isAutoSettlementCandidate(thread, input.now)) return false;
-  if (pullRequest !== null) {
-    if (pullRequestSettles(thread, pullRequest, input.autoSettleOnMerge)) return true;
-    if (pullRequest.state === "open") return false;
+  if (pullRequests.some((pullRequest) => pullRequest.state === "open")) return false;
+  if (pullRequests.length > 0) {
+    const latest = pullRequests.reduce((current, candidate) =>
+      parseMs(candidate.updatedAt) > parseMs(current.updatedAt) ? candidate : current,
+    );
+    if (pullRequestSettles(thread, latest, input.autoSettleOnMerge)) return true;
   }
   if (input.autoSettleAfterDays === null) return false;
   const activityAt = latestTimestamp([

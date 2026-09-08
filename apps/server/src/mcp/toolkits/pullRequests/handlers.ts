@@ -1,0 +1,270 @@
+import {
+  CommandId,
+  pullRequestHostOf,
+  type OrchestrationProjectShell,
+  type OrchestrationThreadShell,
+  type SourceControlProviderKind,
+  type ThreadId,
+  type ThreadPullRequestLink,
+} from "@t3tools/contracts";
+import { parseChangeRequestUrl } from "@t3tools/shared/changeRequestUrl";
+import {
+  resolveThreadPullRequestChains,
+  threadPullRequestKeyOf,
+  visibleThreadPullRequests,
+} from "@t3tools/shared/threadPullRequests";
+import * as Cause from "effect/Cause";
+import * as Crypto from "effect/Crypto";
+import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
+
+import * as OrchestrationEngine from "../../../orchestration/Services/OrchestrationEngine.ts";
+import * as ProjectionSnapshotQuery from "../../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { repositoryIdentityOf } from "../../../pullRequest/PullRequestService.ts";
+import * as McpInvocationContext from "../../McpInvocationContext.ts";
+import {
+  type ListThreadPullRequestsResult,
+  PullRequestLinkFailedError,
+  PullRequestTargetError,
+  type PullRequestTargetInput,
+  PullRequestThreadNotFoundError,
+  PullRequestsToolkit,
+  type ThreadPullRequestEntry,
+} from "./tools.ts";
+
+interface ResolvedTarget {
+  readonly host: string;
+  readonly repository: string;
+  readonly number: number;
+  readonly url: string;
+}
+
+/**
+ * The host and repository a thread's project is checked out from, so a bare
+ * repository+number can be completed and a URL rebuilt for it.
+ */
+function projectHostAndRepository(project: OrchestrationProjectShell | undefined): {
+  readonly host: string | null;
+  readonly repository: string | null;
+  readonly kind: SourceControlProviderKind | null;
+} {
+  const identity = project?.repositoryIdentity;
+  const kind = (identity?.provider as SourceControlProviderKind | undefined) ?? null;
+  if (!identity || kind === null) return { host: null, repository: null, kind: null };
+  return {
+    host: pullRequestHostOf(identity, kind),
+    repository: project ? repositoryIdentityOf(project) : null,
+    kind,
+  };
+}
+
+/** The web URL a host writes for a change request; null when the host shape is unknown. */
+function changeRequestUrlFor(
+  kind: SourceControlProviderKind | null,
+  host: string,
+  repository: string,
+  number: number,
+): string | null {
+  switch (kind) {
+    case "github":
+      return `https://${host}/${repository}/pull/${number}`;
+    case "gitlab":
+      return `https://${host}/${repository}/-/merge_requests/${number}`;
+    case "bitbucket":
+      return `https://${host}/${repository}/pull-requests/${number}`;
+    case "azure-devops":
+      return `https://${host}/${repository}/pullrequest/${number}`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Turns whichever shape the agent passed into one host-level identity. A URL
+ * wins outright; otherwise the repository and number are completed with the
+ * thread's project host, which is where an agent working in that checkout
+ * almost always opened the pull request.
+ */
+const resolveTarget = Effect.fn("PullRequestsToolkit.resolveTarget")(function* (
+  input: PullRequestTargetInput,
+  project: OrchestrationProjectShell | undefined,
+) {
+  if (input.url !== undefined) {
+    const parsed = parseChangeRequestUrl(input.url);
+    if (parsed === null) {
+      return yield* new PullRequestTargetError({
+        detail: `"${input.url}" is not a pull request URL on a host T3 Code recognises. Pass repository and number instead.`,
+      });
+    }
+    return { ...parsed, url: input.url } satisfies ResolvedTarget;
+  }
+  if (input.repository === undefined || input.number === undefined) {
+    return yield* new PullRequestTargetError({
+      detail: "Pass either url, or both repository and number.",
+    });
+  }
+  const projectHost = projectHostAndRepository(project);
+  const host = (input.host ?? projectHost.host)?.toLowerCase();
+  if (host === undefined) {
+    return yield* new PullRequestTargetError({
+      detail:
+        "This thread's project has no recognised remote, so host cannot be defaulted. Pass host or url.",
+    });
+  }
+  const repository = input.repository.toLowerCase();
+  const url =
+    changeRequestUrlFor(
+      // The project's kind only describes its own host; another host gets no URL guess.
+      host === projectHost.host ? projectHost.kind : null,
+      host,
+      repository,
+      input.number,
+    ) ?? `https://${host}/${repository}/pull/${input.number}`;
+  return { host, repository, number: input.number, url } satisfies ResolvedTarget;
+});
+
+function entryOf(
+  link: ThreadPullRequestLink,
+  chains: ReturnType<typeof resolveThreadPullRequestChains>,
+): ThreadPullRequestEntry {
+  const key = threadPullRequestKeyOf(link);
+  let stack: ThreadPullRequestEntry["stack"] = null;
+  for (const chain of chains) {
+    if (chain.layers.length < 2) continue;
+    const index = chain.layers.findIndex((layer) => threadPullRequestKeyOf(layer) === key);
+    if (index !== -1) {
+      stack = { kind: chain.kind, position: index + 1, size: chain.layers.length };
+      break;
+    }
+  }
+  return {
+    host: link.host,
+    repository: link.repository,
+    number: link.number,
+    url: link.url,
+    source: link.source,
+    state: link.snapshot?.state ?? null,
+    title: link.snapshot?.title ?? null,
+    headBranch: link.snapshot?.headBranch ?? null,
+    baseBranch: link.snapshot?.baseBranch ?? null,
+    isDraft: link.snapshot?.isDraft ?? null,
+    stack,
+  };
+}
+
+/** What the tools report from a thread shell; exported so the shape is testable without a layer. */
+export function listThreadPullRequests(
+  thread: Pick<OrchestrationThreadShell, "pullRequests">,
+): ListThreadPullRequestsResult {
+  const chains = resolveThreadPullRequestChains(thread.pullRequests);
+  return {
+    pullRequests: visibleThreadPullRequests(thread.pullRequests).map((link) =>
+      entryOf(link, chains),
+    ),
+    chains: chains.map((chain) => ({
+      kind: chain.kind,
+      numbers: chain.layers.map((layer) => layer.number),
+    })),
+  };
+}
+
+const make = Effect.gen(function* () {
+  const engine = yield* OrchestrationEngine.OrchestrationEngineService;
+  const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  const crypto = yield* Crypto.Crypto;
+
+  const commandId = (tag: string, threadId: ThreadId) =>
+    crypto.randomUUIDv4.pipe(
+      Effect.orDie,
+      Effect.map((uuid) => CommandId.make(`server:${tag}:${threadId}:${uuid}`)),
+    );
+
+  const requireThread = Effect.fn("PullRequestsToolkit.requireThread")(function* (
+    operation: "link" | "unlink" | "list",
+  ) {
+    const scope = yield* McpInvocationContext.requireMcpCapability("pull-requests");
+    const thread = yield* snapshots
+      .getThreadShellById(scope.threadId)
+      .pipe(
+        Effect.mapError(
+          (cause) => new PullRequestLinkFailedError({ operation, detail: cause.message }),
+        ),
+      );
+    if (Option.isNone(thread)) {
+      return yield* new PullRequestThreadNotFoundError({ threadId: scope.threadId });
+    }
+    return thread.value;
+  });
+
+  const projectOf = (thread: OrchestrationThreadShell, operation: "link" | "unlink") =>
+    snapshots.getProjectShellById(thread.projectId).pipe(
+      Effect.map(Option.getOrUndefined),
+      Effect.mapError(
+        (cause) => new PullRequestLinkFailedError({ operation, detail: cause.message }),
+      ),
+    );
+
+  const dispatchFailure =
+    (operation: "link" | "unlink") =>
+    <E>(cause: Cause.Cause<E>): Effect.Effect<never, PullRequestLinkFailedError> =>
+      Cause.hasInterruptsOnly(cause)
+        ? Effect.failCause(cause as Cause.Cause<never>)
+        : Effect.fail(new PullRequestLinkFailedError({ operation, detail: Cause.pretty(cause) }));
+
+  return PullRequestsToolkit.of({
+    link_pull_request: (input) =>
+      Effect.gen(function* () {
+        const thread = yield* requireThread("link");
+        const project = yield* projectOf(thread, "link");
+        const target = yield* resolveTarget(input, project);
+        const alreadyLinked = yield* engine
+          .dispatch({
+            type: "thread.pull-request.link",
+            commandId: yield* commandId("mcp-pr-link", thread.id),
+            threadId: thread.id,
+            host: target.host,
+            repository: target.repository,
+            number: target.number,
+            url: target.url,
+            source: "agent",
+          })
+          .pipe(
+            Effect.as(false),
+            // The decider rejects a second link of the same PR; for the agent that is
+            // the outcome it asked for, not an error.
+            Effect.catchTag("OrchestrationCommandInvariantError", () => Effect.succeed(true)),
+            Effect.catchCause(dispatchFailure("link")),
+          );
+        return { ...target, alreadyLinked };
+      }),
+    unlink_pull_request: (input) =>
+      Effect.gen(function* () {
+        const thread = yield* requireThread("unlink");
+        const project = yield* projectOf(thread, "unlink");
+        const target = yield* resolveTarget(input, project);
+        const wasLinked = yield* engine
+          .dispatch({
+            type: "thread.pull-request.unlink",
+            commandId: yield* commandId("mcp-pr-unlink", thread.id),
+            threadId: thread.id,
+            host: target.host,
+            repository: target.repository,
+            number: target.number,
+          })
+          .pipe(
+            Effect.as(true),
+            Effect.catchTag("OrchestrationCommandInvariantError", () => Effect.succeed(false)),
+            Effect.catchCause(dispatchFailure("unlink")),
+          );
+        return {
+          host: target.host,
+          repository: target.repository,
+          number: target.number,
+          wasLinked,
+        };
+      }),
+    list_thread_pull_requests: () => requireThread("list").pipe(Effect.map(listThreadPullRequests)),
+  });
+});
+
+export const PullRequestsToolkitHandlersLive = PullRequestsToolkit.toLayer(make);

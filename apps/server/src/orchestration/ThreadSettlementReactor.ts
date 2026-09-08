@@ -1,5 +1,6 @@
 import { CommandId } from "@t3tools/contracts";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
+import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -11,7 +12,6 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as GitManager from "../git/GitManager.ts";
-import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as OrchestrationEngine from "./Services/OrchestrationEngine.ts";
@@ -35,7 +35,6 @@ export const make = Effect.gen(function* () {
   const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const git = yield* GitManager.GitManager;
-  const pullRequests = yield* PullRequestService.PullRequestService;
   const crypto = yield* Crypto.Crypto;
 
   const sweep = Effect.fn("ThreadSettlementReactor.sweep")(function* () {
@@ -43,14 +42,11 @@ export const make = Effect.gen(function* () {
     const now = DateTime.formatIso(yield* DateTime.now);
     const projects = new Map(snapshot.projects.map((project) => [project.id, project]));
     const candidates = snapshot.threads.filter((thread) => isAutoSettlementCandidate(thread, now));
+    // Linked threads read their pull requests from the synced snapshots, so
+    // only unlinked threads share a saved-branch lookup.
     const lookupKey = (thread: (typeof candidates)[number]) => {
-      if (thread.linkedPullRequest != null) {
-        return JSON.stringify([
-          "linked",
-          thread.linkedPullRequest.projectId,
-          thread.linkedPullRequest.repository,
-          thread.linkedPullRequest.number,
-        ]);
+      if (visibleThreadPullRequests(thread.pullRequests).length > 0) {
+        return JSON.stringify(["linked", thread.id]);
       }
       if (thread.branch === null) return JSON.stringify(["none", thread.id]);
       const project = projects.get(thread.projectId);
@@ -62,39 +58,37 @@ export const make = Effect.gen(function* () {
     };
     const groups = Map.groupBy(candidates, lookupKey);
 
-    const pullRequestFor = Effect.fn("ThreadSettlementReactor.pullRequestFor")(function* (
+    const pullRequestsFor = Effect.fn("ThreadSettlementReactor.pullRequestsFor")(function* (
       thread: (typeof candidates)[number],
     ) {
-      if (thread.linkedPullRequest != null) {
-        if (!projects.has(thread.linkedPullRequest.projectId)) {
-          return yield* Effect.die(new Error("linked pull request project not found"));
-        }
-        const summary = yield* pullRequests.summary(
-          {
-            projectId: thread.linkedPullRequest.projectId,
-            repository: thread.linkedPullRequest.repository,
-            number: thread.linkedPullRequest.number,
-          },
-          { recoverTransientFailure: false },
+      const links = visibleThreadPullRequests(thread.pullRequests);
+      if (links.length > 0) {
+        // A link the sync reactor has not snapshotted yet counts as open: the
+        // thread stays active until the host has said otherwise.
+        return links.map(
+          (link): SettlementPullRequest =>
+            link.snapshot === null
+              ? { state: "open", updatedAt: null }
+              : { state: link.snapshot.state, updatedAt: link.snapshot.updatedAt },
         );
-        return {
-          state: summary.state,
-          updatedAt: summary.updatedAt,
-        } satisfies SettlementPullRequest;
       }
-      if (thread.branch === null) return null;
+      if (thread.branch === null) return [] as ReadonlyArray<SettlementPullRequest>;
       const project = projects.get(thread.projectId);
       if (project === undefined) {
         return yield* Effect.die(new Error("thread project not found"));
       }
-      return yield* git.branchPullRequest({ cwd: project.workspaceRoot, branch: thread.branch });
+      const pullRequest = yield* git.branchPullRequest({
+        cwd: project.workspaceRoot,
+        branch: thread.branch,
+      });
+      return pullRequest === null ? [] : [pullRequest satisfies SettlementPullRequest];
     });
 
     yield* Effect.forEach(
       groups.values(),
       (group) =>
         Effect.gen(function* () {
-          const pullRequest = yield* pullRequestFor(group[0]!);
+          const pullRequests = yield* pullRequestsFor(group[0]!);
           yield* Effect.forEach(
             group,
             (thread) =>
@@ -104,7 +98,7 @@ export const make = Effect.gen(function* () {
                 if (
                   !shouldAutoSettleThread({
                     thread,
-                    pullRequest,
+                    pullRequests,
                     now: decisionNow,
                     autoSettleAfterDays: settings.sidebarAutoSettleAfterDays,
                     autoSettleOnMerge: settings.sidebarAutoSettleOnMerge,

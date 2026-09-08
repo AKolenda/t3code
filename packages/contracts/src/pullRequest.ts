@@ -392,6 +392,11 @@ export const PullRequestCapabilities = Schema.Struct({
    * what every server before this one was.
    */
   edit: Schema.optional(PullRequestEditCapabilities),
+  /**
+   * The host keeps stacks of change requests as objects of its own, so a linked thread can show
+   * the stack the host shows. Absent means chains are only ever inferred from base branches.
+   */
+  stacks: Schema.optional(Schema.Boolean),
 });
 export type PullRequestCapabilities = typeof PullRequestCapabilities.Type;
 
@@ -583,8 +588,16 @@ export const PullRequestListResult = Schema.Struct({
 });
 export type PullRequestListResult = typeof PullRequestListResult.Type;
 
+/**
+ * Addresses one pull request for reads and writes. `projectId` picks the checkout the host
+ * CLI runs in and, when its repository matches, the credentials; `host` lets the server
+ * route a pull request from another repository through any project on the same host
+ * (a frontend project's thread linking a backend PR). Absent `host` means "the project's
+ * own host", which is every reference from before thread links became host-level.
+ */
 export const PullRequestRef = Schema.Struct({
   projectId: ProjectId,
+  host: Schema.optional(TrimmedNonEmptyString),
   repository: TrimmedNonEmptyString,
   number: PositiveInt,
 });
@@ -605,8 +618,33 @@ export const PullRequestSummary = Schema.Struct({
   headBranch: TrimmedNonEmptyString,
   baseBranch: TrimmedNonEmptyString,
   updatedAt: IsoDateTime,
+  /** Optional so summaries from servers that never read it still decode. */
+  isDraft: Schema.optional(Schema.Boolean),
+  author: Schema.optional(Schema.NullOr(PullRequestActor)),
+  additions: Schema.optional(NonNegativeInt),
+  deletions: Schema.optional(NonNegativeInt),
+  changedFiles: Schema.optional(NonNegativeInt),
+  reviewDecision: Schema.optional(Schema.NullOr(PullRequestReviewDecision)),
+  checksState: Schema.optional(Schema.NullOr(PullRequestChecksState)),
+  mergeability: Schema.optional(PullRequestMergeability),
 });
 export type PullRequestSummary = typeof PullRequestSummary.Type;
+
+/** The host-native stack a pull request belongs to, in the thread link's shape. */
+export const PullRequestStack = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  number: PositiveInt,
+  url: TrimmedNonEmptyString,
+  base: TrimmedNonEmptyString,
+  layers: Schema.Array(
+    Schema.Struct({
+      number: PositiveInt,
+      headBranch: TrimmedNonEmptyString,
+      state: PullRequestState,
+    }),
+  ),
+});
+export type PullRequestStack = typeof PullRequestStack.Type;
 
 /**
  * One row's line counts, read after the listing rather than inside it. On GitHub the pair is

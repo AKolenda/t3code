@@ -1484,6 +1484,92 @@ it.effect("refuses a repository that does not belong to the requested project", 
   }),
 );
 
+it.effect("reads a host-native stack through the provider and null where it has none", () =>
+  Effect.gen(function* () {
+    const service = yield* makeService({
+      projects: [project({ id: "p1", title: "web", workspaceRoot: "/a", repository: "acme/web" })],
+      providers: [
+        fakeProvider("github", {
+          getChangeRequestStack: () =>
+            Effect.succeed({
+              id: "9",
+              number: 3,
+              url: "https://github.com/acme/web/stacks/3",
+              base: "main",
+              layers: [
+                { number: 7, headBranch: "a", state: "open" as const },
+                { number: 8, headBranch: "b", state: "open" as const },
+              ],
+            }),
+        }),
+      ],
+    });
+
+    const stack = yield* service.stack({
+      projectId: "p1" as ProjectId,
+      repository: "acme/web",
+      number: 7,
+    });
+    assert.deepStrictEqual(
+      stack?.layers.map((layer) => layer.number),
+      [7, 8],
+    );
+  }),
+);
+
+it.effect("routes a hosted reference to another repository through a project on that host", () =>
+  Effect.gen(function* () {
+    const seen: Array<{ cwd: string; repository: string; host: string }> = [];
+    const service = yield* makeService({
+      projects: [
+        project({ id: "frontend", title: "web", workspaceRoot: "/web", repository: "acme/web" }),
+      ],
+      providers: [
+        fakeProvider("github", {
+          getChangeRequestSummary: (input) =>
+            Effect.sync(() => {
+              seen.push({ cwd: input.cwd, repository: input.repository, host: input.host });
+              return changeRequest(7, "2026-07-02T00:00:00Z");
+            }),
+        }),
+      ],
+    });
+
+    const summary = yield* service.summary(
+      { projectId: "frontend" as ProjectId, host: "github.com", repository: "acme/api", number: 7 },
+      { recoverTransientFailure: false },
+    );
+
+    assert.strictEqual(summary.number, 7);
+    assert.deepStrictEqual(seen, [{ cwd: "/web", repository: "acme/api", host: "github.com" }]);
+  }),
+);
+
+it.effect("refuses a hosted reference when nothing is checked out from that host", () =>
+  Effect.gen(function* () {
+    const service = yield* makeService({
+      projects: [
+        project({ id: "frontend", title: "web", workspaceRoot: "/web", repository: "acme/web" }),
+      ],
+      providers: [fakeProvider("github")],
+    });
+
+    const error = yield* service
+      .summary(
+        {
+          projectId: "frontend" as ProjectId,
+          host: "gitlab.com",
+          repository: "acme/api",
+          number: 7,
+        },
+        { recoverTransientFailure: false },
+      )
+      .pipe(Effect.flip);
+
+    assert.strictEqual(error._tag, "PullRequestUnavailableError");
+  }),
+);
+
 it.effect("refuses a diff on a host that cannot produce one", () =>
   Effect.gen(function* () {
     const service = yield* makeService({

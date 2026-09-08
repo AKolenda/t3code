@@ -1,0 +1,281 @@
+import {
+  pullRequestHostOf,
+  type ScopedThreadRef,
+  type SourceControlProviderKind,
+} from "@t3tools/contracts";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
+import { useAtomValue } from "@effect/atom-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import { findProjectOnChangeRequestHost, parseChangeRequestUrl } from "~/lib/openPullRequestLink";
+import { parsePullRequestReference } from "~/pullRequestReference";
+import { useProjects, useThreadShell } from "~/state/entities";
+import { threadEnvironment } from "~/state/threads";
+import { useAtomCommand } from "~/state/use-atom-command";
+import { appAtomRegistry } from "~/rpc/atomRegistry";
+import { Atom } from "effect/unstable/reactivity";
+import { Button } from "../ui/button";
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "../ui/dialog";
+import { Input } from "../ui/input";
+
+/**
+ * Which thread has the link dialog open, set by whichever entry point asked (command palette,
+ * pull-requests surface, detail panel) and rendered once by the chat view so the dialog outlives
+ * a palette that closes the moment its command runs.
+ */
+export const linkPullRequestDialogThreadAtom = Atom.make<ScopedThreadRef | null>(null).pipe(
+  Atom.keepAlive,
+  Atom.withLabel("pull-requests:link-dialog-thread"),
+);
+
+export function openLinkPullRequestDialog(threadRef: ScopedThreadRef): void {
+  appAtomRegistry.set(linkPullRequestDialogThreadAtom, threadRef);
+}
+
+interface LinkPullRequestDialogProps {
+  open: boolean;
+  threadRef: ScopedThreadRef;
+  /** The thread's own project: bare numbers resolve against its repository. */
+  projectId: string | null;
+  onOpenChange: (open: boolean) => void;
+}
+
+/** Mounted once per chat view; shows the dialog for whichever thread asked for it. */
+export function LinkPullRequestDialogHost() {
+  const threadRef = useAtomValue(linkPullRequestDialogThreadAtom);
+  const thread = useThreadShell(threadRef);
+  if (threadRef === null) return null;
+  return (
+    <LinkPullRequestDialog
+      open
+      threadRef={threadRef}
+      projectId={thread?.projectId ?? null}
+      onOpenChange={(open) => {
+        if (!open) appAtomRegistry.set(linkPullRequestDialogThreadAtom, null);
+      }}
+    />
+  );
+}
+
+interface ResolvedLink {
+  readonly host: string;
+  readonly repository: string;
+  readonly number: number;
+  readonly url: string;
+}
+
+/**
+ * Which pull request an input names, or why it cannot. A URL carries its own host and
+ * repository and may point at any repository on a host this environment has a project for; a
+ * bare `#123` can only mean the thread's own repository.
+ */
+export function resolveLinkPullRequestInput(input: {
+  readonly reference: string;
+  readonly project: {
+    readonly host: string;
+    readonly repository: string;
+    readonly webUrl: (number: number) => string | null;
+  } | null;
+  readonly hostHasProject: (host: string) => boolean;
+}): { link: ResolvedLink } | { error: string } | null {
+  const parsed = parsePullRequestReference(input.reference);
+  if (parsed === null) return null;
+  const url = parseChangeRequestUrl(parsed);
+  if (url !== null) {
+    if (!input.hostHasProject(url.host)) {
+      return { error: `No project in this environment is checked out from ${url.host}.` };
+    }
+    return {
+      link: { host: url.host, repository: url.repository, number: url.number, url: parsed },
+    };
+  }
+  const number = Number(parsed);
+  if (!Number.isSafeInteger(number) || number < 1) return null;
+  if (input.project === null) {
+    return { error: "Paste a full URL to link a pull request from another repository." };
+  }
+  const webUrl = input.project.webUrl(number);
+  if (webUrl === null) {
+    return { error: "Paste a full URL; this project's host has no known pull request URL." };
+  }
+  return {
+    link: { host: input.project.host, repository: input.project.repository, number, url: webUrl },
+  };
+}
+
+/** The pull request page for a number on the hosts whose URL shape is known. */
+export function changeRequestWebUrl(
+  provider: string | undefined,
+  host: string,
+  repository: string,
+  number: number,
+): string | null {
+  switch (provider) {
+    case "github":
+      return `https://${host}/${repository}/pull/${number}`;
+    case "gitlab":
+      return `https://${host}/${repository}/-/merge_requests/${number}`;
+    case "bitbucket":
+      return `https://${host}/${repository}/pull-requests/${number}`;
+    case "azure-devops":
+      return `https://${host}/${repository}/pullrequest/${number}`;
+    default:
+      return null;
+  }
+}
+
+export function LinkPullRequestDialog({
+  open,
+  threadRef,
+  projectId,
+  onOpenChange,
+}: LinkPullRequestDialogProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [reference, setReference] = useState("");
+  const [dirty, setDirty] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const projects = useProjects();
+  const environmentProjects = useMemo(
+    () => projects.filter((project) => project.environmentId === threadRef.environmentId),
+    [projects, threadRef.environmentId],
+  );
+  const ownProject = useMemo(() => {
+    const project = environmentProjects.find((candidate) => candidate.id === projectId);
+    const identity = project?.repositoryIdentity;
+    if (!project || !identity) return null;
+    const repository =
+      identity.displayName ??
+      (identity.owner && identity.name ? `${identity.owner}/${identity.name}` : null);
+    if (repository === null) return null;
+    const kind = identity.provider as SourceControlProviderKind;
+    const host = pullRequestHostOf(identity, kind);
+    return {
+      host,
+      repository,
+      webUrl: (number: number) => changeRequestWebUrl(kind, host, repository, number),
+    };
+  }, [environmentProjects, projectId]);
+  const link = useAtomCommand(threadEnvironment.linkPullRequest, { reportFailure: false });
+  const [pending, setPending] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setReference("");
+    setDirty(false);
+    setSubmitError(null);
+    const frame = window.requestAnimationFrame(() => inputRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [open]);
+
+  const resolved = useMemo(
+    () =>
+      resolveLinkPullRequestInput({
+        reference,
+        project: ownProject,
+        hostHasProject: (host) =>
+          findProjectOnChangeRequestHost(environmentProjects, {
+            host,
+            repository: "",
+            number: 1,
+          }) !== undefined,
+      }),
+    [environmentProjects, ownProject, reference],
+  );
+
+  const submit = useCallback(async () => {
+    setDirty(true);
+    if (resolved === null || "error" in resolved) return;
+    setSubmitError(null);
+    setPending(true);
+    const result = await link({
+      environmentId: threadRef.environmentId,
+      input: { threadId: threadRef.threadId, ...resolved.link, source: "manual" },
+    }).finally(() => setPending(false));
+    if (result._tag === "Failure") {
+      if (!isAtomCommandInterrupted(result)) {
+        const cause = squashAtomCommandFailure(result);
+        setSubmitError(cause instanceof Error ? cause.message : "Could not link the pull request.");
+      }
+      return;
+    }
+    onOpenChange(false);
+  }, [link, onOpenChange, resolved, threadRef]);
+
+  const validation = !dirty
+    ? null
+    : reference.trim().length === 0
+      ? "Paste a pull request URL or enter 123 / #123."
+      : resolved === null
+        ? "Use a pull request URL, 123, or #123."
+        : "error" in resolved
+          ? resolved.error
+          : null;
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => (pending ? undefined : onOpenChange(next))}>
+      <DialogPopup className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Link pull request</DialogTitle>
+          <DialogDescription>
+            Attach a pull request to this thread. A full URL can point at any repository on a host
+            this environment has a project for.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel className="space-y-3">
+          <Input
+            ref={inputRef}
+            placeholder="Pull request URL or #42"
+            value={reference}
+            onChange={(event) => {
+              setDirty(true);
+              setReference(event.target.value);
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") return;
+              event.preventDefault();
+              void submit();
+            }}
+          />
+          {resolved !== null && "link" in resolved ? (
+            <p className="truncate text-muted-foreground text-xs">
+              {resolved.link.host}/{resolved.link.repository} #{resolved.link.number}
+            </p>
+          ) : null}
+          {(validation ?? submitError) ? (
+            <p className="text-destructive text-xs">{validation ?? submitError}</p>
+          ) : null}
+        </DialogPanel>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => onOpenChange(false)}
+            disabled={pending}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => void submit()}
+            disabled={pending || resolved === null || "error" in resolved}
+          >
+            {pending ? "Linking..." : "Link"}
+          </Button>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
+  );
+}

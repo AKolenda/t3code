@@ -39,6 +39,7 @@ import {
   type PullRequestReviewerCandidateList,
   type PullRequestReviewerRequestInput,
   type PullRequestSubmitReviewInput,
+  type PullRequestStack,
   type PullRequestSummary,
   type PullRequestThreadReplyInput,
   type PullRequestThreadResolutionInput,
@@ -133,6 +134,13 @@ export class PullRequestService extends Context.Service<
       input: PullRequestRef,
       options?: { readonly recoverTransientFailure?: boolean },
     ) => Effect.Effect<PullRequestSummary, PullRequestError>;
+    /**
+     * The host-native stack the pull request belongs to, or null when it is not in one or the
+     * host keeps no such object. Cached like a summary; a stack changes about as often.
+     */
+    readonly stack: (
+      input: PullRequestRef,
+    ) => Effect.Effect<PullRequestStack | null, PullRequestError>;
     readonly detail: (input: PullRequestRef) => Effect.Effect<PullRequestDetail, PullRequestError>;
     readonly activity: (
       input: PullRequestRef,
@@ -446,6 +454,9 @@ function withRateLimitBackoff(
       : {
           getChangeRequestSummary: wrap("getChangeRequestSummary", api.getChangeRequestSummary),
         }),
+    ...(api.getChangeRequestStack === undefined
+      ? {}
+      : { getChangeRequestStack: wrap("getChangeRequestStack", api.getChangeRequestStack) }),
     getChangeRequestActivity: wrap("getChangeRequestActivity", api.getChangeRequestActivity),
     ...(api.getReviewThreadComments === undefined
       ? {}
@@ -633,16 +644,30 @@ export const make = Effect.gen(function* () {
       }),
     );
 
+  /**
+   * The project whose checkout and credentials serve a reference. The project's own
+   * repository is the default; a reference that names a `host` may instead point at any
+   * repository on that host, served through the first project living there, so a thread in
+   * one repository can link a pull request from another. The returned `repository` is the
+   * reference's, since that is what every provider call after this addresses.
+   */
   const requireProject = (ref: PullRequestRef): Effect.Effect<SupportedProject, PullRequestError> =>
     listWorkspaceProjects({ projectId: ref.projectId }).pipe(
       Effect.flatMap(({ supported }): Effect.Effect<SupportedProject, PullRequestError> => {
-        const match = supported[0];
-        if (!match) {
-          return Effect.fail(new PullRequestUnavailableError({ reason: "provider-unsupported" }));
+        const own = supported[0];
+        const repository = ref.repository.trim();
+        const host = ref.host?.trim().toLowerCase();
+        if (own !== undefined && own.repository.toLowerCase() === repository.toLowerCase()) {
+          // Hostless references only ever meant the project's own repository, and a hosted one
+          // naming it still is; either way the project serves itself.
+          if (host === undefined || host === own.host) return Effect.succeed(own);
         }
-        // The repository travels through the client, so it is checked against the project's
-        // own remote rather than being handed to a provider verbatim.
-        if (match.repository.toLowerCase() !== ref.repository.trim().toLowerCase()) {
+        if (host === undefined) {
+          if (own === undefined) {
+            return Effect.fail(new PullRequestUnavailableError({ reason: "provider-unsupported" }));
+          }
+          // The repository travels through the client, so it is checked against the project's
+          // own remote rather than being handed to a provider verbatim.
           return Effect.fail(
             new PullRequestOperationError({
               operation: "resolveRepository",
@@ -650,7 +675,17 @@ export const make = Effect.gen(function* () {
             }),
           );
         }
-        return Effect.succeed(match);
+        return listWorkspaceProjects({ host }).pipe(
+          Effect.flatMap(({ supported: onHost }) => {
+            const route = onHost[0];
+            if (route === undefined) {
+              return Effect.fail(
+                new PullRequestUnavailableError({ reason: "provider-unsupported" }),
+              );
+            }
+            return Effect.succeed({ ...route, repository });
+          }),
+        );
       }),
     );
 
@@ -1226,7 +1261,58 @@ export const make = Effect.gen(function* () {
               headBranch: changeRequest.headBranch,
               baseBranch: changeRequest.baseBranch,
               updatedAt: changeRequest.updatedAt,
+              ...(changeRequest.isDraft === undefined ? {} : { isDraft: changeRequest.isDraft }),
+              ...(changeRequest.author === undefined ? {} : { author: changeRequest.author }),
+              ...(changeRequest.additions === undefined
+                ? {}
+                : { additions: changeRequest.additions }),
+              ...(changeRequest.deletions === undefined
+                ? {}
+                : { deletions: changeRequest.deletions }),
+              ...(changeRequest.changedFiles === undefined
+                ? {}
+                : { changedFiles: changeRequest.changedFiles }),
+              ...(changeRequest.reviewDecision === undefined
+                ? {}
+                : { reviewDecision: changeRequest.reviewDecision }),
+              ...(changeRequest.checksState === undefined
+                ? {}
+                : { checksState: changeRequest.checksState }),
+              ...(changeRequest.mergeability === undefined
+                ? {}
+                : { mergeability: changeRequest.mergeability }),
             }),
+          ),
+        );
+      }),
+    );
+
+  const stackUncached: PullRequestService["Service"]["stack"] = (input) =>
+    requireProject(input).pipe(
+      Effect.flatMap((project) => {
+        const read = project.api.getChangeRequestStack;
+        if (read === undefined) return Effect.succeed(null);
+        return read({
+          cwd: project.project.workspaceRoot,
+          repository: project.repository,
+          host: project.host,
+          number: input.number,
+        }).pipe(
+          Effect.mapError(toPullRequestError("stack")),
+          Effect.map((stack): PullRequestStack | null =>
+            stack === null
+              ? null
+              : {
+                  id: stack.id,
+                  number: stack.number,
+                  url: stack.url,
+                  base: stack.base,
+                  layers: stack.layers.map((layer) => ({
+                    number: layer.number,
+                    headBranch: layer.headBranch,
+                    state: layer.state,
+                  })),
+                },
           ),
         );
       }),
@@ -2005,10 +2091,34 @@ export const make = Effect.gen(function* () {
   let listingsEpoch = 0;
   const refEpochs = new Map<string, number>();
   const REF_EPOCH_CAPACITY = 2_048;
-  const refScope = (ref: PullRequestRef) => `${ref.projectId} ${ref.repository} ${ref.number}`;
+  const refScope = (ref: PullRequestRef) =>
+    `${ref.projectId} ${ref.host?.toLowerCase() ?? ""} ${ref.repository.toLowerCase()} ${ref.number}`;
   const refEpoch = (ref: PullRequestRef) => refEpochs.get(refScope(ref)) ?? 0;
+  // Keys carry the reference back out of the cache loader, so the slot layout is shared with
+  // `refOfCacheKey` rather than read positionally at every loader.
   const refCacheKey = (ref: PullRequestRef) =>
-    JSON.stringify([refEpoch(ref), ref.projectId, ref.repository, ref.number]);
+    JSON.stringify([
+      refEpoch(ref),
+      ref.projectId,
+      ref.host?.toLowerCase() ?? null,
+      ref.repository.toLowerCase(),
+      ref.number,
+    ]);
+  const refOfCacheKey = (key: string): PullRequestRef => {
+    const [, projectId, host, repository, number] = JSON.parse(key) as [
+      number,
+      string,
+      string | null,
+      string,
+      number,
+    ];
+    return {
+      projectId,
+      ...(host === null ? {} : { host }),
+      repository,
+      number,
+    } as PullRequestRef;
+  };
   const bumpRefEpoch = (ref: PullRequestRef) => {
     const scope = refScope(ref);
     if (!refEpochs.has(scope) && refEpochs.size >= REF_EPOCH_CAPACITY) {
@@ -2037,8 +2147,7 @@ export const make = Effect.gen(function* () {
 
   const summaryCache = yield* Cache.makeWith(
     (key: string) => {
-      const [, projectId, repository, number] = JSON.parse(key) as [number, string, string, number];
-      return summaryUncached({ projectId, repository, number } as PullRequestRef);
+      return summaryUncached(refOfCacheKey(key));
     },
     {
       capacity: DETAIL_CACHE_CAPACITY,
@@ -2052,6 +2161,13 @@ export const make = Effect.gen(function* () {
       ? cached.pipe(Effect.tap((value) => lastGoodSummary.record(key, value)))
       : lastGoodSummary.read(key, cached);
   };
+
+  const stackCache = yield* Cache.makeWith((key: string) => stackUncached(refOfCacheKey(key)), {
+    capacity: DETAIL_CACHE_CAPACITY,
+    timeToLive: (exit) => (Exit.isSuccess(exit) ? SUMMARY_CACHE_TTL : Duration.zero),
+  });
+  const stack: PullRequestService["Service"]["stack"] = (input) =>
+    Cache.get(stackCache, refCacheKey(input));
 
   // Keys serialize positionally and parse back in the lookup, so the cache is the only holder
   // of in-flight state: concurrent identical reads coalesce on the key into one host request.
@@ -2132,8 +2248,7 @@ export const make = Effect.gen(function* () {
 
   const detailCache = yield* Cache.makeWith(
     (key: string) => {
-      const [, projectId, repository, number] = JSON.parse(key) as [number, string, string, number];
-      return detailUncached({ projectId, repository, number } as PullRequestRef);
+      return detailUncached(refOfCacheKey(key));
     },
     {
       capacity: DETAIL_CACHE_CAPACITY,
@@ -2147,8 +2262,7 @@ export const make = Effect.gen(function* () {
 
   const activityCache = yield* Cache.makeWith(
     (key: string) => {
-      const [, projectId, repository, number] = JSON.parse(key) as [number, string, string, number];
-      return activityUncached({ projectId, repository, number } as PullRequestRef);
+      return activityUncached(refOfCacheKey(key));
     },
     {
       capacity: DETAIL_CACHE_CAPACITY,
@@ -2162,9 +2276,10 @@ export const make = Effect.gen(function* () {
 
   const diffCache = yield* Cache.makeWith(
     (key: string) => {
-      const [, projectId, repository, number, cursor, commit] = JSON.parse(key) as [
+      const [, projectId, host, repository, number, cursor, commit] = JSON.parse(key) as [
         number,
         string,
+        string | null,
         string,
         number,
         string | null,
@@ -2172,6 +2287,7 @@ export const make = Effect.gen(function* () {
       ];
       return diffUncached({
         projectId,
+        ...(host === null ? {} : { host }),
         repository,
         number,
         ...(cursor === null ? {} : { cursor }),
@@ -2182,7 +2298,7 @@ export const make = Effect.gen(function* () {
       capacity: DIFF_CACHE_CAPACITY,
       timeToLive: (exit, key) => {
         if (!Exit.isSuccess(exit)) return Duration.zero;
-        const commit = (JSON.parse(key) as ReadonlyArray<unknown>)[5];
+        const commit = (JSON.parse(key) as ReadonlyArray<unknown>)[6];
         return commit === null ? DIFF_CACHE_TTL : COMMIT_DIFF_CACHE_TTL;
       },
     },
@@ -2191,7 +2307,8 @@ export const make = Effect.gen(function* () {
     const key = JSON.stringify([
       refEpoch(input),
       input.projectId,
-      input.repository,
+      input.host?.toLowerCase() ?? null,
+      input.repository.toLowerCase(),
       input.number,
       input.cursor ?? null,
       input.commit ?? null,
@@ -2260,6 +2377,7 @@ export const make = Effect.gen(function* () {
     list,
     listStats,
     summary,
+    stack,
     detail,
     activity,
     threadComments,

@@ -26,7 +26,7 @@ import type {
   EnvironmentId,
   ScopedThreadRef,
   ServerProviderSkill,
-  ThreadLinkedPullRequest,
+  ThreadPullRequestKey,
 } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
@@ -71,6 +71,10 @@ import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
 import { parseAssistantCitationHref } from "@t3tools/shared/assistantCitations";
+import {
+  threadPullRequestKeysEqual,
+  visibleThreadPullRequests,
+} from "@t3tools/shared/threadPullRequests";
 import { AssistantCitationChip } from "./chat/AssistantCitationChip";
 import remarkGfm from "remark-gfm";
 import { remarkGithubAlerts } from "../markdown-github-alerts";
@@ -159,8 +163,7 @@ import {
   WORKSPACE_BASENAME_LOOKUP_LIMIT,
 } from "../workspaceBasenameLookup";
 import {
-  findProjectForChangeRequest,
-  matchesLinkedPullRequestUrl,
+  findProjectOnChangeRequestHost,
   parseChangeRequestUrl,
   useOpenChangeRequestLink,
 } from "~/lib/openPullRequestLink";
@@ -2010,7 +2013,10 @@ function ChatMarkdown({
   const openPreview = useAtomCommand(previewEnvironment.open, {
     reportFailure: false,
   });
-  const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
+  const linkThreadPullRequest = useAtomCommand(threadEnvironment.linkPullRequest, {
+    reportFailure: false,
+  });
+  const unlinkThreadPullRequest = useAtomCommand(threadEnvironment.unlinkPullRequest, {
     reportFailure: false,
   });
   const environmentId = threadRef?.environmentId ?? explicitEnvironmentId ?? null;
@@ -2143,53 +2149,88 @@ function ChatMarkdown({
     event.clipboardData.setData("text/html", payload.html);
   }, []);
   const openChangeRequestLink = useOpenChangeRequestLink(threadRef);
+  /**
+   * A chat link as a thread link: host-level, so any project on the link's host makes it
+   * linkable, even one checked out from a different repository. Nothing for a URL the parser
+   * does not recognise, a host nothing here is checked out from, or a server without links.
+   */
   const resolveThreadPullRequest = useCallback(
-    (href: string): ThreadLinkedPullRequest | null => {
+    (href: string): (ThreadPullRequestKey & { readonly url: string }) | null => {
       if (
         threadRef === undefined ||
         readThreadShell(threadRef) === null ||
-        threadServerConfig?.environment.capabilities.threadPullRequestLinking !== true
+        threadServerConfig?.environment.capabilities.threadPullRequests !== true
       ) {
         return null;
       }
       const parsed = parseChangeRequestUrl(href);
       if (parsed === null) return null;
-      const project = findProjectForChangeRequest(
+      const project = findProjectOnChangeRequestHost(
         projects.filter((candidate) => candidate.environmentId === threadRef.environmentId),
         parsed,
       );
       if (project === undefined) return null;
       return {
-        projectId: project.id,
-        repository: project.repositoryIdentity?.displayName ?? parsed.repository,
+        host: parsed.host,
+        repository: parsed.repository,
         number: parsed.number,
         url: href,
       };
     },
     [projects, threadRef, threadServerConfig],
   );
+  const linkedThreadPullRequestFor = useCallback(
+    (href: string) => {
+      if (threadRef === undefined) return null;
+      const parsed = parseChangeRequestUrl(href);
+      if (parsed === null) return null;
+      return (
+        visibleThreadPullRequests(readThreadShell(threadRef)?.pullRequests ?? []).find((link) =>
+          threadPullRequestKeysEqual(link, parsed),
+        ) ?? null
+      );
+    },
+    [threadRef],
+  );
   const updateThreadPullRequestLink = useCallback(
     async (href: string, linked: boolean) => {
       if (threadRef === undefined) return;
-      const linkedPullRequest = linked ? resolveThreadPullRequest(href) : null;
-      if (linked && linkedPullRequest === null) {
-        throw new Error("The pull request is not available in this environment.");
-      }
-      if (!linked) {
-        const currentPullRequest = readThreadShell(threadRef)?.linkedPullRequest;
-        if (currentPullRequest == null || !matchesLinkedPullRequestUrl(currentPullRequest, href)) {
-          return;
+      if (linked) {
+        const pullRequest = resolveThreadPullRequest(href);
+        if (pullRequest === null) {
+          throw new Error("The pull request is not available in this environment.");
         }
+        const result = await linkThreadPullRequest({
+          environmentId: threadRef.environmentId,
+          input: { threadId: threadRef.threadId, ...pullRequest, source: "manual" },
+        });
+        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+          throw squashAtomCommandFailure(result);
+        }
+        return;
       }
-      const result = await updateThreadMetadata({
+      const current = linkedThreadPullRequestFor(href);
+      if (current === null) return;
+      const result = await unlinkThreadPullRequest({
         environmentId: threadRef.environmentId,
-        input: { threadId: threadRef.threadId, linkedPullRequest },
+        input: {
+          threadId: threadRef.threadId,
+          host: current.host,
+          repository: current.repository,
+          number: current.number,
+        },
       });
       if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
         throw squashAtomCommandFailure(result);
       }
     },
-    [resolveThreadPullRequest, threadRef, updateThreadMetadata],
+    [
+      linkThreadPullRequest,
+      linkedThreadPullRequestFor,
+      resolveThreadPullRequest,
+      threadRef,
+      unlinkThreadPullRequest,
+    ],
   );
   const openExternalLinkInPreview = useCallback(
     (url: string) => {
@@ -2505,14 +2546,10 @@ function ChatMarkdown({
                 event.stopPropagation();
                 const api = readLocalApi();
                 if (!api) return;
-                const pullRequest = resolveThreadPullRequest(href);
-                const currentPullRequest =
-                  threadRef === undefined ? null : readThreadShell(threadRef)?.linkedPullRequest;
                 const threadLinkAction =
-                  currentPullRequest != null &&
-                  matchesLinkedPullRequestUrl(currentPullRequest, href)
+                  linkedThreadPullRequestFor(href) !== null
                     ? "unlink-from-thread"
-                    : pullRequest === null
+                    : resolveThreadPullRequest(href) === null
                       ? undefined
                       : "link-to-thread";
                 void showExternalLinkContextMenu({
@@ -2747,6 +2784,7 @@ function ChatMarkdown({
     openExternalLinkInPreview,
     openMarkdownFileInPreview,
     preferredEditorMenuLabel,
+    linkedThreadPullRequestFor,
     resolveThreadPullRequest,
     resolvedTheme,
     revealMarkdownFileInFileManager,

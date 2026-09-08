@@ -4,6 +4,7 @@ import {
   MessageId,
   ProjectId,
   ThreadId,
+  type ThreadPullRequestLink,
   TurnId,
   ProviderInstanceId,
 } from "@t3tools/contracts";
@@ -48,6 +49,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       yield* sql`DELETE FROM projection_projects`;
       yield* sql`DELETE FROM projection_state`;
       yield* sql`DELETE FROM projection_thread_proposed_plans`;
+      yield* sql`DELETE FROM projection_thread_pull_requests`;
       yield* sql`DELETE FROM projection_turns`;
 
       yield* sql`
@@ -71,6 +73,45 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           '2026-02-24T00:00:01.000Z',
           NULL
         )
+      `;
+
+      // A merged link plus a newer open one: the legacy single-link field must
+      // resolve to the open pull request, not the stale JSON column below.
+      yield* sql`
+        INSERT INTO projection_thread_pull_requests (
+          thread_id,
+          host,
+          repository,
+          number,
+          url,
+          source,
+          linked_at,
+          snapshot_json,
+          stack_json
+        )
+        VALUES
+          (
+            'thread-1',
+            'github.com',
+            'pingdotgg/t3code',
+            41,
+            'https://github.com/pingdotgg/t3code/pull/41',
+            'created',
+            '2026-02-24T00:00:02.500Z',
+            '{"state":"merged","title":"Groundwork","headBranch":"feat/groundwork","baseBranch":"main","isDraft":false,"updatedAt":"2026-02-24T00:00:02.600Z","syncedAt":"2026-02-24T00:00:02.700Z"}',
+            NULL
+          ),
+          (
+            'thread-1',
+            'github.com',
+            'pingdotgg/t3code',
+            42,
+            'https://github.com/pingdotgg/t3code/pull/42',
+            'manual',
+            '2026-02-24T00:00:03.000Z',
+            NULL,
+            NULL
+          )
       `;
 
       yield* sql`
@@ -104,7 +145,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           'default',
           NULL,
           NULL,
-          '{"projectId":"project-1","repository":"pingdotgg/t3code","number":42,"url":"https://github.com/pingdotgg/t3code/pull/42"}',
+          '{"projectId":"project-1","repository":"pingdotgg/t3code","number":41,"url":"https://github.com/pingdotgg/t3code/pull/41"}',
           'turn-1',
           '2026-02-24T00:00:04.000Z',
           1,
@@ -264,6 +305,37 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
         sequence += 1;
       }
 
+      const expectedPullRequests: ReadonlyArray<ThreadPullRequestLink> = [
+        {
+          host: "github.com",
+          repository: "pingdotgg/t3code",
+          number: 41,
+          url: "https://github.com/pingdotgg/t3code/pull/41",
+          source: "created",
+          linkedAt: "2026-02-24T00:00:02.500Z",
+          snapshot: {
+            state: "merged",
+            title: "Groundwork",
+            headBranch: "feat/groundwork",
+            baseBranch: "main",
+            isDraft: false,
+            updatedAt: "2026-02-24T00:00:02.600Z",
+            syncedAt: "2026-02-24T00:00:02.700Z",
+          },
+          stack: null,
+        },
+        {
+          host: "github.com",
+          repository: "pingdotgg/t3code",
+          number: 42,
+          url: "https://github.com/pingdotgg/t3code/pull/42",
+          source: "manual",
+          linkedAt: "2026-02-24T00:00:03.000Z",
+          snapshot: null,
+          stack: null,
+        },
+      ];
+
       const snapshot = yield* snapshotQuery.getSnapshot();
 
       assert.equal(snapshot.snapshotSequence, 5);
@@ -314,6 +386,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             number: 42,
             url: "https://github.com/pingdotgg/t3code/pull/42",
           },
+          pullRequests: expectedPullRequests,
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",
@@ -441,6 +514,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             number: 42,
             url: "https://github.com/pingdotgg/t3code/pull/42",
           },
+          pullRequests: expectedPullRequests,
           latestTurn: {
             turnId: asTurnId("turn-1"),
             state: "completed",
@@ -486,6 +560,29 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       assert.equal(threadDetail._tag, "Some");
       if (threadDetail._tag === "Some") {
         assert.deepEqual(threadDetail.value, snapshot.threads[0]);
+      }
+
+      const threadShell = yield* snapshotQuery.getThreadShellById(ThreadId.make("thread-1"));
+      assert.equal(threadShell._tag, "Some");
+      if (threadShell._tag === "Some") {
+        assert.deepEqual(threadShell.value, shellSnapshot.threads[0]);
+      }
+
+      const commandReadModel = yield* snapshotQuery.getCommandReadModel();
+      assert.deepEqual(commandReadModel.threads[0]?.pullRequests, expectedPullRequests);
+      assert.deepEqual(
+        commandReadModel.threads[0]?.linkedPullRequest,
+        snapshot.threads[0]?.linkedPullRequest,
+      );
+
+      // Without link rows the legacy field is omitted, whatever the old JSON
+      // column still holds.
+      yield* sql`DELETE FROM projection_thread_pull_requests`;
+      const unlinkedShell = yield* snapshotQuery.getThreadShellById(ThreadId.make("thread-1"));
+      assert.equal(unlinkedShell._tag, "Some");
+      if (unlinkedShell._tag === "Some") {
+        assert.deepEqual(unlinkedShell.value.pullRequests, []);
+        assert.equal("linkedPullRequest" in unlinkedShell.value, false);
       }
 
       yield* sql`

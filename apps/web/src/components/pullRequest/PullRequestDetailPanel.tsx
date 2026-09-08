@@ -61,8 +61,16 @@ import { useProjects } from "~/state/entities";
 import { useEnvironments } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { useLiveRefresh } from "~/hooks/useLiveRefresh";
-import { pullRequestEnvironment } from "~/state/pullRequests";
+import { pullRequestEnvironment, pullRequestStackAtom } from "~/state/pullRequests";
+import { useThreadShell } from "~/state/entities";
+import { threadEnvironment } from "~/state/threads";
 import { useAtomCommand } from "~/state/use-atom-command";
+import {
+  threadPullRequestKeysEqual,
+  visibleThreadPullRequests,
+} from "@t3tools/shared/threadPullRequests";
+import { parseChangeRequestUrl } from "~/lib/openPullRequestLink";
+import { PullRequestStackMap } from "./PullRequestStackMap";
 import { vcsEnvironment } from "~/state/vcs";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 
@@ -583,6 +591,51 @@ export function PullRequestDetailPanel({
   const isStackedPullRequest =
     detail !== null &&
     isStackedPullRequestBase(detail.baseBranch, branchRefsQuery.data?.refs ?? []);
+  // The host's own stack, where it keeps one. Only asked for once the detail has landed so a
+  // pull request nobody can read costs one request rather than two.
+  const nativeStack = useEnvironmentQuery(
+    detail === null || detail.capabilities.stacks !== true
+      ? null
+      : pullRequestStackAtom({ environmentId, input: reference }),
+  ).data;
+  // Beside a thread, the panel can attach the pull request it shows to that thread. The thread
+  // ref is the composer target when it is one; a draft has no thread to link to yet.
+  const linkableThreadRef =
+    context === "thread" &&
+    composerDraftTarget !== undefined &&
+    typeof composerDraftTarget !== "string"
+      ? composerDraftTarget
+      : null;
+  const linkableThread = useThreadShell(linkableThreadRef);
+  const linkedHere =
+    detail !== null &&
+    linkableThread !== null &&
+    (() => {
+      const parsed = parseChangeRequestUrl(detail.url);
+      return (
+        parsed !== null &&
+        visibleThreadPullRequests(linkableThread.pullRequests).some((link) =>
+          threadPullRequestKeysEqual(link, parsed),
+        )
+      );
+    })();
+  const linkToThread = useAtomCommand(threadEnvironment.linkPullRequest, { reportFailure: true });
+  const linkThisPullRequest = useCallback(() => {
+    if (detail === null || linkableThreadRef === null) return;
+    const parsed = parseChangeRequestUrl(detail.url);
+    if (parsed === null) return;
+    void linkToThread({
+      environmentId: linkableThreadRef.environmentId,
+      input: {
+        threadId: linkableThreadRef.threadId,
+        host: parsed.host,
+        repository: parsed.repository,
+        number: parsed.number,
+        url: detail.url,
+        source: "manual",
+      },
+    });
+  }, [detail, linkToThread, linkableThreadRef]);
   const activityPending = activityQuery.isPending && activity === null;
   const activityError = activity === null ? activityQuery.error : null;
   const refreshDetail = useCallback(() => {
@@ -1293,6 +1346,12 @@ export function PullRequestDetailPanel({
                   It asks where, because the two answers are not interchangeable: one leaves your
                   work where it is, the other moves the repository you are standing in. Only on
                   the page: beside a thread the branch is already checked out right there. */}
+              {linkableThreadRef !== null && !linkedHere ? (
+                <Button size="xs" variant="outline" onClick={linkThisPullRequest}>
+                  <LinkIcon aria-hidden className="size-3.5" />
+                  Link to thread
+                </Button>
+              ) : null}
               {context === "page" ? (
                 <Menu>
                   <MenuTrigger
@@ -1657,6 +1716,13 @@ export function PullRequestDetailPanel({
                     />
                   </span>
                 </div>
+                {nativeStack ? (
+                  <PullRequestStackMap
+                    stack={nativeStack}
+                    currentNumber={detail.number}
+                    className="mt-1"
+                  />
+                ) : null}
               </div>
             ) : null}
           </div>

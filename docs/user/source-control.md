@@ -52,6 +52,28 @@ T3 Code works with the platforms your team already uses:
 - Command-click (Control-click on Windows and Linux) a pull request number in the sidebar to open it in your browser instead of in T3 Code
 - Check out a teammate's branch to review code locally
 
+**Keep every pull request with the thread that made it**
+
+- A thread can hold any number of linked pull requests. Creating one from the Git actions
+  controls links it. The agent links the ones it opens itself, including each layer of a stack,
+  through its `link_pull_request` tool. Paste a URL or a `#123` into **Link pull request** from
+  the command palette, the **Linked pull requests** panel, or a review open beside the thread
+- A URL can point at a different repository on the same host, so a frontend thread can carry the
+  backend pull request it caused
+- The **Linked pull requests** panel (add surface → **Linked pull requests**, or `L` in the add
+  menu) lists them all. Stacks GitHub knows about appear as one group, bottom to top; pull
+  requests that chain by base branch on other hosts are grouped the same way
+- The sidebar shows the open pull request. With several open at once it shows a stack badge with
+  the count; click it to open the panel
+- Unlink from the panel row's menu. A stack layer you unlink stays out even when the stack is
+  next synced
+- Link state refreshes on the server, once per pull request no matter how many threads share
+  it: every minute while the pull request is open and a thread is active, every fifteen minutes
+  once every thread is settled, and never once it is merged or closed unless you refresh the
+  review
+- With **Auto-settle merged threads** on, a thread settles once every linked pull request has
+  merged or closed; a single open one keeps it active
+
 **Fix what you wrote, in place**
 
 - Rewrite a pull request's title and description from the review itself, in Markdown, with a

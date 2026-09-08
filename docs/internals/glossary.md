@@ -43,6 +43,18 @@ A single user-to-assistant work cycle inside a thread. It starts with user input
 
 A user-visible log item attached to a thread. In [the contracts][1], activities cover important non-message events like approvals, tool actions, and failures. They are projected into thread state in [projector.ts][4].
 
+#### Pull request link
+
+A thread's durable association with one pull request, identified at the host level by `(host, repository, number)` so the same pull request linked from two projects is one identity. A thread holds any number of links (`pullRequests` in [the contracts][1]) and a pull request can be linked from any number of threads. Each link records its `source` (`manual`, `created` by the git action, `agent` via the MCP tool, or `stack` when discovered as a member of a host-native stack) and, once the sync reactor has read it, a `snapshot` of host state and any native `stack` it belongs to. Links are created by `thread.pull-request.link` and removed by `thread.pull-request.unlink` in [decider.ts][8]; unlinking a `stack` member leaves a `stack-dismissed` tombstone so the next sync does not re-add it. Persisted in `projection_thread_pull_requests` by [ProjectionPipeline.ts][11].
+
+#### Pull request sync
+
+`PullRequestSyncReactor` (`apps/server/src/orchestration/PullRequestSyncReactor.ts`) sweeps every minute, groups every visible link across threads by its host-level key, and reads the host once per key through `PullRequestService.summary` (and `stack` when the summary changed). Cadence per key: unsynced → now; open with an unsettled thread → every sweep; open with every thread settled → 15 minutes; merged or closed → only on `requestSync`, which the `pullRequests.invalidate` RPC calls. A changed snapshot dispatches `thread.pull-request.sync` for each thread whose stored link differs; an unchanged one dispatches nothing. Members of a host-native stack that the thread does not yet link are linked with `source: "stack"` unless a `stack-dismissed` tombstone says the user removed them. `ThreadSettlementReactor` reads link snapshots instead of the host: any open link blocks settlement, all-terminal links settle on the latest `updatedAt`.
+
+#### Current pull request
+
+The one link a single-slot surface (sidebar badge, tab icon, copy-link) shows, derived from a thread's links by `resolveThreadCurrentPullRequest` in `@t3tools/shared/threadPullRequests`: a single open link wins; several open links are reported as a stack with its top layer; with nothing open, the most recently updated terminal link stands in. The legacy `linkedPullRequest` field on a thread is this derivation, kept on the wire until every client reads `pullRequests`.
+
 ### Orchestration
 
 Orchestration is the server-side domain layer that turns runtime activity into stable app state. The main entry point is [OrchestrationEngine.ts][7], with core logic in [decider.ts][8] and [projector.ts][4].

@@ -98,6 +98,7 @@ const THREAD_SHELL = {
   archivedAt: null,
   settledOverride: null,
   settledAt: null,
+  pullRequests: [],
   session: null,
   latestUserMessageAt: null,
   hasPendingApprovals: false,

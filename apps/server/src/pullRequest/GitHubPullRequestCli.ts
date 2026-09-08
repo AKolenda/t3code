@@ -37,6 +37,7 @@ import {
   decodePullRequestListJson,
   decodePullRequestNodeIdJson,
   decodePullRequestSearchJson,
+  decodePullRequestStacksJson,
   decodePullRequestStatsJson,
   decodeReactionSubjectScopeJson,
   decodeRepositoryAccessJson,
@@ -76,13 +77,14 @@ import {
   type GitHubPullRequestActivity,
   type GitHubPullRequestListItem,
   type GitHubPullRequestSearchItem,
+  type GitHubPullRequestStack,
   type GitHubReviewThreadComments,
   type GitHubRepositoryAccess,
   type GitHubReviewThreadEntry,
   type GitHubReviewThreadPage,
   type GitHubViewerAccess,
 } from "./gitHubPullRequestJson.ts";
-import type { ProviderListCursor } from "./PullRequestProvider.ts";
+import type { ProviderChangeRequestSummary, ProviderListCursor } from "./PullRequestProvider.ts";
 
 /**
  * Names the read that produced unusable output, so a failure reports the call it came from
@@ -385,18 +387,7 @@ export class GitHubPullRequestCli extends Context.Service<
       readonly repository: string;
       readonly host: string;
       readonly number: number;
-    }) => Effect.Effect<
-      {
-        readonly number: number;
-        readonly title: string;
-        readonly url: string;
-        readonly headBranch: string;
-        readonly baseBranch: string;
-        readonly state: "open" | "closed" | "merged";
-        readonly updatedAt: string;
-      },
-      GitHubPullRequestCliError
-    >;
+    }) => Effect.Effect<ProviderChangeRequestSummary, GitHubPullRequestCliError>;
 
     readonly getPullRequestDetail: (input: {
       readonly cwd: string;
@@ -404,6 +395,17 @@ export class GitHubPullRequestCli extends Context.Service<
       readonly host: string;
       readonly number: number;
     }) => Effect.Effect<GitHubPullRequestDetail, GitHubPullRequestCliError>;
+
+    /**
+     * The host-native stack this pull request is in, or null when it is in none — which is also
+     * the answer for a host that refuses the stacks preview altogether.
+     */
+    readonly getPullRequestStack: (input: {
+      readonly cwd: string;
+      readonly repository: string;
+      readonly host: string;
+      readonly number: number;
+    }) => Effect.Effect<GitHubPullRequestStack | null, GitHubPullRequestCliError>;
 
     /**
      * How far the branch trails its base, and whether this viewer may update it. Its own read
@@ -1364,33 +1366,53 @@ export const make = Effect.gen(function* () {
       ).pipe(Effect.map((results) => results.flat()));
     },
 
+    // One `gh pr view` either way; asking for the detail fields costs nothing extra and hands
+    // the thread overview its author, diff stat, review decision and checks in the same read.
     getPullRequestSummary: (input) =>
       github
-        .getPullRequest({
+        .execute({
           cwd: input.cwd,
-          reference: `https://${input.host}/${input.repository}/pull/${input.number}`,
+          args: [
+            "pr",
+            "view",
+            String(input.number),
+            ...repositoryArgs(input),
+            "--json",
+            PULL_REQUEST_DETAIL_JSON_FIELDS,
+          ],
         })
         .pipe(
-          Effect.flatMap((summary) =>
-            summary.updatedAt === undefined
-              ? Effect.fail(
-                  new GitHubPullRequestUpdatedAtUnavailableError({
-                    command: "gh",
-                    cwd: input.cwd,
-                    repository: input.repository,
-                    number: input.number,
-                  }),
-                )
-              : Effect.succeed({
-                  number: summary.number,
-                  title: summary.title,
-                  url: summary.url,
-                  headBranch: summary.headRefName,
-                  baseBranch: summary.baseRefName,
-                  state: summary.state ?? "open",
-                  updatedAt: summary.updatedAt,
+          Effect.flatMap((result) => {
+            const decoded = decodePullRequestDetailJson(result.stdout.trim());
+            if (!Result.isSuccess(decoded)) {
+              return Effect.fail(
+                new GitHubPullRequestReadError({
+                  command: "gh",
+                  cwd: input.cwd,
+                  operation: "getPullRequestSummary",
+                  cause: decoded.failure,
                 }),
-          ),
+              );
+            }
+            const detail = decoded.success;
+            return Effect.succeed({
+              number: detail.number,
+              title: detail.title,
+              url: detail.url,
+              headBranch: detail.headBranch,
+              baseBranch: detail.baseBranch,
+              state: detail.state,
+              updatedAt: detail.updatedAt,
+              isDraft: detail.isDraft,
+              author: detail.author,
+              additions: detail.additions,
+              deletions: detail.deletions,
+              changedFiles: detail.changedFiles,
+              reviewDecision: detail.reviewDecision,
+              checksState: detail.checksState,
+              mergeability: detail.mergeability,
+            });
+          }),
         ),
 
     getPullRequestDetail: (input) =>
@@ -1421,6 +1443,44 @@ export const make = Effect.gen(function* () {
                 );
           }),
         ),
+
+    getPullRequestStack: (input) => {
+      const { owner, name } = parseRepositorySelector(input.repository);
+      return github
+        .execute({
+          cwd: input.cwd,
+          args: [
+            "api",
+            "--hostname",
+            input.host,
+            `repos/${owner}/${name}/stacks?pull_request=${input.number}`,
+          ],
+        })
+        .pipe(
+          Effect.flatMap((result) => {
+            const decoded = decodePullRequestStacksJson(result.stdout.trim());
+            return Result.isSuccess(decoded)
+              ? Effect.succeed(decoded.success)
+              : Effect.fail(
+                  new GitHubPullRequestReadError({
+                    command: "gh",
+                    cwd: input.cwd,
+                    operation: "getPullRequestStack",
+                    cause: decoded.failure,
+                  }),
+                );
+          }),
+          // Stacks are a preview: a host without it, or a repository it is switched off for,
+          // answers 404, which is "not stacked" rather than a failure worth showing. `gh`
+          // reports no status code, so the narrowing is to a command that ran and was refused
+          // — a missing `gh`, a signed-out one, or a rate limit still fail the same way for
+          // every request and are not swallowed here.
+          Effect.catchTags({
+            GitHubCliCommandError: () => Effect.succeed(null),
+            GitHubPullRequestNotFoundError: () => Effect.succeed(null),
+          }),
+        );
+    },
 
     getPullRequestBaseComparison: (input) => {
       const { owner, name } = parseRepositorySelector(input.repository);

@@ -464,6 +464,7 @@ export const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThr
   const linkedPullRequestStatus = useLinkedThreadPullRequest(
     leaseLiveStatus ? thread.environmentId : null,
     leaseLiveStatus ? thread.linkedPullRequest : null,
+    thread.pullRequests,
   );
   const visibleGitStatus = useRetainedValue(
     JSON.stringify([thread.environmentId, gitCwd]),

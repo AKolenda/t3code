@@ -4,10 +4,27 @@ import {
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
 import { pullRequestDetailToVcsStatus } from "@t3tools/client-runtime/state/pull-requests";
-import type { EnvironmentId, ThreadLinkedPullRequest, VcsStatusResult } from "@t3tools/contracts";
+import type {
+  EnvironmentId,
+  ThreadLinkedPullRequest,
+  ThreadPullRequestLink,
+  VcsStatusResult,
+} from "@t3tools/contracts";
+import {
+  resolveThreadPullRequestChains,
+  visibleThreadPullRequests,
+} from "@t3tools/shared/threadPullRequests";
 import { Atom } from "effect/unstable/reactivity";
-import { CloudIcon, FolderGit2Icon, GitPullRequestIcon, TerminalIcon } from "lucide-react";
+import {
+  CloudIcon,
+  FolderGit2Icon,
+  GitPullRequestArrowIcon,
+  GitPullRequestIcon,
+  LayersIcon,
+  TerminalIcon,
+} from "lucide-react";
 import { useMemo } from "react";
+import { cn } from "../lib/utils";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
 import { useProject } from "../state/entities";
@@ -21,6 +38,8 @@ import { resolveThreadStatusPill, type ThreadStatusPill } from "./Sidebar.logic"
 import type { SidebarThreadSummary } from "../types";
 import { formatWorktreePathForDisplay } from "../worktreeCleanup";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { pullRequestListLines, type PullRequestListLine } from "./pullRequest/pullRequestListLines";
+import { resolvePullRequestState } from "./pullRequest/pullRequestPresentation";
 
 export interface PrStatusIndicator {
   label: string;
@@ -70,10 +89,24 @@ export interface LinkedThreadPullRequestStatus {
   readonly sourceControlProvider: NonNullable<VcsStatusResult["sourceControlProvider"]>;
 }
 
+/**
+ * Live state of the thread's current pull request. `pullRequests` supplies the host of the
+ * compat `linkedPullRequest`, which has none of its own; without it the server routes the read
+ * through the project's own repository, which is wrong for a link from another repository.
+ */
 export function useLinkedThreadPullRequest(
   environmentId: EnvironmentId | null,
   linkedPullRequest: ThreadLinkedPullRequest | null | undefined,
+  pullRequests?: ReadonlyArray<ThreadPullRequestLink>,
 ): LinkedThreadPullRequestStatus | null {
+  const host =
+    linkedPullRequest == null
+      ? undefined
+      : pullRequests?.find(
+          (link) =>
+            link.number === linkedPullRequest.number &&
+            link.repository.toLowerCase() === linkedPullRequest.repository.toLowerCase(),
+        )?.host;
   const detail = useEnvironmentQuery(
     environmentId === null || linkedPullRequest == null
       ? null
@@ -81,6 +114,7 @@ export function useLinkedThreadPullRequest(
           environmentId,
           input: {
             projectId: linkedPullRequest.projectId,
+            ...(host === undefined ? {} : { host }),
             repository: linkedPullRequest.repository,
             number: linkedPullRequest.number,
           },
@@ -102,6 +136,121 @@ export function useLinkedThreadPullRequest(
     [detail],
   );
 }
+
+/** A single stack is when every visible link sits in one chain of two or more. */
+export function isSingleStack(lines: ReadonlyArray<PullRequestListLine>): boolean {
+  return lines.length > 1 && new Set(lines.map((line) => line.chainKey)).size === 1;
+}
+
+/**
+ * How a row's pull-request badge reads. A thread whose links are one stack shows the layers
+ * glyph and the layer count, coloured by where the stack stands as a whole; any other set of
+ * links shows the pull-request glyph, the current number, and how many others sit behind it.
+ * Null when the thread has no links, so the badge falls back to whatever the branch reports.
+ */
+export type ThreadPullRequestBadge =
+  | {
+      readonly kind: "stack";
+      readonly layers: number;
+      readonly state: NonNullable<ThreadPr>["state"];
+    }
+  | { readonly kind: "pull-request"; readonly others: number };
+
+export function resolveThreadPullRequestBadge(
+  pullRequests: ReadonlyArray<ThreadPullRequestLink> | undefined,
+): ThreadPullRequestBadge | null {
+  const visible = visibleThreadPullRequests(pullRequests ?? []);
+  if (visible.length === 0) return null;
+  const lines = pullRequestListLines(resolveThreadPullRequestChains(visible));
+  if (isSingleStack(lines)) {
+    const states = lines.map((line) => line.link.snapshot?.state ?? "open");
+    // Open while any layer is; merged once every layer merged; closed otherwise.
+    const state = states.includes("open")
+      ? "open"
+      : states.every((entry) => entry === "merged")
+        ? "merged"
+        : "closed";
+    return { kind: "stack", layers: lines.length, state };
+  }
+  return { kind: "pull-request", others: visible.length - 1 };
+}
+
+/** The glyph a row's badge wears: the layers icon for a stack, the pull-request one otherwise. */
+export function ThreadPullRequestBadgeIcon({
+  icon,
+  className,
+}: {
+  icon: "stack" | "pull-request";
+  className?: string | undefined;
+}) {
+  const Icon = icon === "stack" ? LayersIcon : GitPullRequestArrowIcon;
+  return <Icon aria-hidden className={cn("size-3 shrink-0", className)} />;
+}
+
+/**
+ * A miniature of the pull-requests panel for the thread tooltip: same order, same indentation,
+ * so the hover answers "what is in here" without opening the surface.
+ */
+export function ThreadPullRequestsMiniList({
+  pullRequests,
+}: {
+  pullRequests: ReadonlyArray<ThreadPullRequestLink>;
+}) {
+  const lines = useMemo(
+    () =>
+      pullRequestListLines(resolveThreadPullRequestChains(visibleThreadPullRequests(pullRequests))),
+    [pullRequests],
+  );
+  if (lines.length === 0) return null;
+  return (
+    <ul className="flex flex-col gap-1">
+      {lines.map((line) => {
+        const snapshot = line.link.snapshot;
+        const presentation =
+          snapshot === null
+            ? null
+            : resolvePullRequestState({ state: snapshot.state, isDraft: snapshot.isDraft });
+        return (
+          <li
+            key={`${line.link.host}/${line.link.repository}#${line.link.number}`}
+            className="flex min-w-0 items-center gap-2"
+            // Capped like the panel: past a few layers the indent only repeats "still in the
+            // stack", and sixteen of them would walk the titles off the popover.
+            style={{ paddingLeft: `${Math.min(line.depth, 3) * 0.75}rem` }}
+          >
+            {presentation ? (
+              <presentation.Icon
+                aria-hidden
+                className={cn("size-3 shrink-0", presentation.toneClassName)}
+              />
+            ) : (
+              <GitPullRequestArrowIcon
+                aria-hidden
+                className="size-3 shrink-0 stroke-muted-foreground"
+              />
+            )}
+            <span className="shrink-0 font-mono tabular-nums">#{line.link.number}</span>
+            <span className="min-w-0 truncate text-foreground/75">
+              {snapshot?.title ?? line.link.repository}
+            </span>
+            {line.stack ? (
+              <span className="ml-auto shrink-0 pl-1 text-[10px]">
+                {line.stack.kind === "native" ? "stack" : "chain"} · {line.stack.size}
+              </span>
+            ) : null}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/** The ink each pull-request state wears in the sidebar, shared by the number and stack badges. */
+export const PR_STATE_COLOR_CLASS: Record<NonNullable<ThreadPr>["state"], string> = {
+  open: "text-emerald-600 dark:text-emerald-300/90",
+  merged: "text-violet-600 dark:text-violet-300/90",
+  closed: "text-red-600 dark:text-red-300/90",
+};
 
 export function settledPrHoverColorClass(state: NonNullable<ThreadPr>["state"]): string {
   switch (state) {
@@ -561,6 +710,7 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
   const linkedPullRequest = useLinkedThreadPullRequest(
     thread.environmentId,
     thread.linkedPullRequest,
+    thread.pullRequests,
   );
   const gitStatus = useEnvironmentQuery(
     thread.linkedPullRequest == null &&

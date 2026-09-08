@@ -4,7 +4,10 @@ import {
   type OrchestrationEvent,
   type OrchestrationReadModel,
   type OrchestrationThread,
+  type ThreadPullRequestKey,
+  type ThreadPullRequestLink,
 } from "@t3tools/contracts";
+import { threadPullRequestKeysEqual } from "@t3tools/shared/threadPullRequests";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
@@ -110,6 +113,22 @@ function hasQueuedTurnStartForThread(
     },
     now,
   );
+}
+
+/** Link identity as stored: host and repository lowercased so equal keys persist equal. */
+function normalizePullRequestKey(key: ThreadPullRequestKey): ThreadPullRequestKey {
+  return {
+    host: key.host.trim().toLowerCase(),
+    repository: key.repository.trim().toLowerCase(),
+    number: key.number,
+  };
+}
+
+function findPullRequestLink(
+  thread: Pick<OrchestrationThread, "pullRequests">,
+  key: ThreadPullRequestKey,
+): ThreadPullRequestLink | undefined {
+  return thread.pullRequests.find((link) => threadPullRequestKeysEqual(link, key));
 }
 
 function withEventBase(
@@ -814,9 +833,129 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             : {}),
           ...(branch !== undefined ? { branch } : {}),
           ...(command.worktreePath !== undefined ? { worktreePath: command.worktreePath } : {}),
-          ...(command.linkedPullRequest !== undefined
-            ? { linkedPullRequest: command.linkedPullRequest }
-            : {}),
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "thread.pull-request.link": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const key = normalizePullRequestKey(command);
+      const existing = findPullRequestLink(thread, key);
+      // An explicit link on a dismissed stack member un-dismisses it; any
+      // other duplicate is a no-op the engine would reject as zero-event.
+      const undismisses =
+        existing?.source === "stack-dismissed" &&
+        (command.source === "manual" || command.source === "agent" || command.source === "created");
+      if (existing !== undefined && !undismisses) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `pull request ${key.host}/${key.repository}#${key.number} is already linked to thread ${command.threadId}`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.pull-request-linked",
+        payload: {
+          threadId: command.threadId,
+          link:
+            existing !== undefined
+              ? { ...existing, url: command.url, source: command.source }
+              : {
+                  ...key,
+                  url: command.url,
+                  source: command.source,
+                  linkedAt: occurredAt,
+                  snapshot: null,
+                  stack: null,
+                },
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "thread.pull-request.unlink": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const key = normalizePullRequestKey(command);
+      const existing = findPullRequestLink(thread, key);
+      if (existing === undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `pull request ${key.host}/${key.repository}#${key.number} is not linked to thread ${command.threadId}`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      const eventBase = yield* withEventBase({
+        aggregateKind: "thread",
+        aggregateId: command.threadId,
+        occurredAt,
+        commandId: command.commandId,
+      });
+      // A host-discovered stack member leaves a tombstone instead of a hole,
+      // so the next sync does not re-add what the user just removed.
+      if (existing.source === "stack") {
+        return {
+          ...eventBase,
+          type: "thread.pull-request-linked",
+          payload: {
+            threadId: command.threadId,
+            link: { ...existing, source: "stack-dismissed" },
+            updatedAt: occurredAt,
+          },
+        };
+      }
+      return {
+        ...eventBase,
+        type: "thread.pull-request-unlinked",
+        payload: {
+          threadId: command.threadId,
+          ...key,
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "thread.pull-request.sync": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const key = normalizePullRequestKey(command);
+      if (findPullRequestLink(thread, key) === undefined) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `pull request ${key.host}/${key.repository}#${key.number} is not linked to thread ${command.threadId}`,
+        });
+      }
+      const occurredAt = yield* nowIso;
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.pull-request-synced",
+        payload: {
+          threadId: command.threadId,
+          ...key,
+          snapshot: command.snapshot,
+          stack: command.stack,
           updatedAt: occurredAt,
         },
       };

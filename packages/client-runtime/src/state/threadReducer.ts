@@ -10,13 +10,35 @@ import type {
   OrchestrationSession,
   OrchestrationThread,
   OrchestrationThreadActivity,
+  ThreadPullRequestLink,
   TurnId,
 } from "@t3tools/contracts";
+import {
+  legacyLinkedPullRequestOf,
+  threadPullRequestKeysEqual,
+} from "@t3tools/shared/threadPullRequests";
 
 export type ThreadDetailReducerResult =
   | { readonly kind: "updated"; readonly thread: OrchestrationThread }
   | { readonly kind: "deleted" }
   | { readonly kind: "unchanged" };
+
+/** Links changed; the compat `linkedPullRequest` field follows them. */
+function withPullRequests(
+  thread: OrchestrationThread,
+  pullRequests: ReadonlyArray<ThreadPullRequestLink>,
+  updatedAt: string,
+): ThreadDetailReducerResult {
+  return {
+    kind: "updated",
+    thread: {
+      ...thread,
+      pullRequests,
+      linkedPullRequest: legacyLinkedPullRequestOf(pullRequests, thread.projectId),
+      updatedAt,
+    },
+  };
+}
 
 const proposedPlanOrder = O.combine<OrchestrationThread["proposedPlans"][number]>(
   O.mapInput(O.String, (p) => p.createdAt),
@@ -105,6 +127,7 @@ export function applyThreadDetailEvent(
           snoozedUntil: null,
           snoozedAt: null,
           deletedAt: null,
+          pullRequests: [],
           messages: [],
           proposedPlans: [],
           activities: [],
@@ -241,6 +264,40 @@ export function applyThreadDetailEvent(
           updatedAt: event.payload.updatedAt,
         },
       };
+
+    case "thread.pull-request-linked": {
+      const link = event.payload.link;
+      const others = thread.pullRequests.filter(
+        (existing) => !threadPullRequestKeysEqual(existing, link),
+      );
+      return withPullRequests(thread, [...others, link], event.payload.updatedAt);
+    }
+
+    case "thread.pull-request-unlinked":
+      return withPullRequests(
+        thread,
+        thread.pullRequests.filter(
+          (existing) => !threadPullRequestKeysEqual(existing, event.payload),
+        ),
+        event.payload.updatedAt,
+      );
+
+    case "thread.pull-request-synced": {
+      if (
+        !thread.pullRequests.some((existing) => threadPullRequestKeysEqual(existing, event.payload))
+      ) {
+        return { kind: "unchanged" };
+      }
+      return withPullRequests(
+        thread,
+        thread.pullRequests.map((existing) =>
+          threadPullRequestKeysEqual(existing, event.payload)
+            ? { ...existing, snapshot: event.payload.snapshot, stack: event.payload.stack }
+            : existing,
+        ),
+        event.payload.updatedAt,
+      );
+    }
 
     case "thread.runtime-mode-set":
       return {

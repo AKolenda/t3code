@@ -67,6 +67,16 @@ export function useThreadPr(
         })
       : null,
   );
+  // The compat field carries no host; the link it was derived from does, and a link from
+  // another repository needs it to be routed through a project on that host.
+  const linkedHost =
+    thread.linkedPullRequest == null
+      ? undefined
+      : thread.pullRequests?.find(
+          (link) =>
+            link.number === thread.linkedPullRequest?.number &&
+            link.repository.toLowerCase() === thread.linkedPullRequest?.repository.toLowerCase(),
+        )?.host;
   const linkedPullRequest = useEnvironmentQuery(
     thread.linkedPullRequest == null
       ? null
@@ -74,6 +84,7 @@ export function useThreadPr(
           environmentId: thread.environmentId,
           input: {
             projectId: thread.linkedPullRequest.projectId,
+            ...(linkedHost === undefined ? {} : { host: linkedHost }),
             repository: thread.linkedPullRequest.repository,
             number: thread.linkedPullRequest.number,
           },

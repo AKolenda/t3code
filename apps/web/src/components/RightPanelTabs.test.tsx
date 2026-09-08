@@ -117,6 +117,7 @@ function renderTabs(
       onAddBrowserInProfile={() => undefined}
       onAddTerminal={() => undefined}
       onAddPullRequest={() => undefined}
+      onAddPullRequests={() => undefined}
       onAddDiff={() => undefined}
       onAddFiles={() => undefined}
       onAddAgents={() => undefined}
@@ -126,6 +127,7 @@ function renderTabs(
       diffAvailable={false}
       filesAvailable={false}
       pullRequestAvailable={false}
+      pullRequestsAvailable={false}
       agentsAvailable={false}
     >
       <div>content</div>
