@@ -197,7 +197,7 @@ export class RelayTransportMessageAssembler {
   }
 }
 
-export class RelayTransportFrameDecodeError extends Schema.TaggedErrorClass<RelayTransportFrameDecodeError>()(
+export class RelayTransportFrameDecodeError extends Schema.TaggedError<RelayTransportFrameDecodeError>()(
   "RelayTransportFrameDecodeError",
   {
     reason: Schema.Literals([
@@ -213,7 +213,7 @@ export class RelayTransportFrameDecodeError extends Schema.TaggedErrorClass<Rela
   },
 ) {}
 
-export class RelayTransportControlDecodeError extends Schema.TaggedErrorClass<RelayTransportControlDecodeError>()(
+export class RelayTransportControlDecodeError extends Schema.TaggedError<RelayTransportControlDecodeError>()(
   "RelayTransportControlDecodeError",
   {
     reason: Schema.Literals(["not_a_complete_control_frame", "invalid_control_message"]),

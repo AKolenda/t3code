@@ -214,14 +214,12 @@ export default class RelayEnvironment extends Cloudflare.DurableObject<RelayEnvi
 
       return {
         diagnostics: () =>
-          Effect.sync(
-            (): RelayEnvironmentDiagnostics => ({
-              activationId,
-              connectorConnected: connector !== null,
-              clientCount: clients.size,
-              pendingHttpCount: pendingHttp.size,
-            }),
-          ),
+          Effect.sync((): RelayEnvironmentDiagnostics => ({
+            activationId,
+            connectorConnected: connector !== null,
+            clientCount: clients.size,
+            pendingHttpCount: pendingHttp.size,
+          })),
         setConnectorConfiguration: (token: string, leaseId: string) =>
           Effect.gen(function* () {
             const previous =
