@@ -135,8 +135,6 @@ function ZoomableImage({
   const zoomed = zoom.scale > 1;
   return (
     <img
-      // A new image starts unzoomed.
-      key={src}
       ref={imageRef}
       src={src}
       alt={alt}
@@ -333,6 +331,8 @@ export const ExpandedImageDialog = memo(function ExpandedImageDialog({
             </ExpandedMediaFailure>
           ) : (
             <ZoomableImage
+              // A new image starts unzoomed with its own wheel listener.
+              key={item.src}
               src={item.src}
               alt={item.name}
               onError={() => setFailedImageSrc(item.src)}
