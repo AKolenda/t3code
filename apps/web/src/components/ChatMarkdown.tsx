@@ -2870,7 +2870,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
             void showExternalLinkContextMenu({
               href,
               canOpenInPreview,
-              ...(pullRequestPreviewTarget === null
+              ...(pullRequestPreviewTarget === null || confirmBeforeOpen
                 ? {}
                 : {
                     openInPullRequestPanel: (target: string) => {
@@ -2881,7 +2881,7 @@ const CHAT_MARKDOWN_COMPONENTS = {
                           preventDefault: () => undefined,
                           stopPropagation: () => undefined,
                         },
-                        pullRequestCandidateUrl ?? target,
+                        target,
                         undefined,
                         environmentId ?? undefined,
                       );
