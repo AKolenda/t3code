@@ -1,109 +1,110 @@
-/**
- * Pure zoom and pan math for the expanded image dialog. The image keeps its
- * layout box and is scaled around its center with a CSS transform, so `x` and
- * `y` are the translate applied after scaling, in CSS pixels.
- */
+/** Image scale and the browser's scroll position, in CSS pixels. */
 export interface ImageZoomState {
   readonly scale: number;
-  readonly x: number;
-  readonly y: number;
+  readonly scrollLeft: number;
+  readonly scrollTop: number;
 }
 
-/**
- * The untransformed image size, the viewport it must stay visible in, and the
- * offset of the untransformed image center from the viewport center. The
- * caption below the image pushes the image above the viewport center, so the
- * pan bounds are not symmetric.
- */
 export interface ImageZoomFrame {
   readonly width: number;
   readonly height: number;
   readonly viewportWidth: number;
   readonly viewportHeight: number;
-  readonly centerX: number;
-  readonly centerY: number;
 }
 
-export interface Point {
+interface Point {
   readonly x: number;
   readonly y: number;
 }
 
-export const IMAGE_ZOOM_IDENTITY: ImageZoomState = { scale: 1, x: 0, y: 0 };
-const MIN_IMAGE_ZOOM = 1;
+export const IMAGE_ZOOM_IDENTITY: ImageZoomState = { scale: 1, scrollLeft: 0, scrollTop: 0 };
 export const MAX_IMAGE_ZOOM = 8;
 
-function clampAxis(
-  translate: number,
-  scaledSize: number,
-  viewportSize: number,
-  center: number,
-): number {
-  // An image that fits on this axis keeps its layout position. One that
-  // overflows may be panned until its far edge meets the viewport edge, never
-  // past it, so it always covers the viewport on this axis.
-  if (scaledSize <= viewportSize) return 0;
-  const overflow = (scaledSize - viewportSize) / 2;
-  // `|| 0` turns a -0 from clamping into 0 so identity states compare equal.
-  return Math.min(overflow - center, Math.max(-overflow - center, translate)) || 0;
-}
-
-export function clampImagePan(state: ImageZoomState, frame: ImageZoomFrame): ImageZoomState {
+/** Centers each image axis until it is large enough to scroll. */
+export function imageZoomLayout(frame: ImageZoomFrame, scale: number) {
+  const width = frame.width * scale;
+  const height = frame.height * scale;
   return {
-    scale: state.scale,
-    x: clampAxis(state.x, frame.width * state.scale, frame.viewportWidth, frame.centerX),
-    y: clampAxis(state.y, frame.height * state.scale, frame.viewportHeight, frame.centerY),
+    width,
+    height,
+    left: Math.max(0, (frame.viewportWidth - width) / 2),
+    top: Math.max(0, (frame.viewportHeight - height) / 2),
+    contentWidth: Math.max(frame.viewportWidth, width),
+    contentHeight: Math.max(frame.viewportHeight, height),
   };
 }
 
-/**
- * Multiplies the scale by `factor` while keeping `anchor` fixed on screen.
- * `anchor` is the pointer position relative to the untransformed image center.
- */
+function imagePointAt(state: ImageZoomState, frame: ImageZoomFrame, anchor: Point) {
+  const layout = imageZoomLayout(frame, state.scale);
+  return {
+    x: (state.scrollLeft + anchor.x - layout.left) / layout.width,
+    y: (state.scrollTop + anchor.y - layout.top) / layout.height,
+  };
+}
+
+function scrollToImagePoint(
+  point: Point,
+  anchor: Point,
+  scale: number,
+  frame: ImageZoomFrame,
+): ImageZoomState {
+  const layout = imageZoomLayout(frame, scale);
+  return {
+    scale,
+    scrollLeft: Math.max(
+      0,
+      Math.min(
+        layout.contentWidth - frame.viewportWidth,
+        point.x * layout.width + layout.left - anchor.x,
+      ),
+    ),
+    scrollTop: Math.max(
+      0,
+      Math.min(
+        layout.contentHeight - frame.viewportHeight,
+        point.y * layout.height + layout.top - anchor.y,
+      ),
+    ),
+  };
+}
+
+/** Keeps the image point under the pointer fixed as the scroll area changes size. */
 export function zoomImageAt(
   state: ImageZoomState,
   factor: number,
   anchor: Point,
   frame: ImageZoomFrame,
 ): ImageZoomState {
-  const scale = Math.min(MAX_IMAGE_ZOOM, Math.max(MIN_IMAGE_ZOOM, state.scale * factor));
+  const scale = Math.min(MAX_IMAGE_ZOOM, Math.max(1, state.scale * factor));
   if (scale === state.scale) return state;
-  const ratio = scale / state.scale;
-  return clampImagePan(
-    {
-      scale,
-      x: anchor.x - ratio * (anchor.x - state.x),
-      y: anchor.y - ratio * (anchor.y - state.y),
-    },
+  return scrollToImagePoint(imagePointAt(state, frame, anchor), anchor, scale, frame);
+}
+
+/** Keeps the viewport centered on the same part of the image after a resize. */
+export function resizeImageZoom(
+  state: ImageZoomState,
+  previousFrame: ImageZoomFrame,
+  frame: ImageZoomFrame,
+): ImageZoomState {
+  const point = imagePointAt(state, previousFrame, {
+    x: previousFrame.viewportWidth / 2,
+    y: previousFrame.viewportHeight / 2,
+  });
+  return scrollToImagePoint(
+    point,
+    { x: frame.viewportWidth / 2, y: frame.viewportHeight / 2 },
+    state.scale,
     frame,
   );
 }
 
-export function panImage(
-  state: ImageZoomState,
-  dx: number,
-  dy: number,
-  frame: ImageZoomFrame,
-): ImageZoomState {
-  if (state.scale <= MIN_IMAGE_ZOOM) return state;
-  return clampImagePan({ scale: state.scale, x: state.x + dx, y: state.y + dy }, frame);
-}
-
-/**
- * Converts a ctrl+wheel delta into a zoom factor. Chromium reports a trackpad
- * pinch as ctrl+wheel where `1 - deltaY / 100` is the scale change, so this
- * matches the native pinch rate. A mouse wheel with ctrl sends about 100 per
- * notch, so the delta is capped to keep a notch near a 1.3x step.
- */
+/** Chromium encodes trackpad pinch as deltaY = -100 * log(scale). */
 export function wheelZoomFactor(deltaY: number): number {
-  return Math.exp(-Math.max(-25, Math.min(25, deltaY)) * 0.01);
+  return Math.exp(-deltaY / 100);
 }
 
-/**
- * The scale a click zooms to from the fitted size: the image's actual pixel
- * size, or 2x when the image is already shown at or near its actual size.
- */
+/** A click shows actual pixels, or enlarges an image that already fits at actual size. */
 export function clickZoomScale(naturalWidth: number, displayedWidth: number): number {
   if (naturalWidth <= 0 || displayedWidth <= 0) return 2;
-  return Math.max(2, naturalWidth / displayedWidth);
+  return Math.min(MAX_IMAGE_ZOOM, Math.max(2, naturalWidth / displayedWidth));
 }
