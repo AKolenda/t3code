@@ -107,7 +107,7 @@ export function coverCrop(
   return { x: 0, y: (height - cropHeight) / 2, width, height: cropHeight };
 }
 
-function readBottomBand(image: HTMLImageElement, frameAspect: number): RgbColor | null {
+function readBottomBand(image: HTMLImageElement): RgbColor | null {
   const { naturalWidth: width, naturalHeight: height } = image;
   if (width === 0 || height === 0) return null;
   const canvas = document.createElement("canvas");
@@ -115,7 +115,7 @@ function readBottomBand(image: HTMLImageElement, frameAspect: number): RgbColor 
   canvas.height = SAMPLE_HEIGHT;
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (context === null) return null;
-  const crop = coverCrop(width, height, frameAspect);
+  const crop = coverCrop(width, height, SNAP_SHOT_FRAME_ASPECT);
   const bandHeight = Math.max(1, crop.height * SAMPLE_BAND);
   // Drawing the band into a tiny canvas lets the rasterizer do the averaging.
   context.drawImage(
@@ -139,22 +139,18 @@ function readBottomBand(image: HTMLImageElement, frameAspect: number): RgbColor 
 
 /**
  * Average color of the bottom band of the region the thumbnail frame shows, or
- * null when the image cannot be loaded or read. Results are memoized per URL
- * so the surfaces that show the same capture decode it once.
+ * null when the image cannot be loaded or read. Every surface renders the
+ * capture in the same frame, so results are memoized per URL and the surfaces
+ * that show the same capture decode it once.
  */
-export function sampleSnapShotBottomColor(
-  src: string,
-  frameAspect = SNAP_SHOT_FRAME_ASPECT,
-): Promise<RgbColor | null> {
+export function sampleSnapShotBottomColor(src: string): Promise<RgbColor | null> {
   const cached = sampleCache.get(src);
   if (cached) return cached;
   const pending = new Promise<RgbColor | null>((resolve) => {
     const image = new Image();
     image.crossOrigin = "anonymous";
     image.decoding = "async";
-    image.addEventListener("load", () => resolve(readBottomBand(image, frameAspect)), {
-      once: true,
-    });
+    image.addEventListener("load", () => resolve(readBottomBand(image)), { once: true });
     image.addEventListener("error", () => resolve(null), { once: true });
     image.src = src;
   });
