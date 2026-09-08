@@ -117,8 +117,11 @@ function ZoomableImage({
     const onWheel = (event: WheelEvent) => {
       event.preventDefault();
       // macOS reports trackpad pinch as ctrl+wheel with small deltas. A plain
-      // wheel zooms too, since the dialog has nothing else to scroll.
-      const factor = wheelZoomFactor(event.ctrlKey ? event.deltaY * 3 : event.deltaY);
+      // wheel zooms too, since the dialog has nothing else to scroll. Firefox
+      // reports mouse wheels in lines, not pixels, so scale those up first.
+      const deltaY =
+        event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY * 16 : event.deltaY;
+      const factor = wheelZoomFactor(event.ctrlKey ? deltaY * 3 : deltaY);
       setZoom((current) => {
         const frame = zoomFrame(image, current);
         return zoomImageAt(current, factor, zoomAnchor(frame, event), frame);
