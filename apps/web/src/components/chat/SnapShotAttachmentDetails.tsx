@@ -216,10 +216,7 @@ export function SnapShotAttachmentDetails({
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium leading-3.5 text-foreground dark:text-white">
           <span className="truncate">{source.appName}</span>
-          <SnapShotContentsButton
-            source={source}
-            className="pointer-events-auto text-foreground/60 hover:bg-black/10 hover:text-foreground focus-visible:ring-foreground/70 dark:text-white/60 dark:hover:bg-white/10 dark:hover:text-white dark:focus-visible:ring-white/70"
-          />
+          <SnapShotContentsButton source={source} className="pointer-events-auto" />
         </div>
         <div className="truncate text-[9px] leading-3.5 text-foreground/70 dark:text-white/70">
           {source.windowTitle || "Captured window"}
