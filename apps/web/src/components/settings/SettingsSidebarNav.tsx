@@ -20,6 +20,7 @@ import {
   KeyboardIcon,
   Link2Icon,
   PaletteIcon,
+  PlayIcon,
   SearchIcon,
   Settings2Icon,
   XIcon,
@@ -52,11 +53,15 @@ import {
 } from "./settingsSectionVisibility";
 import {
   searchSettings,
+  isSettingsOverviewVisible,
+  settingsPageSections,
   SETTINGS_SECTION_LABELS,
   type SettingsPath,
   type SettingsSearchItem,
 } from "./settingsSearch";
 import { useAvailableSettingsSearchItems } from "./useAvailableSettingsSearchItems";
+import { validateSettingsScopeSearch } from "./settingsScope";
+import { useEnvironments } from "../../state/environments";
 
 const SnapShotIcon = createLucideIcon("snap-shot", [
   [
@@ -92,6 +97,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/providers": BotIcon,
   "/settings/integrations": BlocksIcon,
   "/settings/source-control": GitBranchIcon,
+  "/settings/actions": PlayIcon,
   "/settings/connections": Link2Icon,
   "/settings/archived": ArchiveIcon,
 };
@@ -105,34 +111,6 @@ const SETTINGS_NAV_ITEMS: ReadonlyArray<{
   label: SETTINGS_SECTION_LABELS[to],
   icon: SETTINGS_SECTION_ICONS[to],
 }));
-
-const SETTINGS_PAGE_SECTIONS: Partial<
-  Readonly<Record<SettingsPath, ReadonlyArray<{ label: string; targetId: string }>>>
-> = {
-  "/settings/general": [
-    { label: "Organization", targetId: "organization" },
-    { label: "Behavior", targetId: "behavior" },
-    { label: "Projects & threads", targetId: "projects-and-threads" },
-    { label: "Confirmations", targetId: "confirmations" },
-    { label: "Text generation", targetId: "text-generation" },
-    { label: "About", targetId: "about" },
-    { label: "Legacy features", targetId: "legacy-features" },
-  ],
-  "/settings/appearance": [
-    { label: "Colors & themes", targetId: "appearance" },
-    { label: "Interface", targetId: "appearance-interface" },
-    { label: "Motion", targetId: "motion" },
-    { label: "Typography", targetId: "typography" },
-  ],
-  "/settings/source-control": [
-    { label: "Version control", targetId: "source-control" },
-    { label: "Text generation", targetId: "source-control-text-generation" },
-  ],
-  "/settings/connections": [
-    { label: "This environment", targetId: "connections-environment" },
-    { label: "Remote environments", targetId: "remote-environments" },
-  ],
-};
 
 function SettingsSectionIcon({ to }: { to: SettingsPath }) {
   const Icon = SETTINGS_SECTION_ICONS[to];
@@ -158,6 +136,28 @@ function SettingsSubmenuCollapse({
 export function SettingsSidebarNav({ pathname }: { pathname: string }) {
   const navigate = useNavigate();
   const currentHash = useLocation({ select: (location) => location.hash });
+  const currentSearch = useLocation({ select: (location) => location.search });
+  const scopeSearch = useMemo(() => validateSettingsScopeSearch(currentSearch), [currentSearch]);
+  const { environments } = useEnvironments();
+  const sectionAvailability = useMemo(() => {
+    const targets = environments.filter(
+      (environment) =>
+        (scopeSearch.machine === undefined || environment.environmentId === scopeSearch.machine) &&
+        environment.connection.phase === "connected" &&
+        environment.serverConfig !== null,
+    );
+    return {
+      hasConnectedEnvironment: targets.length > 0,
+      hasThreadAutoSettlement:
+        targets.length > 0 &&
+        targets.every(
+          (environment) => environment.serverConfig?.environment.capabilities.threadAutoSettlement,
+        ),
+    };
+  }, [environments, scopeSearch.machine]);
+  const navItems = SETTINGS_NAV_ITEMS.filter(
+    (item) => item.to !== "/settings/projects" || isSettingsOverviewVisible(scopeSearch),
+  );
   const resolvedPathname = useRouterState({
     select: (state) => state.resolvedLocation?.pathname,
   });
@@ -180,9 +180,9 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
       (item) =>
         resolvedPathname === item.to || resolvedPathname?.startsWith(`${item.to}/`) === true,
     )?.to;
-    const pageSections = path ? SETTINGS_PAGE_SECTIONS[path] : undefined;
-    return path && pageSections ? { path, pageSections } : null;
-  }, [resolvedPathname]);
+    const pageSections = path ? settingsPageSections(path, scopeSearch, sectionAvailability) : [];
+    return path && pageSections.length > 0 ? { path, pageSections } : null;
+  }, [resolvedPathname, scopeSearch, sectionAvailability]);
   const visiblePageSectionIds = getVisibleSettingsSectionIds({
     activePath: activeSettingsPath,
     scope: observedVisibilityScope,
@@ -422,9 +422,13 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
             </SidebarMenu>
           ) : (
             <SidebarMenu className="ps-px">
-              {SETTINGS_NAV_ITEMS.map((item) => {
+              {navItems.map((item) => {
                 const Icon = item.icon;
-                const pageSections = SETTINGS_PAGE_SECTIONS[item.to];
+                const pageSections = settingsPageSections(
+                  item.to,
+                  scopeSearch,
+                  sectionAvailability,
+                );
                 const isActive = activeSettingsPath === item.to;
                 return (
                   <SidebarMenuItem key={item.to}>
@@ -435,7 +439,7 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                       <Icon />
                       <span className="truncate">{item.label}</span>
                     </SidebarMenuButton>
-                    {pageSections ? (
+                    {pageSections.length > 0 ? (
                       <SettingsSubmenuCollapse open={isActive}>
                         <SidebarMenuSub className="border-l-0">
                           {pageSections.map((section) => (
