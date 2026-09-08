@@ -201,21 +201,26 @@ export function SnapShotContentsButton({
 /**
  * Samples the thumbnail's bottom band so the overlay can extend the image in
  * its own tone. Null until the sample lands or when the pixels are unreadable.
+ * The result is keyed by URL so a thumbnail that swaps from its blob preview
+ * to the uploaded asset never wears the previous image's tone.
  */
 function useSnapShotOverlayTone(src: string | undefined): SnapShotOverlayTone | null {
-  const [tone, setTone] = useState<SnapShotOverlayTone | null>(null);
+  const [sample, setSample] = useState<{
+    readonly src: string;
+    readonly tone: SnapShotOverlayTone | null;
+  } | null>(null);
   useEffect(() => {
     if (src === undefined) return;
     let cancelled = false;
     void sampleSnapShotBottomColor(src).then((color) => {
       if (cancelled) return;
-      setTone(color === null ? null : snapShotOverlayTone(color));
+      setSample({ src, tone: color === null ? null : snapShotOverlayTone(color) });
     });
     return () => {
       cancelled = true;
     };
   }, [src]);
-  return src === undefined ? null : tone;
+  return sample !== null && sample.src === src ? sample.tone : null;
 }
 
 export function SnapShotAttachmentDetails({

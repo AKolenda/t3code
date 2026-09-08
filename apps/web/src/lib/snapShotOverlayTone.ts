@@ -28,7 +28,7 @@ const TEXT_LUMINANCE_THRESHOLD = 0.179;
 const SCRIM_PUSH = 0.35;
 
 /** Fraction of the image height, measured from the bottom, that the overlay covers. */
-export const SNAP_SHOT_SAMPLE_BAND = 0.3;
+const SAMPLE_BAND = 0.3;
 
 function relativeLuminance(color: RgbColor): number {
   const linearize = (channel: number) => {
@@ -90,7 +90,7 @@ function readBottomBand(image: HTMLImageElement): RgbColor | null {
   canvas.height = SAMPLE_HEIGHT;
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (context === null) return null;
-  const bandHeight = Math.max(1, Math.round(height * SNAP_SHOT_SAMPLE_BAND));
+  const bandHeight = Math.max(1, Math.round(height * SAMPLE_BAND));
   // Drawing the band into a tiny canvas lets the rasterizer do the averaging.
   context.drawImage(
     image,
