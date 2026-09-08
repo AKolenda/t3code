@@ -7232,6 +7232,11 @@ function ChatViewContent(props: ChatViewProps) {
         }
         composerDraftTarget={composerDraftTarget}
         onStateChange={handlePullRequestTabStatusChange}
+        onBack={
+          activeThreadRef !== null && supportsThreadPullRequests
+            ? addPullRequestsSurface
+            : undefined
+        }
       />
     ) : renderedRightPanelSurface?.kind === "pull-requests" && activeThreadRef ? (
       <ThreadPullRequestsPanel threadRef={activeThreadRef} />
