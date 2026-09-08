@@ -21,10 +21,10 @@ import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
 import * as Socket from "effect/unstable/socket/Socket";
 
-import { RelayConfiguration } from "../src/Config.ts";
+import * as RelayConfiguration from "../src/Config.ts";
 import { androidActivityData, fitFcmData } from "../src/agentActivity/fcmPayloads.ts";
-import { FcmClient, layer as fcmLayer } from "../src/agentActivity/FcmClient.ts";
-import { androidAlertForState } from "../src/agentActivity/FcmDeliveries.ts";
+import * as FcmClient from "../src/agentActivity/FcmClient.ts";
+import * as FcmDeliveries from "../src/agentActivity/FcmDeliveries.ts";
 import { makeAggregateState } from "../src/agentActivity/agentActivityAggregate.ts";
 
 const Device = Schema.Struct({
@@ -39,7 +39,7 @@ const Connection = Schema.Struct({
 });
 const readFile = (path: string) => Effect.tryPromise(() => NodeFSP.readFile(path, "utf8"));
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
-class WatchError extends Schema.TaggedErrorClass<WatchError>()("AndroidPushWatchError", {
+class WatchError extends Schema.TaggedError<WatchError>()("AndroidPushWatchError", {
   message: Schema.String,
 }) {}
 const preferences = {
@@ -76,11 +76,11 @@ const main = Effect.gen(function* () {
     Layer.provide(Socket.layerWebSocket(connection.wsUrl).pipe(Layer.provide(socketConstructor))),
     Layer.provide(RpcSerialization.layerJson),
   );
-  const fcm = fcmLayer.pipe(
+  const fcm = FcmClient.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         FetchHttpClient.layer,
-        Layer.succeed(RelayConfiguration, {
+        Layer.succeed(RelayConfiguration.RelayConfiguration, {
           relayIssuer: "http://localhost",
           apns: null,
           fcmServiceAccount: Redacted.make(credentials),
@@ -98,7 +98,7 @@ const main = Effect.gen(function* () {
   );
   yield* Effect.gen(function* () {
     const rpc = yield* RpcClient.make(WsRpcGroup);
-    const sender = yield* FcmClient;
+    const sender = yield* FcmClient.FcmClient;
     const config = yield* rpc[WS_METHODS.serverGetConfig]({});
     const projects = new Map<string, OrchestrationProjectShell>();
     const threads = new Map<string, OrchestrationThreadShell>();
@@ -147,7 +147,7 @@ const main = Effect.gen(function* () {
           const now = yield* Clock.currentTimeMillis;
           const alert =
             state && state.phase !== previous?.phase && item.kind !== "snapshot"
-              ? androidAlertForState(state, preferences, now)
+              ? FcmDeliveries.androidAlertForState(state, preferences, now)
               : null;
           const aggregate = makeAggregateState({
             activeStates: [...next.values()],

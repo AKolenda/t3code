@@ -621,3 +621,56 @@ describe("Android delivery routing", () => {
       expect(new TextDecoder().decode(new TextEncoder().encode(value))).toBe(value);
   });
 });
+
+describe("delivery policy regressions", () => {
+  it.effect("alerts a quick completion even with a previous unrelated card", () => {
+    const h = harness();
+    const old = { ...state, threadId: ThreadId.make("old"), phase: "completed" as const };
+    h.current.target.last_aggregate_json = encodeJson(aggregateFor([old]));
+    h.current.otherStates = [old];
+    h.current.state = { ...state, phase: "completed" };
+    return Effect.gen(function* () {
+      const d = yield* FcmDeliveries;
+      yield* d.process(h.job);
+      yield* d.process({ ...h.job, state: h.current.state });
+      expect(h.sent.filter((x) => x.alert)).toHaveLength(1);
+    }).pipe(Effect.provide(h.layer));
+  });
+  it.effect("a muted environment job cannot consume another environment's attention alert", () => {
+    const h = harness();
+    const other = {
+      ...state,
+      environmentId: EnvironmentId.make("other"),
+      threadId: ThreadId.make("other"),
+    };
+    h.current.target.last_aggregate_json = encodeJson(aggregateFor([state, other]));
+    h.current.otherStates = [{ ...other, phase: "waiting_for_input" }];
+    h.current.mutedEnvironments = [state.environmentId];
+    return Effect.gen(function* () {
+      const d = yield* FcmDeliveries;
+      yield* d.process(h.job);
+      yield* d.process({ ...h.job, state: h.current.otherStates[0]! });
+      expect(h.sent.filter((x) => x.alert)).toHaveLength(1);
+    }).pipe(Effect.provide(h.layer));
+  });
+  it("keeps an older waiting thread visible and alertable beyond five running rows", () => {
+    const running = Array.from({ length: 5 }, (_, i) => ({
+      ...state,
+      threadId: ThreadId.make(`running-${i}`),
+    }));
+    const waiting = {
+      ...state,
+      phase: "waiting_for_approval" as const,
+      updatedAt: "1969-12-31T23:59:00.000Z",
+    };
+    const next = aggregateFor([...running, waiting]);
+    expect(
+      androidAlertForAggregate({
+        previousAggregate: aggregateFor(running),
+        nextAggregate: next,
+        preferences,
+        nowMs: 0,
+      }),
+    ).not.toBeNull();
+  });
+});

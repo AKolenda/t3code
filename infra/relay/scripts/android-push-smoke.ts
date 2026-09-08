@@ -8,8 +8,8 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
-import { RelayConfiguration } from "../src/Config.ts";
-import { FcmClient, layer } from "../src/agentActivity/FcmClient.ts";
+import * as RelayConfiguration from "../src/Config.ts";
+import * as FcmClient from "../src/agentActivity/FcmClient.ts";
 
 const Device = Schema.Struct({
   token: Schema.NonEmptyString,
@@ -22,7 +22,7 @@ const decodeDevice = Schema.decodeUnknownEffect(Schema.fromJsonString(Device));
 const Phase = Schema.Literals(["running", "approval", "input", "completed", "failed", "end"]);
 const decodePhase = Schema.decodeUnknownEffect(Phase);
 
-class SmokeError extends Schema.TaggedErrorClass<SmokeError>()("SmokeError", {
+class SmokeError extends Schema.TaggedError<SmokeError>()("SmokeError", {
   message: Schema.String,
 }) {}
 
@@ -54,7 +54,7 @@ const main = Effect.gen(function* () {
             : null;
   const active = phase === "running" || phase === "approval" || phase === "input";
   const now = yield* Clock.currentTimeMillis;
-  const config: RelayConfiguration["Service"] = {
+  const config: RelayConfiguration.RelayConfiguration["Service"] = {
     relayIssuer: "http://localhost",
     fcmServiceAccount: Redacted.make(credentials),
     apns: null,
@@ -67,7 +67,7 @@ const main = Effect.gen(function* () {
     managedEndpointBaseDomain: undefined,
     managedEndpointNamespace: undefined,
   };
-  const result = yield* FcmClient.pipe(
+  const result = yield* FcmClient.FcmClient.pipe(
     Effect.flatMap((client) =>
       client.send({
         token: device.token,
@@ -101,9 +101,12 @@ const main = Effect.gen(function* () {
       }),
     ),
     Effect.provide(
-      layer.pipe(
+      FcmClient.layer.pipe(
         Layer.provide(
-          Layer.mergeAll(Layer.succeed(RelayConfiguration, config), FetchHttpClient.layer),
+          Layer.mergeAll(
+            Layer.succeed(RelayConfiguration.RelayConfiguration, config),
+            FetchHttpClient.layer,
+          ),
         ),
       ),
     ),

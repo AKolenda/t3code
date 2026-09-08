@@ -1,26 +1,23 @@
-import type {
-  RelayAgentActivityAggregateRow,
-  RelayAgentActivityAggregateState,
-} from "@t3tools/contracts/relay";
-import { TERMINAL_AGENT_ACTIVITY_DISPLAY_TTL_MS } from "./agentActivityAggregate.ts";
+import type { RelayAgentActivityAggregateState } from "@t3tools/contracts/relay";
+import {
+  activityPhasePriority,
+  TERMINAL_AGENT_ACTIVITY_DISPLAY_TTL_MS,
+} from "./agentActivityAggregate.ts";
 import { agentActivityExpiresAt } from "./agentActivityPayloads.ts";
 
-function priority(row: RelayAgentActivityAggregateRow): number {
-  if (row.phase === "waiting_for_approval" || row.phase === "waiting_for_input") return 0;
-  if (row.phase === "failed") return 1;
-  if (row.phase === "starting" || row.phase === "running") return 2;
-  return 3;
-}
-
 export function androidActivityHero(aggregate: RelayAgentActivityAggregateState) {
-  return [...aggregate.activities].sort((a, b) => priority(a) - priority(b))[0];
+  return [...aggregate.activities].sort(
+    (a, b) => activityPhasePriority(a.phase) - activityPhasePriority(b.phase),
+  )[0];
 }
 
 /** The expanded Android card uses the same rows and priority as the iOS widget. */
 export function androidActivityData(aggregate: RelayAgentActivityAggregateState | null) {
-  const rows = [...(aggregate?.activities ?? [])].sort((a, b) => priority(a) - priority(b));
+  const rows = [...(aggregate?.activities ?? [])].sort(
+    (a, b) => activityPhasePriority(a.phase) - activityPhasePriority(b.phase),
+  );
   const activeCount = aggregate?.activeCount ?? 0;
-  const attentionCount = rows.filter((row) => priority(row) === 0).length;
+  const attentionCount = rows.filter((row) => activityPhasePriority(row.phase) === 0).length;
   const failed = rows.some((row) => row.phase === "failed");
   const clean = (value: string) => value.replace(/\s+/g, " ").trim();
   const lines = rows.map((row) =>

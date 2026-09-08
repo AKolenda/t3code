@@ -8,7 +8,7 @@ import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
-import { RelayConfiguration } from "../Config.ts";
+import * as RelayConfiguration from "../Config.ts";
 
 const FCM_HTTP_STAGE_TIMEOUT = "10 seconds";
 
@@ -38,7 +38,7 @@ const decodeFcmError = Schema.decodeUnknownOption(
   }),
 );
 
-export class FcmClientError extends Schema.TaggedErrorClass<FcmClientError>()("FcmClientError", {
+export class FcmClientError extends Schema.TaggedError<FcmClientError>()("FcmClientError", {
   operation: Schema.Literals(["configuration", "authorize", "send"]),
   status: Schema.NullOr(Schema.Number),
 }) {
@@ -105,7 +105,7 @@ export const makeFcmAssertion = Effect.fn("relay.fcm.assertion")(function* (
 });
 
 export const make = Effect.gen(function* () {
-  const config = yield* RelayConfiguration;
+  const config = yield* RelayConfiguration.RelayConfiguration;
   const client = yield* HttpClient.HttpClient;
   const account = config.fcmServiceAccount
     ? decodeServiceAccount(Redacted.value(config.fcmServiceAccount))

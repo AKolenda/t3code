@@ -14,13 +14,13 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-import { RelayConfiguration } from "../Config.ts";
-import { RelayDb } from "../db.ts";
+import * as RelayConfiguration from "../Config.ts";
+import * as RelayDb from "../db.ts";
 import { relayMobileDevices } from "../persistence/schema.ts";
-import { EnvironmentLinks } from "../environments/EnvironmentLinks.ts";
-import { AgentActivityRows } from "./AgentActivityRows.ts";
-import { LiveActivities, type TargetRow } from "./LiveActivities.ts";
-import { FcmClient } from "./FcmClient.ts";
+import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
+import * as AgentActivityRows from "./AgentActivityRows.ts";
+import * as LiveActivities from "./LiveActivities.ts";
+import * as FcmClient from "./FcmClient.ts";
 import { androidActivityData, androidActivityHero, fitFcmData } from "./fcmPayloads.ts";
 import { makeAggregateState, statusForPhase } from "./agentActivityAggregate.ts";
 import { isExpiredAgentActivityState, notificationForActivity } from "./agentActivityPayloads.ts";
@@ -28,7 +28,7 @@ import {
   alertForActivityRows,
   attentionTransitionRows,
   terminalTransitionRows,
-  isFreshTerminalNotification,
+  shouldAlertForActivity,
 } from "./agentActivityAlerts.ts";
 
 export const FcmDeliveryJob = Schema.Struct({
@@ -47,13 +47,10 @@ const decodePreviousActivity = Schema.decodeUnknownOption(
   Schema.fromJsonString(RelayAgentActivityAggregateState),
 );
 
-export class FcmDeliveryError extends Schema.TaggedErrorClass<FcmDeliveryError>()(
-  "FcmDeliveryError",
-  {
-    operation: Schema.Literals(["enqueue", "process"]),
-    cause: Schema.Defect(),
-  },
-) {
+export class FcmDeliveryError extends Schema.TaggedError<FcmDeliveryError>()("FcmDeliveryError", {
+  operation: Schema.Literals(["enqueue", "process"]),
+  cause: Schema.Defect(),
+}) {
   override get message() {
     return `Failed to ${this.operation} Android notification delivery.`;
   }
@@ -70,7 +67,7 @@ export class FcmDeliveries extends Context.Service<
   FcmDeliveries,
   {
     readonly enqueue: (input: {
-      readonly target: TargetRow;
+      readonly target: LiveActivities.TargetRow;
       readonly state: RelayAgentActivityState | null;
     }) => Effect.Effect<RelayDeliveryResult | null, FcmDeliveryError>;
     readonly process: (body: unknown) => Effect.Effect<void, FcmDeliveryError>;
@@ -82,18 +79,7 @@ export function androidAlertForState(
   preferences: RelayAgentAwarenessPreferences,
   nowMs: number,
 ) {
-  if (!preferences.notificationsEnabled) return null;
-  if (
-    (state.phase === "completed" || state.phase === "failed") &&
-    !isFreshTerminalNotification(state.updatedAt, nowMs)
-  )
-    return null;
-  const enabled =
-    (state.phase === "waiting_for_approval" && preferences.notifyOnApproval) ||
-    (state.phase === "waiting_for_input" && preferences.notifyOnInput) ||
-    (state.phase === "completed" && preferences.notifyOnCompletion) ||
-    (state.phase === "failed" && preferences.notifyOnFailure);
-  if (!enabled) return null;
+  if (!shouldAlertForActivity({ ...state, preferences, nowMs })) return null;
   const notification = notificationForActivity({ ...state, status: statusForPhase(state.phase) });
   return {
     alert_id: JSON.stringify([state.environmentId, state.threadId, state.phase, state.updatedAt]),
@@ -111,7 +97,10 @@ export function androidAlertForAggregate(input: {
 }) {
   if (!input.preferences.notificationsEnabled) return null;
   const attention = attentionTransitionRows(input);
-  const activities = attention.length > 0 ? attention : terminalTransitionRows(input);
+  const activities =
+    attention.length > 0
+      ? attention
+      : terminalTransitionRows({ ...input, includeUnobserved: true });
   const first = activities[0];
   const alert = alertForActivityRows(activities);
   if (!first || !alert) return null;
@@ -139,13 +128,13 @@ export function androidAlertForAggregate(input: {
 }
 
 export const make = Effect.gen(function* () {
-  const config = yield* RelayConfiguration;
+  const config = yield* RelayConfiguration.RelayConfiguration;
   const sender = yield* FcmDeliveryQueueSender;
-  const client = yield* FcmClient;
-  const devices = yield* LiveActivities;
-  const rows = yield* AgentActivityRows;
-  const links = yield* EnvironmentLinks;
-  const db = yield* RelayDb;
+  const client = yield* FcmClient.FcmClient;
+  const devices = yield* LiveActivities.LiveActivities;
+  const rows = yield* AgentActivityRows.AgentActivityRows;
+  const links = yield* EnvironmentLinks.EnvironmentLinks;
+  const db = yield* RelayDb.RelayDb;
 
   return FcmDeliveries.of({
     enqueue: Effect.fn("relay.fcm.enqueue")(function* (input) {
@@ -233,22 +222,12 @@ export const make = Effect.gen(function* () {
               })
             : [];
           const deliveryUser = deliveryUsers.find((user) => user.userId === job.userId);
-          if (
-            deliveryUser?.notificationsEnabled &&
-            deliveryUser.liveActivitiesEnabled &&
-            preferences.value.liveActivitiesEnabled &&
-            previousAggregate &&
-            aggregate
-          ) {
+          if (preferences.value.liveActivitiesEnabled && previousAggregate && aggregate) {
             const environmentIds = [
               ...new Set(aggregate.activities.map((row) => row.environmentId)),
             ];
             const allowedEnvironments = new Set<string>();
             for (const environmentId of environmentIds) {
-              if (environmentId === job.state.environmentId) {
-                allowedEnvironments.add(environmentId);
-                continue;
-              }
               const environmentLink = yield* links.getForUser({
                 userId: job.userId,
                 environmentId,
