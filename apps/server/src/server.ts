@@ -385,6 +385,7 @@ const PreviewLayerLive = Layer.empty.pipe(
 );
 
 const DeviceLayerLive = DeviceService.layer.pipe(
+  Layer.provide(ServerSettingsLayerLive),
   Layer.provide(ProcessRunner.layer),
   Layer.provide(NetService.layer),
 );

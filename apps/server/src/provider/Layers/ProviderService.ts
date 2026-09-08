@@ -257,7 +257,10 @@ export interface ProviderServiceLiveOptions {
   /** Same seam as `issueMcpCredential`, for observing the deny path's revoke. */
   readonly revokeMcpCredential?: typeof McpSessionRegistry.revokeActiveMcpThread;
   /** Overrides the device host lookup used to build the agent-device environment. */
-  readonly deviceReadiness?: () => Effect.Effect<DeviceService.DeviceReadiness | null, unknown>;
+  readonly deviceReadiness?: () => Effect.Effect<
+    DeviceService.DeviceAgentReadiness | null,
+    unknown
+  >;
 }
 
 interface TurnAnalyticsMetadata {
@@ -493,7 +496,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     (() =>
       Effect.serviceOption(DeviceService.DeviceService).pipe(
         Effect.flatMap((service) =>
-          Option.isSome(service) ? service.value.readinessIfSupported() : Effect.succeed(null),
+          Option.isSome(service) ? service.value.agentReadinessIfSupported() : Effect.succeed(null),
         ),
       ));
   const fileSystem = yield* FileSystem.FileSystem;
@@ -915,14 +918,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     ),
   );
 
-  const agentAccessCapabilities = Effect.fn("ProviderService.agentAccessCapabilities")(
-    function* (threadId: ThreadId) {
-      const capabilities = new Set<McpInvocationContext.McpCapability>();
-      if (yield* agentBrowserAccessEnabled(threadId)) capabilities.add("preview");
-      if (yield* agentDeviceAccessEnabled) capabilities.add("device");
-      return capabilities;
-    },
-  );
+  const agentAccessCapabilities = Effect.fn("ProviderService.agentAccessCapabilities")(function* (
+    threadId: ThreadId,
+  ) {
+    const capabilities = new Set<McpInvocationContext.McpCapability>();
+    if (yield* agentBrowserAccessEnabled(threadId)) capabilities.add("preview");
+    if (yield* agentDeviceAccessEnabled) capabilities.add("device");
+    return capabilities;
+  });
 
   /**
    * Starting a session with device access also brings the device host up, so
