@@ -2,9 +2,11 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Animated, FlatList, Modal, Pressable, View } from "react-native";
 import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
+import Reanimated, { ReduceMotion, useAnimatedStyle, withTiming } from "react-native-reanimated";
+import { threadDragGapOffset } from "./threadDragGap";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/AppText";
@@ -40,6 +42,33 @@ type Drag = {
   translation: number;
   destination: Destination | null;
 };
+
+function ArrangementRow(props: {
+  height: number;
+  offset: number;
+  lifted: boolean;
+  dragging: boolean;
+  children: ReactNode;
+}) {
+  const style = useAnimatedStyle(() => ({
+    transform: [
+      {
+        translateY: props.dragging
+          ? withTiming(props.offset, { duration: 160, reduceMotion: ReduceMotion.System })
+          : props.offset,
+      },
+    ],
+    opacity: props.lifted ? 0 : 1,
+  }));
+  return (
+    <Reanimated.View
+      style={[{ height: props.height }, style]}
+      className="flex-row items-center border-b border-border-subtle px-5"
+    >
+      {props.children}
+    </Reanimated.View>
+  );
+}
 
 /** Native pan recognition wins over list scrolling only inside the handle. */
 function DragHandle(props: {
@@ -258,7 +287,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
     }
   }
   function start(row: Row) {
-    if (!row.thread) return;
+    if (!row.thread || preview !== null) return;
     drag.current = {
       thread: row.thread,
       startY: row.offset + ROW_HEIGHT / 2 - geometry.current.offset,
@@ -294,6 +323,19 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
     };
     frame.current = requestAnimationFrame(tick);
   }
+  const sourceRow = preview ? rows.find((row) => row.key === keyOf(preview.thread)) : undefined;
+  const destination = preview?.destination;
+  const targetRow = destination
+    ? rows.find(
+        (row) =>
+          row.section === destination.section &&
+          row.key === (destination.targetId ?? destination.section),
+      )
+    : undefined;
+  const insertionOffset = targetRow
+    ? targetRow.offset +
+      (!targetRow.thread || destination?.placement === "after" ? targetRow.height : 0)
+    : sourceRow?.offset;
   return (
     <Modal
       visible
@@ -343,29 +385,29 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
               })}
               renderItem={({ item }) => {
                 const thread = item.thread;
-                const insertion =
-                  preview?.destination?.section === item.section &&
-                  preview.destination.targetId === (thread ? item.key : null)
-                    ? preview.destination.placement
-                    : null;
                 const planner =
                   item.section === "pinned" || item.section === "active"
                     ? planners[item.section]
                     : null;
                 return (
-                  <View
-                    style={{ height: item.height }}
-                    className="flex-row items-center border-b border-border-subtle px-5"
+                  <ArrangementRow
+                    height={item.height}
+                    dragging={preview !== null}
+                    lifted={item.key === sourceRow?.key}
+                    offset={
+                      sourceRow && insertionOffset !== undefined
+                        ? threadDragGapOffset(
+                            item.offset,
+                            sourceRow.offset,
+                            sourceRow.height,
+                            insertionOffset,
+                          )
+                        : 0
+                    }
                   >
                     {thread ? (
                       <>
-                        <Text
-                          numberOfLines={2}
-                          className="flex-1 text-base"
-                          style={{
-                            opacity: item.key === (preview && keyOf(preview.thread)) ? 0.3 : 1,
-                          }}
-                        >
+                        <Text numberOfLines={2} className="flex-1 text-base">
                           {thread.title}
                         </Text>
                         <DragHandle
@@ -389,9 +431,15 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                           onMove={update}
                           onEnd={(cancelled) => {
                             const current = drag.current;
-                            stop();
-                            if (!cancelled && current?.destination)
-                              void moveThread(current.thread, current.destination);
+                            if (cancelled || !current?.destination) {
+                              stop();
+                              return;
+                            }
+                            if (frame.current !== null) cancelAnimationFrame(frame.current);
+                            frame.current = null;
+                            drag.current = null;
+                            // Retain the gap until the saved order arrives, avoiding a flash back.
+                            void moveThread(current.thread, current.destination).finally(stop);
                           }}
                         />
                       </>
@@ -411,14 +459,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                         </Text>
                       </Pressable>
                     )}
-                    {insertion ? (
-                      <View
-                        pointerEvents="none"
-                        className="absolute left-5 right-5 h-0.5 bg-primary"
-                        style={insertion === "before" && thread ? { top: 0 } : { bottom: 0 }}
-                      />
-                    ) : null}
-                  </View>
+                  </ArrangementRow>
                 );
               }}
             />
