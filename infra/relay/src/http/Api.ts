@@ -650,6 +650,12 @@ export const clientApi = HttpApiBuilder.group(
                 reason: "link_persistence_failed",
                 traceId,
               }),
+            EnvironmentLinkLookupPersistenceError: (_error, traceId) =>
+              new RelayEnvironmentLinkFailedError({
+                code: "environment_link_failed",
+                reason: "link_persistence_failed",
+                traceId,
+              }),
             EnvironmentLinkLeaseConflict: (_error, traceId) =>
               new RelayEnvironmentLinkFailedError({
                 code: "environment_link_failed",

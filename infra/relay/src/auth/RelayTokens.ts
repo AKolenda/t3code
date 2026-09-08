@@ -165,8 +165,11 @@ const make = Effect.gen(function* () {
           (input.request.notificationsEnabled && claims.notificationsEnabled !== true) ||
           (input.request.liveActivitiesEnabled && claims.liveActivitiesEnabled !== true) ||
           (input.request.managedTunnelsEnabled && claims.managedTunnelsEnabled !== true) ||
+          // A client that predates provider negotiation omits the field;
+          // treat it as the Cloudflare default so its challenge still verifies.
           (claims.managedEndpointProvider !== undefined &&
-            input.managedEndpointProvider !== claims.managedEndpointProvider)
+            (input.managedEndpointProvider ?? "cloudflare_tunnel") !==
+              claims.managedEndpointProvider)
         ) {
           return null;
         }

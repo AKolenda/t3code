@@ -163,6 +163,9 @@ export class RelayTransportMessageAssembler {
       this.delete(frame.streamId);
       throw new TypeError("Relay transport message changed frame kind before completion.");
     }
+    if (partial === undefined && this.#messages.size >= RELAY_TRANSPORT_MAX_CONCURRENT_STREAMS) {
+      throw new RangeError("Relay transport has too many fragmented messages in progress.");
+    }
     const message = partial ?? {
       kind: frame.kind,
       chunks: [],

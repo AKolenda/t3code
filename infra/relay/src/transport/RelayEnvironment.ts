@@ -497,7 +497,10 @@ export default class RelayEnvironment extends Cloudflare.DurableObject<RelayEnvi
             // host never sends body frames for those, so drain the queue
             // rather than handing the runtime a stream it cannot attach.
             if (responseStatusForbidsBody(response.status)) {
-              yield* Stream.runDrain(responseStream);
+              // Bounded so a connector that never sends http_response_end
+              // cannot pin this invocation; the timeout runs the stream's
+              // ensuring cleanup, which aborts the request on the host.
+              yield* Stream.runDrain(responseStream).pipe(Effect.timeoutOption("30 seconds"));
               return HttpServerResponse.empty({
                 status: response.status,
                 headers: response.headers,
@@ -702,7 +705,7 @@ export default class RelayEnvironment extends Cloudflare.DurableObject<RelayEnvi
               );
             }
           }
-          yield* socket.close(code, reason);
+          yield* socket.close(normalizeRelayWebSocketCloseCode(code), reason);
         }),
       };
     });

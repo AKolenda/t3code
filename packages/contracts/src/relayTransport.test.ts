@@ -11,6 +11,7 @@ import {
   RELAY_TRANSPORT_FRAME_HEADER_BYTES,
   RELAY_TRANSPORT_MAX_FRAME_PAYLOAD_BYTES,
   RELAY_TRANSPORT_MAX_BUFFERED_MESSAGE_BYTES,
+  RELAY_TRANSPORT_MAX_CONCURRENT_STREAMS,
   RELAY_TRANSPORT_MAX_MESSAGE_FRAGMENTS,
   RELAY_TRANSPORT_MAX_MESSAGE_BYTES,
   RelayTransportMessageAssembler,
@@ -128,17 +129,25 @@ describe("relay transport frames", () => {
   it("bounds aggregate fragmented bytes across streams", () => {
     const assembler = new RelayTransportMessageAssembler();
     const payload = new Uint8Array(RELAY_TRANSPORT_MAX_FRAME_PAYLOAD_BYTES);
-    const bufferedStreams =
-      RELAY_TRANSPORT_MAX_BUFFERED_MESSAGE_BYTES / RELAY_TRANSPORT_MAX_FRAME_PAYLOAD_BYTES;
+    // Fill the shared buffer with fewer streams than the stream cap so this
+    // exercises the byte bound rather than the stream bound.
+    const bufferedStreams = RELAY_TRANSPORT_MAX_CONCURRENT_STREAMS / 2;
+    const framesPerStream =
+      RELAY_TRANSPORT_MAX_BUFFERED_MESSAGE_BYTES /
+      RELAY_TRANSPORT_MAX_FRAME_PAYLOAD_BYTES /
+      bufferedStreams;
     for (let streamId = 1; streamId <= bufferedStreams; streamId += 1) {
-      expect(
-        assembler.append({
-          kind: RelayTransportFrameKind.websocketBinary,
-          streamId,
-          endOfMessage: false,
-          payload,
-        }),
-      ).toBeNull();
+      for (let index = 0; index < framesPerStream; index += 1) {
+        expect(
+          assembler.append({
+            kind: RelayTransportFrameKind.websocketBinary,
+            streamId,
+            endOfMessage: false,
+            continuation: index > 0,
+            payload,
+          }),
+        ).toBeNull();
+      }
     }
     expect(() =>
       assembler.append({
@@ -148,6 +157,26 @@ describe("relay transport frames", () => {
         payload: Uint8Array.of(1),
       }),
     ).toThrow(/buffer exceeds/u);
+  });
+
+  it("bounds the number of streams with a partial message", () => {
+    const assembler = new RelayTransportMessageAssembler();
+    for (let streamId = 1; streamId <= RELAY_TRANSPORT_MAX_CONCURRENT_STREAMS; streamId += 1) {
+      assembler.append({
+        kind: RelayTransportFrameKind.websocketBinary,
+        streamId,
+        endOfMessage: false,
+        payload: Uint8Array.of(1),
+      });
+    }
+    expect(() =>
+      assembler.append({
+        kind: RelayTransportFrameKind.websocketBinary,
+        streamId: RELAY_TRANSPORT_MAX_CONCURRENT_STREAMS + 1,
+        endOfMessage: false,
+        payload: Uint8Array.of(1),
+      }),
+    ).toThrow(/too many fragmented messages/u);
   });
 
   it("bounds fragment count even when fragments are small", () => {
