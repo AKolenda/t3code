@@ -50,15 +50,16 @@ function ArrangementRow(props: {
   dragging: boolean;
   children: ReactNode;
 }) {
+  const { dragging, offset, lifted } = props;
   const style = useAnimatedStyle(() => ({
     transform: [
       {
-        translateY: props.dragging
-          ? withTiming(props.offset, { duration: 160, reduceMotion: ReduceMotion.System })
-          : props.offset,
+        translateY: dragging
+          ? withTiming(offset, { duration: 160, reduceMotion: ReduceMotion.System })
+          : offset,
       },
     ],
-    opacity: props.lifted ? 0 : 1,
+    opacity: lifted ? 0 : 1,
   }));
   return (
     <Reanimated.View
