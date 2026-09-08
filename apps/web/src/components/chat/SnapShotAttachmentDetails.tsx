@@ -1,9 +1,15 @@
 import type { SnapShotSource } from "@t3tools/contracts";
 import { ImageIcon, TextIcon } from "lucide-react";
-import { Suspense, use, useMemo, type CSSProperties } from "react";
+import { Suspense, use, useEffect, useMemo, useState, type CSSProperties } from "react";
 
 import { useTheme } from "../../hooks/useTheme";
 import { resolveDiffThemeName } from "../../lib/diffRendering";
+import {
+  rgbCss,
+  sampleSnapShotBottomColor,
+  snapShotOverlayTone,
+  type SnapShotOverlayTone,
+} from "../../lib/snapShotOverlayTone";
 import { getSyntaxHighlighterPromise } from "../../lib/syntaxHighlighting";
 import { cn } from "../../lib/utils";
 import { RenderErrorBoundary } from "../RenderErrorBoundary";
@@ -192,33 +198,76 @@ export function SnapShotContentsButton({
   );
 }
 
+/**
+ * Samples the thumbnail's bottom band so the overlay can extend the image in
+ * its own tone. Null until the sample lands or when the pixels are unreadable.
+ */
+function useSnapShotOverlayTone(src: string | undefined): SnapShotOverlayTone | null {
+  const [tone, setTone] = useState<SnapShotOverlayTone | null>(null);
+  useEffect(() => {
+    if (src === undefined) return;
+    let cancelled = false;
+    void sampleSnapShotBottomColor(src).then((color) => {
+      if (cancelled) return;
+      setTone(color === null ? null : snapShotOverlayTone(color));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
+  return src === undefined ? null : tone;
+}
+
 export function SnapShotAttachmentDetails({
   source,
+  src,
   className,
 }: {
   source: SnapShotSource;
+  /** Thumbnail URL the overlay sits on; sampled for the overlay's tone. */
+  src?: string | undefined;
   className?: string;
 }) {
+  const tone = useSnapShotOverlayTone(src);
+  const style = useMemo<CSSProperties | undefined>(
+    () =>
+      tone === null
+        ? undefined
+        : ({
+            "--snap-shot-scrim": rgbCss(tone.scrim),
+            "--snap-shot-scrim-mid": rgbCss(tone.scrim, 0.7),
+            "--snap-shot-text": rgbCss(tone.text),
+            "--snap-shot-text-muted": rgbCss(tone.text, 0.72),
+            "--snap-shot-badge": rgbCss(tone.text, 0.14),
+          } as CSSProperties),
+    [tone],
+  );
   return (
     <div
+      style={style}
       className={cn(
-        "pointer-events-none absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1.5 bg-linear-to-t from-white/85 via-white/55 to-transparent px-2.5 pb-2 pt-6 dark:from-black/85 dark:via-black/55",
+        "pointer-events-none absolute inset-x-0 bottom-0 flex min-w-0 items-center gap-1.5 px-2.5 pb-2 pt-6",
+        "[--snap-shot-scrim:rgb(0_0_0)] [--snap-shot-scrim-mid:rgb(0_0_0/70%)] [--snap-shot-text:rgb(255_255_255)] [--snap-shot-text-muted:rgb(255_255_255/72%)] [--snap-shot-badge:rgb(255_255_255/14%)]",
+        "bg-linear-to-t from-(--snap-shot-scrim) via-(--snap-shot-scrim-mid) to-transparent text-(--snap-shot-text)",
         className,
       )}
     >
       {source.appIconDataUrl ? (
         <img src={source.appIconDataUrl} alt="" className="size-7 shrink-0 rounded-md" />
       ) : (
-        <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-black/10 text-[10px] font-medium text-foreground uppercase dark:bg-white/20 dark:text-white">
+        <div className="flex size-7 shrink-0 items-center justify-center rounded-md bg-(--snap-shot-badge) text-[10px] font-medium uppercase">
           {source.appName.slice(0, 1)}
         </div>
       )}
       <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium leading-3.5 text-foreground dark:text-white">
+        <div className="flex min-w-0 items-center gap-1.5 text-[11px] font-medium leading-3.5">
           <span className="truncate">{source.appName}</span>
-          <SnapShotContentsButton source={source} className="pointer-events-auto" />
+          <SnapShotContentsButton
+            source={source}
+            className="pointer-events-auto text-(--snap-shot-text-muted) hover:bg-(--snap-shot-badge) hover:text-(--snap-shot-text)"
+          />
         </div>
-        <div className="truncate text-[9px] leading-3.5 text-foreground/70 dark:text-white/70">
+        <div className="truncate text-[9px] leading-3.5 text-(--snap-shot-text-muted)">
           {source.windowTitle || "Captured window"}
         </div>
       </div>

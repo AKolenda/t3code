@@ -5265,6 +5265,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                             {image.source?.kind === "snap-shot" ? (
                               <SnapShotAttachmentDetails
                                 source={image.source}
+                                src={image.previewUrl}
                                 className={cn(
                                   upload?.status === "uploading" && "bottom-4",
                                   upload?.status === "failed" && "bottom-8",

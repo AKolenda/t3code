@@ -1380,7 +1380,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
                   </div>
                 )}
                 {image.previewUrl && image.source?.kind === "snap-shot" ? (
-                  <SnapShotAttachmentDetails source={image.source} />
+                  <SnapShotAttachmentDetails source={image.source} src={image.previewUrl} />
                 ) : null}
               </div>
             ))}
