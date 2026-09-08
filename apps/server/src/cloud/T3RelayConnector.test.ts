@@ -15,6 +15,7 @@ import {
 import {
   T3RelayConnectorSession,
   type RelayConnectorSocket,
+  type RelayConnectorSocketOptions,
   type T3RelayConnectorLifecycleEvent,
 } from "./T3RelayConnector.ts";
 
@@ -642,6 +643,49 @@ describe("T3RelayConnectorSession", () => {
       ]),
     });
     expect(controls.at(-1)).toEqual({ type: "http_response_end" });
+  });
+
+  it("forwards upgrade headers such as the session cookie to the loopback WebSocket", async () => {
+    const sockets: Array<TestSocket> = [];
+    const socketOptions: Array<RelayConnectorSocketOptions | undefined> = [];
+    const session = new T3RelayConnectorSession(
+      {
+        connectorUrl: "wss://endpoint.edge.test/.well-known/t3-relay/connect",
+        connectorToken: "token",
+        originUrl: "http://127.0.0.1:7331/",
+      },
+      (_url, options) => {
+        const socket = new TestSocket();
+        sockets.push(socket);
+        socketOptions.push(options);
+        return socket;
+      },
+      connectorTicketResponse,
+    );
+    session.start();
+    await waitForConnector();
+    readyConnector(sockets[0]!);
+    sockets[0]!.message(
+      encodeRelayTransportControlFrame(9, {
+        type: "websocket_open",
+        url: "wss://endpoint.edge.test/ws?clientSurface=web",
+        headers: [
+          ["cookie", "t3_session=abc"],
+          ["origin", "https://endpoint.edge.test"],
+          ["host", "endpoint.edge.test"],
+          ["sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="],
+          ["sec-websocket-version", "13"],
+          ["upgrade", "websocket"],
+          ["connection", "Upgrade"],
+        ],
+        protocols: [],
+      }),
+    );
+
+    expect(socketOptions[1]?.headers).toEqual({
+      cookie: "t3_session=abc",
+      origin: "https://endpoint.edge.test",
+    });
   });
 
   it("forwards decoded bodies without the origin's content-encoding headers", async () => {

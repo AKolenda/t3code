@@ -36,6 +36,15 @@ export interface RelayConnectorSocket {
   ): void;
 }
 
+export interface RelayConnectorSocketOptions {
+  readonly headers?: Record<string, string>;
+}
+
+export type RelayConnectorSocketFactory = (
+  url: string,
+  options?: RelayConnectorSocketOptions,
+) => RelayConnectorSocket;
+
 export interface T3RelayConnectorConfig {
   readonly connectorUrl: string;
   readonly connectorToken: string;
@@ -122,6 +131,33 @@ function closeSocket(socket: RelayConnectorSocket | null, code: number, reason: 
   }
 }
 
+const WEBSOCKET_HANDSHAKE_HEADERS = new Set([
+  "connection",
+  "host",
+  "keep-alive",
+  "proxy-connection",
+  "sec-websocket-accept",
+  "sec-websocket-extensions",
+  "sec-websocket-key",
+  "sec-websocket-protocol",
+  "sec-websocket-version",
+  "transfer-encoding",
+  "upgrade",
+  "x-t3-relay-connection-role",
+]);
+
+function relayUpgradeHeaders(
+  headers: ReadonlyArray<readonly [string, string]>,
+): Record<string, string> {
+  const forwarded: Record<string, string> = {};
+  for (const [name, value] of headers) {
+    const lower = name.toLowerCase();
+    if (WEBSOCKET_HANDSHAKE_HEADERS.has(lower)) continue;
+    forwarded[lower] = lower in forwarded ? `${forwarded[lower]}, ${value}` : value;
+  }
+  return forwarded;
+}
+
 function localWebSocketUrl(originUrl: string, publicUrl: string): string {
   const origin = new URL(originUrl);
   const target = new URL(publicUrl);
@@ -159,7 +195,7 @@ function relayResponseHeaders(headers: Headers): ReadonlyArray<readonly [string,
 
 export class T3RelayConnectorSession {
   readonly #config: T3RelayConnectorConfig;
-  readonly #makeSocket: (url: string) => RelayConnectorSocket;
+  readonly #makeSocket: RelayConnectorSocketFactory;
   readonly #fetch: RelayConnectorFetch;
   readonly #observer: T3RelayConnectorObserver;
   readonly #localSockets = new Map<number, RelayConnectorSocket>();
@@ -181,7 +217,7 @@ export class T3RelayConnectorSession {
 
   constructor(
     config: T3RelayConnectorConfig,
-    makeSocket: (url: string) => RelayConnectorSocket = (url) => new WebSocket(url),
+    makeSocket: RelayConnectorSocketFactory = (url, options) => new WebSocket(url, options),
     fetcher: RelayConnectorFetch = fetch,
     observer: T3RelayConnectorObserver = () => undefined,
   ) {
@@ -420,13 +456,22 @@ export class T3RelayConnectorSession {
     }
   }
 
-  #openLocal(streamId: number, publicUrl: string): void {
+  // Browser clients authenticate the /ws upgrade with the session cookie, so
+  // the upgrade headers the edge captured must reach the loopback server.
+  // Node's WebSocket manages the handshake and host headers itself.
+  #openLocal(
+    streamId: number,
+    publicUrl: string,
+    upgradeHeaders: ReadonlyArray<readonly [string, string]>,
+  ): void {
     if (this.#localSockets.has(streamId)) {
       return;
     }
     let local: RelayConnectorSocket;
     try {
-      local = this.#makeSocket(localWebSocketUrl(this.#config.originUrl, publicUrl));
+      local = this.#makeSocket(localWebSocketUrl(this.#config.originUrl, publicUrl), {
+        headers: relayUpgradeHeaders(upgradeHeaders),
+      });
     } catch (cause) {
       this.#sendEdge(
         encodeRelayTransportControlFrame(streamId, {
@@ -587,7 +632,7 @@ export class T3RelayConnectorSession {
       if (frame.streamId === 0) return control.success.type === "connector_ready";
       if (!this.#edgeReady) return false;
       if (control.success.type === "websocket_open") {
-        this.#openLocal(frame.streamId, control.success.url);
+        this.#openLocal(frame.streamId, control.success.url, control.success.headers);
       } else if (control.success.type === "websocket_close") {
         const local = this.#localSockets.get(frame.streamId);
         this.#localSockets.delete(frame.streamId);
