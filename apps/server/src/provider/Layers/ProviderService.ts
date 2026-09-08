@@ -257,10 +257,7 @@ export interface ProviderServiceLiveOptions {
   /** Same seam as `issueMcpCredential`, for observing the deny path's revoke. */
   readonly revokeMcpCredential?: typeof McpSessionRegistry.revokeActiveMcpThread;
   /** Overrides the device host lookup used to build the agent-device environment. */
-  readonly deviceReadiness?: () => Effect.Effect<
-    DeviceService.DeviceAgentReadiness | null,
-    unknown
-  >;
+  readonly deviceReadiness?: DeviceService.DeviceService["Service"]["agentReadinessIfSupported"];
 }
 
 interface TurnAnalyticsMetadata {
