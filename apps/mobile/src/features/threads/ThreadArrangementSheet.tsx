@@ -1,7 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
+import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Animated, FlatList, Modal, PanResponder, Platform, Pressable, View } from "react-native";
+import { Animated, FlatList, Modal, Pressable, View } from "react-native";
+import { Gesture, GestureDetector, GestureHandlerRootView } from "react-native-gesture-handler";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/AppText";
@@ -9,27 +11,37 @@ import { SymbolView } from "../../components/AppSymbol";
 import { scopedThreadKey } from "../../lib/scopedEntities";
 import { environmentServerConfigsAtom } from "../../state/server";
 import { environmentThreadShells } from "../../state/threads";
-import { pendingThreadOrderAtom } from "../../state/thread-order";
+import { pendingThreadOrderAtom, threadDropBusyAtom } from "../../state/thread-order";
 import { queuedThreadKeysAtom } from "../../state/use-thread-outbox";
 import { useThreadListActions } from "../home/useThreadListActions";
 import { createThreadMovePlanner, type ThreadMoveDestination } from "./threadOrder";
 import { getThreadListV2OrderedSection } from "./threadListV2";
 
 const ROW_HEIGHT = 72;
+const HEADER_HEIGHT = 48;
 const keyOf = (thread: EnvironmentThreadShell) => scopedThreadKey(thread.environmentId, thread.id);
-
+type Section = "pinned" | "active" | "snoozed" | "settled";
+type Destination = Exclude<ThreadMoveDestination, string>;
+type Row = {
+  key: string;
+  section: Section;
+  thread?: EnvironmentThreadShell;
+  offset: number;
+  height: number;
+};
 type Drag = {
   thread: EnvironmentThreadShell;
-  destination: Exclude<ThreadMoveDestination, string> | null;
-  candidate: string | null;
+  startY: number;
+  translation: number;
+  destination: Destination | null;
 };
 
-/** A handle owns its touch from the start; touches on the row still scroll. */
+/** Native pan recognition wins over list scrolling only inside the handle. */
 function DragHandle(props: {
   title: string;
   disabled: boolean;
-  onStart: (pageY: number) => void;
-  onMove: (pageY: number) => void;
+  onStart: () => void;
+  onMove: (translation: number) => void;
   onEnd: (cancelled: boolean) => void;
   onStep: (direction: "up" | "down") => void;
   canMoveUp: boolean;
@@ -37,55 +49,64 @@ function DragHandle(props: {
 }) {
   const latest = useRef(props);
   latest.current = props;
-  const responder = useMemo(
+  const gesture = useMemo(
     () =>
-      PanResponder.create({
-        onStartShouldSetPanResponder: () => !latest.current.disabled,
-        onPanResponderGrant: (event) => latest.current.onStart(event.nativeEvent.pageY),
-        onPanResponderMove: (_, gesture) => latest.current.onMove(gesture.moveY),
-        onPanResponderRelease: () => latest.current.onEnd(false),
-        onPanResponderTerminate: () => latest.current.onEnd(true),
-        onPanResponderTerminationRequest: () => false,
-      }),
-    [],
+      Gesture.Pan()
+        .enabled(!props.disabled)
+        .minDistance(0)
+        .shouldCancelWhenOutside(false)
+        .runOnJS(true)
+        .onStart(() => latest.current.onStart())
+        .onUpdate((event) => latest.current.onMove(event.translationY))
+        .onFinalize((_, success) => latest.current.onEnd(!success)),
+    [props.disabled],
   );
   return (
-    <View
-      {...responder.panHandlers}
-      accessible
-      accessibilityRole="adjustable"
-      accessibilityLabel={`Reorder ${props.title}`}
-      accessibilityHint="Drag to a new position, or use the move actions"
-      accessibilityState={{ disabled: props.disabled }}
-      accessibilityActions={[
-        ...(props.canMoveUp ? [{ name: "decrement", label: "Move up" }] : []),
-        ...(props.canMoveDown ? [{ name: "increment", label: "Move down" }] : []),
-      ]}
-      onAccessibilityAction={({ nativeEvent }) => {
-        if (props.disabled) return;
-        if (nativeEvent.actionName === "decrement" && props.canMoveUp) props.onStep("up");
-        if (nativeEvent.actionName === "increment" && props.canMoveDown) props.onStep("down");
-      }}
-      className="h-12 w-12 items-center justify-center"
-      style={{ opacity: props.disabled ? 0.3 : 1 }}
-    >
-      <SymbolView name="line.3.horizontal" size={22} tintColorClassName="accent-foreground-muted" />
-    </View>
+    <GestureDetector gesture={gesture}>
+      <View
+        collapsable={false}
+        accessible
+        accessibilityRole="adjustable"
+        accessibilityLabel={`Reorder ${props.title}`}
+        accessibilityHint="Drag between Pinned and Active, or use the move actions"
+        accessibilityState={{ disabled: props.disabled }}
+        accessibilityActions={[
+          ...(props.canMoveUp ? [{ name: "decrement", label: "Move up" }] : []),
+          ...(props.canMoveDown ? [{ name: "increment", label: "Move down" }] : []),
+        ]}
+        onAccessibilityAction={({ nativeEvent }) => {
+          if (props.disabled) return;
+          if (nativeEvent.actionName === "decrement" && props.canMoveUp) props.onStep("up");
+          if (nativeEvent.actionName === "increment" && props.canMoveDown) props.onStep("down");
+        }}
+        style={{
+          width: 48,
+          height: 48,
+          alignItems: "center",
+          justifyContent: "center",
+          opacity: props.disabled ? 0.3 : 1,
+        }}
+      >
+        <SymbolView
+          name="line.3.horizontal"
+          size={22}
+          tintColorClassName="accent-foreground-muted"
+        />
+      </View>
+    </GestureDetector>
   );
 }
 
-export function ThreadArrangementSheet(props: {
-  section: "pinned" | "active";
-  onClose: () => void;
-}) {
+export function ThreadArrangementSheet(props: { onClose: () => void }) {
   const insets = useSafeAreaInsets();
   const threads = useAtomValue(environmentThreadShells.threadShellsAtom);
   const configs = useAtomValue(environmentServerConfigsAtom);
   const queuedThreadKeys = useAtomValue(queuedThreadKeysAtom);
   const pendingOrder = useAtomValue(pendingThreadOrderAtom);
+  const dropBusy = useAtomValue(threadDropBusyAtom);
   const { moveThread } = useThreadListActions();
   const [now, setNow] = useState(() => new Date().toISOString());
-  // Wake times can change section membership while this sheet is open.
+  const [expanded, setExpanded] = useState({ snoozed: false, settled: false });
   useEffect(() => {
     const wakeAt = Math.min(
       ...threads.flatMap((thread) => {
@@ -100,37 +121,46 @@ export function ThreadArrangementSheet(props: {
     );
     return () => clearTimeout(timer);
   }, [threads, now]);
-  const ordered = useMemo(
-    () =>
-      getThreadListV2OrderedSection({
-        threads,
-        section: props.section,
-        now,
-        queuedThreadKeys,
-        pendingOrder,
-        settlementEnvironmentIds: new Set(
-          [...configs].flatMap(([id, config]) =>
-            config.environment.capabilities.threadSettlement ? [id] : [],
-          ),
+  const sections = useMemo(() => {
+    const shared = {
+      threads,
+      now,
+      queuedThreadKeys,
+      pendingOrder,
+      settlementEnvironmentIds: new Set(
+        [...configs].flatMap(([id, config]) =>
+          config.environment.capabilities.threadSettlement ? [id] : [],
         ),
-        snoozeEnvironmentIds: new Set(
-          [...configs].flatMap(([id, config]) =>
-            config.environment.capabilities.threadSnooze ? [id] : [],
-          ),
+      ),
+      snoozeEnvironmentIds: new Set(
+        [...configs].flatMap(([id, config]) =>
+          config.environment.capabilities.threadSnooze ? [id] : [],
         ),
-      }),
-    [threads, props.section, now, queuedThreadKeys, pendingOrder, configs],
-  );
-  const planner = useMemo(
-    () =>
+      ),
+    };
+    const pinned = getThreadListV2OrderedSection({ ...shared, section: "pinned" });
+    const active = getThreadListV2OrderedSection({ ...shared, section: "active" });
+    const visible = new Set([...pinned, ...active].map(keyOf));
+    const parked = threads.filter(
+      (thread) => thread.archivedAt === null && !visible.has(keyOf(thread)),
+    );
+    return {
+      pinned,
+      active,
+      snoozed: parked.filter((thread) => effectiveSnoozed(thread, { now })),
+      settled: parked.filter((thread) => !effectiveSnoozed(thread, { now })),
+    };
+  }, [threads, configs, now, queuedThreadKeys, pendingOrder]);
+  const planners = useMemo(() => {
+    const planner = (section: "pinned" | "active") =>
       createThreadMovePlanner({
-        ordered,
+        ordered: sections[section],
         allThreads: threads,
-        section: props.section,
+        section,
         reorderableEnvironmentIds: new Set(
           [...configs].flatMap(([id, config]) =>
             (
-              props.section === "pinned"
+              section === "pinned"
                 ? config.environment.capabilities.threadPinReorder
                 : config.environment.capabilities.threadActiveReorder
             )
@@ -138,19 +168,33 @@ export function ThreadArrangementSheet(props: {
               : [],
           ),
         ),
-      }),
-    [ordered, threads, props.section, configs],
-  );
-  const list = useRef<FlatList<EnvironmentThreadShell>>(null);
-  const viewport = useRef<View>(null);
-  const geometry = useRef({ top: 0, height: 0, offset: 0, pageY: 0 });
+      });
+    return { pinned: planner("pinned"), active: planner("active") };
+  }, [sections, threads, configs]);
+  const rows = useMemo(() => {
+    const result: Row[] = [];
+    let offset = 0;
+    for (const section of ["pinned", "active", "snoozed", "settled"] as const) {
+      if ((section === "snoozed" || section === "settled") && sections[section].length === 0)
+        continue;
+      result.push({ key: section, section, offset, height: HEADER_HEIGHT });
+      offset += HEADER_HEIGHT;
+      if ((section === "snoozed" || section === "settled") && !expanded[section]) continue;
+      for (const thread of sections[section]) {
+        result.push({ key: keyOf(thread), section, thread, offset, height: ROW_HEIGHT });
+        offset += ROW_HEIGHT;
+      }
+    }
+    return result;
+  }, [sections, expanded]);
+  const list = useRef<FlatList<Row>>(null);
+  const geometry = useRef({ height: 0, offset: 0 });
   const drag = useRef<Drag | null>(null);
   const frame = useRef<number | null>(null);
-  const [measured, setMeasured] = useState(false);
   const [preview, setPreview] = useState<Drag | null>(null);
   const translateY = useRef(new Animated.Value(0)).current;
-  const latest = useRef({ ordered, planner, moveThread });
-  latest.current = { ordered, planner, moveThread };
+  const latest = useRef({ rows, planners, moveThread });
+  latest.current = { rows, planners, moveThread };
 
   function stop() {
     if (frame.current !== null) cancelAnimationFrame(frame.current);
@@ -158,9 +202,8 @@ export function ThreadArrangementSheet(props: {
     drag.current = null;
     setPreview(null);
   }
-  // Changes from another client must not leave a drag targeting a stale list.
-  const orderVersion = ordered
-    .map((row) => `${keyOf(row)}:${row.pinOrderKey}:${row.activeOrderKey}`)
+  const orderVersion = rows
+    .map((row) => `${row.key}:${row.thread?.pinOrderKey}:${row.thread?.activeOrderKey}`)
     .join("|");
   useEffect(() => {
     stop();
@@ -172,208 +215,226 @@ export function ThreadArrangementSheet(props: {
     [],
   );
 
-  function update(pageY: number) {
+  function update(translation: number) {
     const current = drag.current;
     if (current === null) return;
-    const bounds = geometry.current;
-    bounds.pageY = pageY;
-    const y = pageY - bounds.top;
-    translateY.setValue(Math.max(0, Math.min(bounds.height - ROW_HEIGHT, y - ROW_HEIGHT / 2)));
-    const position = Math.max(
-      0,
-      Math.min(latest.current.ordered.length - 1, Math.floor((y + bounds.offset) / ROW_HEIGHT)),
-    );
-    const target = latest.current.ordered[position];
-    const destination =
-      target && y >= 0 && y <= bounds.height
-        ? {
-            targetId: keyOf(target),
-            placement:
-              (y + bounds.offset) % ROW_HEIGHT < ROW_HEIGHT / 2
-                ? ("before" as const)
-                : ("after" as const),
-          }
-        : null;
-    const candidate = destination ? `${destination.targetId}:${destination.placement}` : null;
-    if (current.candidate === candidate) return;
-    current.candidate = candidate;
-    const valid =
-      destination && latest.current.planner(keyOf(current.thread), destination) !== null
-        ? destination
-        : null;
+    current.translation = translation;
+    const { height, offset } = geometry.current;
+    const y = current.startY + translation;
+    translateY.setValue(Math.max(0, Math.min(height - ROW_HEIGHT, y - ROW_HEIGHT / 2)));
+    const contentY = Math.max(0, y + offset);
+    const target =
+      latest.current.rows.find((row) => contentY < row.offset + row.height) ??
+      latest.current.rows.at(-1);
+    let destination: Destination | null = null;
     if (
-      current.destination?.targetId !== valid?.targetId ||
-      current.destination?.placement !== valid?.placement
+      target &&
+      y >= 0 &&
+      y <= height &&
+      (target.section === "pinned" || target.section === "active")
     ) {
-      current.destination = valid;
+      const candidate: Destination = {
+        section: target.section,
+        targetId: target.thread ? target.key : null,
+        placement:
+          !target.thread || contentY < target.offset + target.height / 2 ? "before" : "after",
+      };
+      if (latest.current.planners[target.section](keyOf(current.thread), candidate) !== null)
+        destination = candidate;
+    }
+    if (
+      current.destination?.targetId !== destination?.targetId ||
+      current.destination?.section !== destination?.section ||
+      current.destination?.placement !== destination?.placement
+    ) {
+      current.destination = destination;
       setPreview({ ...current });
     }
   }
-
-  // Measure when the sheet is presented or resized, before handles accept
-  // touches. Starting a quick drag must not wait for a native callback.
-  function measureViewport() {
-    stop();
-    setMeasured(false);
-    viewport.current?.measureInWindow((_, top, __, height) => {
-      geometry.current = { ...geometry.current, top, height };
-      setMeasured(height > 0);
-    });
-  }
-
-  function start(thread: EnvironmentThreadShell, pageY: number) {
-    drag.current = { thread, destination: null, candidate: null };
+  function start(row: Row) {
+    if (!row.thread) return;
+    drag.current = {
+      thread: row.thread,
+      startY: row.offset + ROW_HEIGHT / 2 - geometry.current.offset,
+      translation: 0,
+      destination: null,
+    };
     setPreview({ ...drag.current });
-    update(pageY);
+    update(0);
     let last = performance.now();
     const tick = () => {
-      if (drag.current === null) return;
+      const current = drag.current;
+      if (!current) return;
       const timestamp = performance.now();
       const dt = Math.min(timestamp - last, 32);
       last = timestamp;
       const bounds = geometry.current;
-      const y = bounds.pageY - bounds.top;
+      const y = current.startY + current.translation;
       const speed =
         y < 48
           ? -Math.min(1, (48 - y) / 48)
           : y > bounds.height - 48
             ? Math.min(1, (y - bounds.height + 48) / 48)
             : 0;
-      if (speed !== 0) {
-        const offset = Math.max(
-          0,
-          Math.min(
-            latest.current.ordered.length * ROW_HEIGHT - bounds.height,
-            bounds.offset + speed * dt * 0.5,
-          ),
-        );
-        if (offset !== bounds.offset) {
-          bounds.offset = offset;
-          list.current?.scrollToOffset({ offset, animated: false });
-          update(bounds.pageY);
-        }
+      const tail = latest.current.rows.at(-1);
+      const maximum = Math.max(0, (tail ? tail.offset + tail.height : 0) - bounds.height);
+      const offset = Math.max(0, Math.min(maximum, bounds.offset + speed * dt * 0.5));
+      if (offset !== bounds.offset) {
+        bounds.offset = offset;
+        list.current?.scrollToOffset({ offset, animated: false });
+        update(current.translation);
       }
       frame.current = requestAnimationFrame(tick);
     };
     frame.current = requestAnimationFrame(tick);
   }
-
   return (
     <Modal
       visible
       animationType="slide"
-      presentationStyle="pageSheet"
+      presentationStyle="fullScreen"
       onRequestClose={props.onClose}
-      onShow={measureViewport}
     >
-      <View
-        className="flex-1 bg-screen"
-        style={{
-          paddingTop: Platform.OS === "ios" ? 16 : insets.top,
-          paddingBottom: insets.bottom,
-        }}
-      >
-        <View className="flex-row items-center justify-between gap-3 px-5 py-3">
-          <Text className="flex-1 text-xl font-t3-semibold">Arrange {props.section} threads</Text>
-          <Pressable
-            accessibilityRole="button"
-            onPress={props.onClose}
-            className="min-h-11 justify-center px-3"
-          >
-            <Text className="text-base text-primary">Done</Text>
-          </Pressable>
-        </View>
-        <Text className="px-5 pb-3 text-sm text-foreground-muted">
-          Drag the handles to reorder. Changes save when you drop.
-        </Text>
+      <GestureHandlerRootView style={{ flex: 1 }}>
         <View
-          ref={viewport}
-          onLayout={measureViewport}
-          collapsable={false}
-          className="flex-1"
-          style={{ overflow: "hidden" }}
+          className="flex-1 bg-screen"
+          style={{ paddingTop: insets.top, paddingBottom: insets.bottom }}
         >
-          <FlatList
-            ref={list}
-            data={ordered}
-            keyExtractor={keyOf}
-            scrollEnabled={preview === null}
-            onScroll={(event) => {
-              geometry.current.offset = event.nativeEvent.contentOffset.y;
-            }}
-            scrollEventThrottle={16}
-            getItemLayout={(_, index) => ({
-              length: ROW_HEIGHT,
-              offset: ROW_HEIGHT * index,
-              index,
-            })}
-            extraData={{ preview, pendingOrder, planner }}
-            renderItem={({ item }) => {
-              const key = keyOf(item);
-              const canMoveUp = pendingOrder === null && planner(key, "up") !== null;
-              const canMoveDown = pendingOrder === null && planner(key, "down") !== null;
-              const insertion =
-                preview?.destination?.targetId === key ? preview.destination.placement : null;
-              return (
-                <View
-                  style={{ height: ROW_HEIGHT }}
-                  className="flex-row items-center border-b border-border-subtle px-5"
-                >
-                  <Text
-                    numberOfLines={2}
-                    className="flex-1 text-base"
-                    style={{ opacity: key === (preview && keyOf(preview.thread)) ? 0.3 : 1 }}
-                  >
-                    {item.title}
-                  </Text>
-                  <DragHandle
-                    title={item.title}
-                    disabled={
-                      !measured ||
-                      pendingOrder !== null ||
-                      (props.section === "pinned"
-                        ? configs.get(item.environmentId)?.environment.capabilities.threadPinReorder
-                        : configs.get(item.environmentId)?.environment.capabilities
-                            .threadActiveReorder) !== true
-                    }
-                    canMoveUp={canMoveUp}
-                    canMoveDown={canMoveDown}
-                    onStep={(direction) => {
-                      void moveThread(item, direction);
-                    }}
-                    onStart={(pageY) => start(item, pageY)}
-                    onMove={update}
-                    onEnd={(cancelled) => {
-                      const current = drag.current;
-                      stop();
-                      if (!cancelled && current?.destination)
-                        void moveThread(current.thread, current.destination);
-                    }}
-                  />
-                  {insertion ? (
-                    <View
-                      pointerEvents="none"
-                      className="absolute left-5 right-5 h-0.5 bg-primary"
-                      style={insertion === "before" ? { top: 0 } : { bottom: 0 }}
-                    />
-                  ) : null}
-                </View>
-              );
-            }}
-          />
-          {preview ? (
-            <Animated.View
-              pointerEvents="none"
-              className="absolute left-5 right-5 justify-center rounded-xl bg-subtle-strong px-4"
-              style={{ top: 0, height: ROW_HEIGHT, transform: [{ translateY }] }}
+          <View className="flex-row items-center justify-between gap-3 px-5 py-3">
+            <Text className="flex-1 text-xl font-t3-semibold">Arrange threads</Text>
+            <Pressable
+              accessibilityRole="button"
+              onPress={props.onClose}
+              className="min-h-11 justify-center px-3"
             >
-              <Text numberOfLines={2} className="text-base font-t3-medium">
-                {preview.thread.title}
-              </Text>
-            </Animated.View>
-          ) : null}
+              <Text className="text-base text-primary">Done</Text>
+            </Pressable>
+          </View>
+          <Text className="px-5 pb-3 text-sm text-foreground-muted">
+            Drag between Pinned and Active. Changes save when you drop.
+          </Text>
+          <View
+            onLayout={(event) => {
+              geometry.current.height = event.nativeEvent.layout.height;
+            }}
+            className="flex-1"
+            style={{ overflow: "hidden" }}
+          >
+            <FlatList
+              ref={list}
+              data={rows}
+              keyExtractor={(row) => row.key}
+              scrollEnabled={preview === null}
+              removeClippedSubviews={false}
+              onScroll={(event) => {
+                geometry.current.offset = event.nativeEvent.contentOffset.y;
+              }}
+              scrollEventThrottle={16}
+              getItemLayout={(_, index) => ({
+                length: rows[index]!.height,
+                offset: rows[index]!.offset,
+                index,
+              })}
+              renderItem={({ item }) => {
+                const thread = item.thread;
+                const insertion =
+                  preview?.destination?.section === item.section &&
+                  preview.destination.targetId === (thread ? item.key : null)
+                    ? preview.destination.placement
+                    : null;
+                const planner =
+                  item.section === "pinned" || item.section === "active"
+                    ? planners[item.section]
+                    : null;
+                return (
+                  <View
+                    style={{ height: item.height }}
+                    className="flex-row items-center border-b border-border-subtle px-5"
+                  >
+                    {thread ? (
+                      <>
+                        <Text
+                          numberOfLines={2}
+                          className="flex-1 text-base"
+                          style={{
+                            opacity: item.key === (preview && keyOf(preview.thread)) ? 0.3 : 1,
+                          }}
+                        >
+                          {thread.title}
+                        </Text>
+                        <DragHandle
+                          title={thread.title}
+                          disabled={
+                            dropBusy ||
+                            pendingOrder !== null ||
+                            !(
+                              configs.get(thread.environmentId)?.environment.capabilities
+                                .threadPinReorder ||
+                              configs.get(thread.environmentId)?.environment.capabilities
+                                .threadActiveReorder
+                            )
+                          }
+                          canMoveUp={planner?.(item.key, "up") != null}
+                          canMoveDown={planner?.(item.key, "down") != null}
+                          onStep={(direction) => {
+                            void moveThread(thread, direction);
+                          }}
+                          onStart={() => start(item)}
+                          onMove={update}
+                          onEnd={(cancelled) => {
+                            const current = drag.current;
+                            stop();
+                            if (!cancelled && current?.destination)
+                              void moveThread(current.thread, current.destination);
+                          }}
+                        />
+                      </>
+                    ) : (
+                      <Pressable
+                        disabled={item.section === "pinned" || item.section === "active"}
+                        className="flex-1 justify-center self-stretch"
+                        onPress={() => {
+                          const section = item.section;
+                          if (section === "snoozed" || section === "settled")
+                            setExpanded((value) => ({ ...value, [section]: !value[section] }));
+                        }}
+                      >
+                        <Text className="text-sm font-t3-semibold text-foreground-muted">
+                          {item.section[0]!.toUpperCase() + item.section.slice(1)} (
+                          {sections[item.section].length})
+                        </Text>
+                      </Pressable>
+                    )}
+                    {insertion ? (
+                      <View
+                        pointerEvents="none"
+                        className="absolute left-5 right-5 h-0.5 bg-primary"
+                        style={insertion === "before" && thread ? { top: 0 } : { bottom: 0 }}
+                      />
+                    ) : null}
+                  </View>
+                );
+              }}
+            />
+            {preview ? (
+              <Animated.View
+                pointerEvents="none"
+                className="absolute left-5 right-5 justify-center rounded-xl bg-subtle-strong px-4"
+                style={{ top: 0, height: ROW_HEIGHT, transform: [{ translateY }] }}
+              >
+                <Text numberOfLines={2} className="text-base font-t3-medium">
+                  {preview.thread.title}
+                </Text>
+                {preview.destination?.section ? (
+                  <Text className="text-xs text-foreground-muted">
+                    {preview.destination.section === "pinned" ? "Move to Pinned" : "Move to Active"}
+                  </Text>
+                ) : null}
+              </Animated.View>
+            ) : null}
+          </View>
         </View>
-      </View>
+      </GestureHandlerRootView>
     </Modal>
   );
 }

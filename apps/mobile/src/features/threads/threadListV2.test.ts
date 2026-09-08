@@ -3,6 +3,7 @@ import {
   createPendingThreadOrder,
   createThreadMovePlanner,
   threadOrderAfterMove,
+  threadDropLifecycle,
   reconcilePendingThreadOrder,
   type PendingThreadOrder,
 } from "./threadOrder";
@@ -1387,4 +1388,92 @@ it("allows a long drop past an old server even when both adjacent moves fail", (
   expect(assignments).toHaveLength(1);
   expect(assignments![0]!.id).toBe(movedId);
   expect(assignments![0]!.orderKey > "p").toBe(true);
+});
+
+describe("cross-section thread drops", () => {
+  it.each(["pinned", "active"] as const)("inserts into an empty %s section", (section) => {
+    const thread = makeThread({ id: ThreadId.make("source"), title: "source" });
+    const id = `${thread.environmentId}:${thread.id}`;
+    const destination = { section, targetId: null, placement: "before" as const };
+    expect(threadOrderAfterMove([], id, destination)).toEqual([id]);
+    const plan = createThreadMovePlanner({
+      ordered: [],
+      allThreads: [thread],
+      section,
+      reorderableEnvironmentIds: new Set([environmentId]),
+    })(id, destination);
+    expect(plan).toHaveLength(1);
+    expect(plan![0]!.id).toBe(id);
+  });
+  it("places an incoming row between existing anchors without rewriting them", () => {
+    const a = makeThread({ id: ThreadId.make("a"), title: "a", pinOrderKey: "h" });
+    const b = makeThread({ id: ThreadId.make("b"), title: "b", pinOrderKey: "z" });
+    const source = makeThread({ id: ThreadId.make("source"), title: "source" });
+    const id = `${environmentId}:source`;
+    const destination = {
+      section: "pinned" as const,
+      targetId: `${environmentId}:b`,
+      placement: "before" as const,
+    };
+    const plan = createThreadMovePlanner({
+      ordered: [a, b],
+      allThreads: [a, b, source],
+      section: "pinned",
+      reorderableEnvironmentIds: new Set([environmentId]),
+    })(id, destination);
+    expect(plan).toHaveLength(1);
+    expect(plan![0]!.orderKey > "h" && plan![0]!.orderKey < "z").toBe(true);
+    expect(
+      threadOrderAfterMove([`${environmentId}:a`, `${environmentId}:b`], id, destination),
+    ).toEqual([`${environmentId}:a`, id, `${environmentId}:b`]);
+  });
+  it("rejects removed targets and unsupported incoming sources", () => {
+    expect(
+      threadOrderAfterMove(["a"], "source", {
+        section: "active",
+        targetId: "gone",
+        placement: "before",
+      }),
+    ).toBeNull();
+    const source = makeThread({ id: ThreadId.make("source"), title: "source" });
+    expect(
+      createThreadMovePlanner({
+        ordered: [],
+        allThreads: [source],
+        section: "active",
+        reorderableEnvironmentIds: new Set(),
+      })(`${environmentId}:source`, { section: "active", targetId: null, placement: "before" }),
+    ).toBeNull();
+  });
+  it("clears pinning, settlement and snooze when returning a parked thread to Active", () => {
+    const thread = makeThread({
+      id: ThreadId.make("parked"),
+      title: "parked",
+      pinnedAt: NOW,
+      settledOverride: "settled",
+      snoozedAt: NOW,
+      snoozedUntil: "2099-01-01T00:00:00.000Z",
+    });
+    expect(threadDropLifecycle(thread, "active", NOW)).toEqual({
+      pin: false,
+      unpin: true,
+      unsettle: true,
+      unsnooze: true,
+    });
+    expect(threadDropLifecycle(thread, "pinned", NOW)).toEqual({
+      pin: true,
+      unpin: false,
+      unsettle: false,
+      unsnooze: false,
+    });
+  });
+  it("does not send lifecycle commands for an ordinary Active reorder", () => {
+    expect(
+      threadDropLifecycle(
+        makeThread({ id: ThreadId.make("active"), title: "active" }),
+        "active",
+        NOW,
+      ),
+    ).toEqual({ pin: false, unpin: false, unsettle: false, unsnooze: false });
+  });
 });

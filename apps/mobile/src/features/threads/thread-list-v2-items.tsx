@@ -521,7 +521,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   // hides the card until wake with the pin intact.)
   const arrangementMenuItems = useMemo<MenuAction[]>(
     () => [
-      ...(variant === "card" && props.reorderSupported === true
+      ...(props.reorderSupported === true
         ? [
             { id: "arrange", title: "Arrange threads…", image: "line.3.horizontal" },
             {
@@ -590,7 +590,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
   const slimMenuActions = useMemo<MenuAction[]>(
     () => [
       SLIM_MENU_ACTIONS[0]!,
-      ...(thread.pinnedAt != null ? arrangementMenuItems : []),
+      ...arrangementMenuItems,
       ...titleRegenerationMenuItems,
       SLIM_MENU_ACTIONS[1]!,
     ],
@@ -1086,12 +1086,7 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           </ControlPillMenu>
         )}
       </ThreadSwipeable>
-      {arranging ? (
-        <ThreadArrangementSheet
-          section={pinnedRow ? "pinned" : "active"}
-          onClose={() => setArranging(false)}
-        />
-      ) : null}
+      {arranging ? <ThreadArrangementSheet onClose={() => setArranging(false)} /> : null}
     </>
   );
 });

@@ -1,12 +1,14 @@
 import type { EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import { planPinnedReorder } from "@t3tools/client-runtime/state/thread-sort";
+import { effectiveSnoozed } from "@t3tools/client-runtime/state/thread-settled";
 import type { EnvironmentId } from "@t3tools/contracts";
 
 export type ThreadMoveDestination =
   | "up"
   | "down"
   | {
-      readonly targetId: string;
+      readonly targetId: string | null;
+      readonly section?: "pinned" | "active";
       readonly placement: "before" | "after";
     };
 
@@ -17,16 +19,22 @@ export function threadOrderAfterMove(
   destination: ThreadMoveDestination,
 ): string[] | null {
   const from = orderedIds.indexOf(movedId);
-  if (from < 0) return null;
+  if (from < 0 && (typeof destination === "string" || destination.section === undefined))
+    return null;
   const result = orderedIds.filter((id) => id !== movedId);
   let to: number;
   if (typeof destination === "string") {
     to = from + (destination === "up" ? -1 : 1);
     if (to < 0 || to >= orderedIds.length) return null;
   } else {
-    const target = result.indexOf(destination.targetId);
-    if (target < 0) return null;
-    to = target + (destination.placement === "after" ? 1 : 0);
+    if (destination.targetId === null) {
+      if (destination.section === undefined) return null;
+      to = destination.placement === "before" ? 0 : result.length;
+    } else {
+      const target = result.indexOf(destination.targetId);
+      if (target < 0) return null;
+      to = target + (destination.placement === "after" ? 1 : 0);
+    }
   }
   if (to === from) return null;
   result.splice(to, 0, movedId);
@@ -80,7 +88,7 @@ export function createThreadMovePlanner(input: {
     ]),
   );
   const writableIds = new Set(
-    input.ordered
+    (input.allThreads ?? input.ordered)
       .filter((row) => input.reorderableEnvironmentIds.has(row.environmentId))
       .map(rowId),
   );
@@ -148,4 +156,20 @@ export function applyPendingThreadOrder<T extends OrderRow>(
   return [...rows].sort(
     (left, right) => (rank.get(rowId(left)) ?? Infinity) - (rank.get(rowId(right)) ?? Infinity),
   );
+}
+
+/** Match desktop re-entry: a pin wakes the thread on the server; Active clears
+ * each underlying parked state before assigning its destination order key. */
+export function threadDropLifecycle(
+  thread: EnvironmentThreadShell,
+  section: "pinned" | "active",
+  now: string,
+) {
+  if (section === "pinned") return { pin: true, unpin: false, unsettle: false, unsnooze: false };
+  return {
+    pin: false,
+    unpin: thread.pinnedAt != null,
+    unsettle: thread.settledOverride === "settled",
+    unsnooze: effectiveSnoozed(thread, { now }),
+  };
 }
