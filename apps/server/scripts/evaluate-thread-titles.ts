@@ -65,7 +65,10 @@ await Effect.runPromise(
     for (const fixture of threadTitleEvaluationCases) {
       const previous = baseline.find((entry) => entry.id === fixture.id);
       if (values.baseline && !previous) throw new Error(`Baseline is missing ${fixture.id}.`);
-      const firstMessage: ThreadTitleMessage = fixture.messages[0]!;
+      const firstMessage: ThreadTitleMessage | undefined = fixture.messages.find(
+        (message) => message.role === "user",
+      );
+      if (!firstMessage) throw new Error(`Fixture ${fixture.id} has no user message.`);
       const context = formatThreadTitleContext(fixture.messages);
       const message = values.initial ? firstMessage.text : context.message;
       const attachments = values.initial ? firstMessage.attachments : context.attachments;

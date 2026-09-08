@@ -156,9 +156,11 @@ export const make = Effect.gen(function* () {
       resolveInstance(registry, "generateThreadTitle", input.modelSelection.instanceId).pipe(
         Effect.flatMap((textGeneration) =>
           Effect.gen(function* () {
-            const linkedContext = yield* resolveThreadTitleLinks(input).pipe(
-              Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
-            );
+            const linkedContext =
+              input.linkedContext ??
+              (yield* resolveThreadTitleLinks(input).pipe(
+                Effect.provideService(ProcessRunner.ProcessRunner, processRunner),
+              ));
             return yield* textGeneration.generateThreadTitle({ ...input, linkedContext });
           }),
         ),
