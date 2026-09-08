@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   deploy_relay:
-    name: Plan personal relay
+    name: Deploy personal relay
     runs-on: blacksmith-8vcpu-ubuntu-2404
     timeout-minutes: 15
     environment:
@@ -52,9 +52,9 @@ jobs:
             args:
               - --filter=t3code-relay...
 
-      - name: Plan personal relay stage
+      - name: Deploy personal relay stage
         id: deploy
-        run: vp run --filter t3code-relay deploy --stage dev_julius_effect112 --dry-run
+        run: vp run --filter t3code-relay deploy --stage dev_julius_effect112 --yes --github-output
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           PLANETSCALE_API_TOKEN_ID: ${{ secrets.PLANETSCALE_API_TOKEN_ID }}
@@ -63,3 +63,22 @@ jobs:
           CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
           APNS_PRIVATE_KEY: ${{ secrets.APNS_PRIVATE_KEY }}
 
+      - name: Verify public endpoints
+        env:
+          RELAY_URL: ${{ steps.deploy.outputs.relay_url }}
+        run: |
+          test "$RELAY_URL" = "https://relay-dev-julius-effect112.$RELAY_API_ZONE_NAME"
+          curl --fail-with-body --retry 8 --retry-all-errors --retry-delay 5 "$RELAY_URL/health" | jq -e '.ok == true and .service == "relay"'
+          curl --fail-with-body "$RELAY_URL/.well-known/oauth-authorization-server" | jq -e 'type == "object"'
+          curl --fail-with-body "$RELAY_URL/.well-known/oauth-protected-resource" | jq -e 'type == "object"'
+          echo "Personal relay: $RELAY_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check convergence
+        run: vp run --filter t3code-relay deploy --stage dev_julius_effect112 --dry-run
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PLANETSCALE_API_TOKEN_ID: ${{ secrets.PLANETSCALE_API_TOKEN_ID }}
+          PLANETSCALE_API_TOKEN: ${{ secrets.PLANETSCALE_API_TOKEN }}
+          AXIOM_TOKEN: ${{ secrets.AXIOM_TOKEN }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+          APNS_PRIVATE_KEY: ${{ secrets.APNS_PRIVATE_KEY }}
