@@ -32,7 +32,7 @@ import {
   resolveProjectScripts,
 } from "@t3tools/shared/projectScripts";
 import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
-import { useNavigate } from "@tanstack/react-router";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 import * as Cause from "effect/Cause";
 import { ChevronDownIcon, PlusIcon, Trash2Icon } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -155,6 +155,7 @@ export function ProjectSettingsPanel({
 }) {
   const groups = useSettingsProjectGroups();
   const navigate = useNavigate({ from: "/settings" });
+  const pathname = useLocation({ select: (location) => location.pathname });
 
   const selected = groups.find((group) => group.projectKey === projectKey) ?? null;
   const members = useMemo(
@@ -201,6 +202,7 @@ export function ProjectSettingsPanel({
     );
     if (successor) {
       void navigate({
+        to: pathname,
         search: () => ({
           project: successor.projectKey,
           machine: environmentId ?? undefined,
@@ -210,7 +212,7 @@ export function ProjectSettingsPanel({
         hashScrollIntoView: false,
       });
     }
-  }, [groups, navigate, projectKey, members.length, environmentId, checkoutKey]);
+  }, [groups, navigate, pathname, projectKey, members.length, environmentId, checkoutKey]);
 
   if (!selected) {
     return (
@@ -393,6 +395,7 @@ function ProjectDetail({
   category: ProjectSettingsCategory;
 }) {
   const navigate = useNavigate({ from: "/settings" });
+  const pathname = useLocation({ select: (location) => location.pathname });
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const { environments } = useEnvironments();
   const environmentById = useMemo(
@@ -982,6 +985,7 @@ function ProjectDetail({
   );
   const chooseCheckout = (member: SidebarProjectGroupMember) => {
     void navigate({
+      to: pathname,
       search: () => ({
         project: group.projectKey,
         machine: member.environmentId,
