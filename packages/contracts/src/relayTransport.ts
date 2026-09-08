@@ -20,6 +20,13 @@ export type RelayConnectorTicketResponse = typeof RelayConnectorTicketResponse.T
 
 const RELAY_TRANSPORT_FRAME_MAGIC = 0x54335231;
 const RELAY_TRANSPORT_END_OF_MESSAGE_FLAG = 1;
+// Set on every WebSocket fragment after the first. A Durable Object can
+// hibernate between fragments and lose its in-memory partial message, so the
+// receiver must be able to tell a continuation from a fresh message and drop
+// the stream instead of forwarding a tail as a whole message.
+const RELAY_TRANSPORT_CONTINUATION_FLAG = 2;
+const RELAY_TRANSPORT_KNOWN_FLAGS =
+  RELAY_TRANSPORT_END_OF_MESSAGE_FLAG | RELAY_TRANSPORT_CONTINUATION_FLAG;
 
 export const RelayTransportFrameKind = {
   control: 1,
@@ -104,6 +111,8 @@ export interface RelayTransportFrame {
   readonly kind: RelayTransportFrameKind;
   readonly streamId: number;
   readonly endOfMessage: boolean;
+  /** True for every WebSocket fragment after the first one of a message. */
+  readonly continuation?: boolean;
   readonly payload: Uint8Array;
 }
 
@@ -138,6 +147,14 @@ export class RelayTransportMessageAssembler {
     if (frame.payload.byteLength === 0 && !frame.endOfMessage) {
       this.delete(frame.streamId);
       throw new TypeError("Relay transport messages cannot contain empty non-final fragments.");
+    }
+    if ((frame.continuation ?? false) !== (partial !== undefined)) {
+      this.delete(frame.streamId);
+      throw new TypeError(
+        frame.continuation
+          ? "Relay transport continuation fragment has no message in progress."
+          : "Relay transport message started before the previous one completed.",
+      );
     }
     if (partial === undefined && frame.endOfMessage) {
       return { kind: frame.kind, payload: frame.payload };
@@ -247,7 +264,11 @@ export function encodeRelayTransportFrame(frame: RelayTransportFrame): Uint8Arra
   view.setUint32(0, RELAY_TRANSPORT_FRAME_MAGIC);
   view.setUint8(4, RELAY_TRANSPORT_PROTOCOL_VERSION);
   view.setUint8(5, frame.kind);
-  view.setUint16(6, frame.endOfMessage ? RELAY_TRANSPORT_END_OF_MESSAGE_FLAG : 0);
+  view.setUint16(
+    6,
+    (frame.endOfMessage ? RELAY_TRANSPORT_END_OF_MESSAGE_FLAG : 0) |
+      (frame.continuation ? RELAY_TRANSPORT_CONTINUATION_FLAG : 0),
+  );
   view.setUint32(8, frame.streamId);
   bytes.set(frame.payload, RELAY_TRANSPORT_FRAME_HEADER_BYTES);
   return bytes;
@@ -278,6 +299,7 @@ export function encodeRelayTransportMessageFrames(
       encodeRelayTransportFrame({
         ...frame,
         endOfMessage: offset + payload.byteLength === frame.payload.byteLength,
+        continuation: offset > 0,
         payload,
       }),
     );
@@ -305,7 +327,7 @@ export function decodeRelayTransportFrame(
     return Result.fail(new RelayTransportFrameDecodeError({ reason: "invalid_kind" }));
   }
   const flags = view.getUint16(6);
-  if ((flags & ~RELAY_TRANSPORT_END_OF_MESSAGE_FLAG) !== 0) {
+  if ((flags & ~RELAY_TRANSPORT_KNOWN_FLAGS) !== 0) {
     return Result.fail(new RelayTransportFrameDecodeError({ reason: "invalid_flags" }));
   }
   const streamId = view.getUint32(8);
@@ -328,6 +350,7 @@ export function decodeRelayTransportFrame(
     kind,
     streamId,
     endOfMessage: (flags & RELAY_TRANSPORT_END_OF_MESSAGE_FLAG) !== 0,
+    continuation: (flags & RELAY_TRANSPORT_CONTINUATION_FLAG) !== 0,
     payload,
   });
 }

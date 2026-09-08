@@ -284,6 +284,73 @@ describe("EnvironmentLinker", () => {
     );
   });
 
+  it.effect(
+    "passes the observed lease to the upsert and releases its own lease on conflict",
+    () => {
+      const lifecycle: Array<string> = [];
+      let expectedLease: string | null | undefined;
+      return Effect.gen(function* () {
+        const { request } = yield* makeRequest;
+        const linker = yield* EnvironmentLinker.EnvironmentLinker;
+        const error = yield* Effect.flip(
+          linker.link({ userId: "user_123", request: { ...request, managedTunnelsEnabled: true } }),
+        );
+        expect(error._tag).toBe("EnvironmentLinkLeaseConflict");
+        expect(expectedLease).toBe("observed-lease");
+        expect(lifecycle).toEqual(["provision", "release:fresh-lease"]);
+      }).pipe(
+        Effect.provide(
+          testLayer({
+            getForUser: () =>
+              Effect.succeed({
+                environmentId: "env-link-test" as RelayEnvironmentLinkProofPayload["environmentId"],
+                label: "Link Test Environment",
+                endpoint: {
+                  httpBaseUrl: "https://old-t3-relay.example.test/",
+                  wsBaseUrl: "wss://old-t3-relay.example.test/ws",
+                  providerKind: "t3_relay",
+                  connectorLeaseId: "observed-lease",
+                },
+                environmentPublicKey: environmentKeyPair.publicKey.trim(),
+                linkedAt: "2026-08-18T00:00:00.000Z",
+                updatedAt: "2026-08-18T00:00:00.000Z",
+              }),
+            provision: () =>
+              Effect.sync(() => {
+                lifecycle.push("provision");
+                return {
+                  endpoint: {
+                    httpBaseUrl: "https://new-t3-relay.example.test/",
+                    wsBaseUrl: "wss://new-t3-relay.example.test/ws",
+                    providerKind: "t3_relay" as const,
+                    connectorLeaseId: "fresh-lease",
+                  },
+                  runtime: {
+                    providerKind: "t3_relay" as const,
+                    connectorToken: "connector-token",
+                    connectorLeaseId: "fresh-lease",
+                  },
+                };
+              }),
+            upsert: (input) =>
+              Effect.suspend(() => {
+                expectedLease = input.expectedConnectorLeaseId;
+                return new EnvironmentLinks.EnvironmentLinkLeaseConflict({
+                  userId: input.userId,
+                  environmentId: input.proof.environmentId,
+                });
+              }),
+            release: (input) =>
+              Effect.sync(() => {
+                lifecycle.push(`release:${input.connectorLeaseId}`);
+                return true;
+              }),
+          }),
+        ),
+      );
+    },
+  );
+
   it.effect("uses verified JWT claims when linking an environment", () => {
     let persistedEnvironmentId: string | null = null;
     return Effect.gen(function* () {

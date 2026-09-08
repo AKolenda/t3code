@@ -25,6 +25,23 @@ export interface AgentAwarenessDeliveryUserRecord {
   readonly liveActivitiesEnabled: boolean;
 }
 
+/**
+ * The link row changed under a conditional upsert. The caller observed one
+ * connector lease and another request installed a different one first, so
+ * the caller's provisioning must not overwrite it.
+ */
+export class EnvironmentLinkLeaseConflict extends Schema.TaggedError<EnvironmentLinkLeaseConflict>()(
+  "EnvironmentLinkLeaseConflict",
+  {
+    userId: Schema.String,
+    environmentId: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Environment '${this.environmentId}' link was replaced by a concurrent request`;
+  }
+}
+
 export class EnvironmentLinkUpsertPersistenceError extends Schema.TaggedError<EnvironmentLinkUpsertPersistenceError>()(
   "EnvironmentLinkUpsertPersistenceError",
   {
@@ -105,12 +122,19 @@ export class EnvironmentLinkRevokePersistenceError extends Schema.TaggedError<En
 export class EnvironmentLinks extends Context.Service<
   EnvironmentLinks,
   {
+    /**
+     * Inserts or replaces the user's link. When `expectedConnectorLeaseId` is
+     * given (null for "no lease"), an existing row is only replaced if it
+     * still carries that lease; otherwise the call fails with
+     * `EnvironmentLinkLeaseConflict` and the row is left untouched.
+     */
     readonly upsert: (input: {
       readonly userId: string;
       readonly request: RelayEnvironmentLinkRequest;
       readonly proof: RelayEnvironmentLinkProofPayload;
       readonly endpoint: RelayManagedEndpoint;
-    }) => Effect.Effect<void, EnvironmentLinkUpsertPersistenceError>;
+      readonly expectedConnectorLeaseId?: string | null;
+    }) => Effect.Effect<void, EnvironmentLinkUpsertPersistenceError | EnvironmentLinkLeaseConflict>;
     readonly listUsersForEnvironment: (input: {
       readonly environmentId: string;
     }) => Effect.Effect<ReadonlyArray<string>, EnvironmentLinkUserListPersistenceError>;
@@ -176,7 +200,8 @@ const make = Effect.gen(function* () {
       const { request, proof } = input;
       const environmentId = proof.environmentId;
       const { endpoint } = input;
-      yield* db
+      const expectedLease = input.expectedConnectorLeaseId;
+      const rows = yield* db
         .insert(relayEnvironmentLinks)
         .values({
           userId: input.userId,
@@ -211,7 +236,16 @@ const make = Effect.gen(function* () {
             revokedAt: null,
             updatedAt: now,
           },
+          ...(expectedLease === undefined
+            ? {}
+            : {
+                setWhere:
+                  expectedLease === null
+                    ? isNull(relayEnvironmentLinks.endpointConnectorLeaseId)
+                    : eq(relayEnvironmentLinks.endpointConnectorLeaseId, expectedLease),
+              }),
         })
+        .returning({ environmentId: relayEnvironmentLinks.environmentId })
         .pipe(
           Effect.mapError(
             (cause) =>
@@ -223,6 +257,11 @@ const make = Effect.gen(function* () {
               }),
           ),
         );
+      // Postgres returns no row when the conflict target exists but the
+      // conditional update's WHERE rejected it.
+      if (expectedLease !== undefined && rows.length === 0) {
+        return yield* new EnvironmentLinkLeaseConflict({ userId: input.userId, environmentId });
+      }
     }),
 
     listUsersForEnvironment: Effect.fn("relay.environment_links.list_users_for_environment")(

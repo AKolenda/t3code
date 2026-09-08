@@ -36,7 +36,10 @@ Protocol metadata is schema checked. Binary bodies use bounded 64 KiB frames;
 WebSocket messages are fragmented and reassembled up to a 16 MiB message limit.
 Incomplete messages share a 16 MiB aggregate buffer and each message is limited
 to 1,024 non-empty fragments, preventing many sparse streams from retaining
-unbounded memory.
+unbounded memory. Every fragment after the first carries a continuation flag.
+Partial messages live only in memory, so a Durable Object that hibernates
+between fragments loses them; the flag lets the receiver drop the stream
+instead of forwarding the tail as a complete message.
 The edge reads HTTP request bodies incrementally and rejects them above 16 MiB;
 the built-in connector buffers at most that same limit before calling the
 loopback origin. HTTP responses stream back to the edge using per-stream credit

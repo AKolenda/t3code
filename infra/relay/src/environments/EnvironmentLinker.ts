@@ -68,6 +68,7 @@ export type EnvironmentLinkError =
   | DpopProofs.DpopProofReplayPersistenceError
   | EnvironmentLinks.EnvironmentLinkLookupPersistenceError
   | EnvironmentLinks.EnvironmentLinkUpsertPersistenceError
+  | EnvironmentLinks.EnvironmentLinkLeaseConflict
   | EnvironmentCredentials.EnvironmentCredentialCreatePersistenceError
   | ManagedEndpointProvider.ManagedEndpointProviderError;
 
@@ -354,7 +355,34 @@ const make = Effect.gen(function* () {
           stage: "validate_endpoint",
         });
       }
-      yield* links.upsert({ ...input, proof: verified, endpoint });
+      // Replace the link only if it still carries the lease this request
+      // observed. A concurrent relink that installed a newer T3 relay lease
+      // must win, or its connector would stay active with no persisted lease
+      // for a later unlink or shutdown to revoke. On conflict, release what
+      // this request provisioned so nothing leaks.
+      yield* links
+        .upsert({
+          ...input,
+          proof: verified,
+          endpoint,
+          expectedConnectorLeaseId: previousLink?.endpoint.connectorLeaseId ?? null,
+        })
+        .pipe(
+          Effect.tapError((error) =>
+            error._tag === "EnvironmentLinkLeaseConflict" &&
+            provisioned?.endpoint.providerKind === "t3_relay" &&
+            provisioned.endpoint.connectorLeaseId !== undefined
+              ? managedEndpointProvider
+                  .release({
+                    userId: input.userId,
+                    environmentId: verified.environmentId,
+                    providerKind: "t3_relay",
+                    connectorLeaseId: provisioned.endpoint.connectorLeaseId,
+                  })
+                  .pipe(Effect.ignore)
+              : Effect.void,
+          ),
+        );
       // A Cloudflare allocation is retained while T3 relay is canaried, but a
       // T3 relay connector credential should not survive a switch back to
       // Cloudflare. Revoke only the previous lease after the replacement link

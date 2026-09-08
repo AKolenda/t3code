@@ -32,9 +32,44 @@ describe("relay transport frames", () => {
     expect(decoded.every(Result.isSuccess)).toBe(true);
     if (!decoded.every(Result.isSuccess)) return;
     expect(decoded[0]!.success.endOfMessage).toBe(false);
+    expect(decoded[0]!.success.continuation).toBe(false);
     expect(decoded[0]!.success.payload).toHaveLength(RELAY_TRANSPORT_MAX_FRAME_PAYLOAD_BYTES);
     expect(decoded[1]!.success.endOfMessage).toBe(true);
+    expect(decoded[1]!.success.continuation).toBe(true);
     expect(decoded[1]!.success.payload).toHaveLength(7);
+  });
+
+  it("rejects a continuation fragment whose message start was never seen", () => {
+    // A Durable Object that hibernates between fragments loses its partial
+    // message. The tail must not be forwarded as a complete message.
+    const assembler = new RelayTransportMessageAssembler();
+    expect(() =>
+      assembler.append({
+        kind: RelayTransportFrameKind.websocketText,
+        streamId: 3,
+        endOfMessage: true,
+        continuation: true,
+        payload: new TextEncoder().encode("world"),
+      }),
+    ).toThrow(/no message in progress/u);
+
+    // A fresh start while a message is still open is also a protocol error.
+    expect(
+      assembler.append({
+        kind: RelayTransportFrameKind.websocketText,
+        streamId: 4,
+        endOfMessage: false,
+        payload: new TextEncoder().encode("hello "),
+      }),
+    ).toBeNull();
+    expect(() =>
+      assembler.append({
+        kind: RelayTransportFrameKind.websocketText,
+        streamId: 4,
+        endOfMessage: true,
+        payload: new TextEncoder().encode("again"),
+      }),
+    ).toThrow(/before the previous one completed/u);
   });
 
   it("rejects messages above the bounded reassembly limit", () => {
@@ -61,6 +96,7 @@ describe("relay transport frames", () => {
       kind: RelayTransportFrameKind.websocketText,
       streamId: 3,
       endOfMessage: true,
+      continuation: true,
       payload: new TextEncoder().encode("world"),
     });
 
@@ -121,6 +157,7 @@ describe("relay transport frames", () => {
         kind: RelayTransportFrameKind.websocketBinary,
         streamId: 4,
         endOfMessage: false,
+        continuation: index > 0,
         payload: Uint8Array.of(1),
       });
     }
@@ -129,6 +166,7 @@ describe("relay transport frames", () => {
         kind: RelayTransportFrameKind.websocketBinary,
         streamId: 4,
         endOfMessage: true,
+        continuation: true,
         payload: Uint8Array.of(1),
       }),
     ).toThrow(/buffer exceeds/u);
@@ -178,7 +216,7 @@ describe("relay transport frames", () => {
       endOfMessage: false,
       payload: new Uint8Array(),
     });
-    new DataView(frame.buffer).setUint16(6, 2);
+    new DataView(frame.buffer).setUint16(6, 4);
     const invalidFlags = decodeRelayTransportFrame(frame);
     expect(Result.isFailure(invalidFlags) && invalidFlags.failure.reason).toBe("invalid_flags");
   });

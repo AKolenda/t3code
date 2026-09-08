@@ -307,6 +307,7 @@ export type RelayEnvironmentLinkProofInvalidReason =
 
 export const RelayEnvironmentLinkFailedReason = Schema.Literals([
   "link_persistence_failed",
+  "link_replaced_concurrently",
   "credential_persistence_failed",
   "replay_persistence_failed",
   "internal_error",
