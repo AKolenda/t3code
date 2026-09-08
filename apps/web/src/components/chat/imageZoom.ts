@@ -23,7 +23,7 @@ export interface Point {
 }
 
 export const IMAGE_ZOOM_IDENTITY: ImageZoomState = { scale: 1, x: 0, y: 0 };
-export const MIN_IMAGE_ZOOM = 1;
+const MIN_IMAGE_ZOOM = 1;
 export const MAX_IMAGE_ZOOM = 8;
 /** Zoom applied by a double click on an unzoomed image. */
 export const DOUBLE_CLICK_IMAGE_ZOOM = 2.5;
