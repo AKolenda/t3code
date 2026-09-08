@@ -34,7 +34,7 @@ export type RelayTransportFrameKind =
 
 const RelayTransportHeader = Schema.Tuple([Schema.String, Schema.String]);
 
-export function isRelayWebSocketCloseCode(code: number): boolean {
+function isRelayWebSocketCloseCode(code: number): boolean {
   return (
     Number.isInteger(code) &&
     ((code >= 1000 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006) ||
