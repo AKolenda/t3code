@@ -338,11 +338,10 @@ layer("GitHubPullRequestCli.layer", (it) => {
 
   it.effect("reads a host that refuses the stacks preview as not stacked", () =>
     Effect.gen(function* () {
-      // A GitHub Enterprise install without the preview, or a repository it is off for, answers
-      // 404 — which `gh api` reports as a plain failed command.
+      // The CLI classifies a missing preview endpoint as not found.
       mockedExecute.mockReturnValueOnce(
         Effect.fail(
-          new GitHubCli.GitHubCliCommandError({
+          new GitHubCli.GitHubPullRequestNotFoundError({
             command: "gh",
             cwd: "/w",
             cause: new Error("HTTP 404: Not Found (https://api.github.com/repos/acme/web/stacks)"),
@@ -385,6 +384,27 @@ layer("GitHubPullRequestCli.layer", (it) => {
       );
 
       assert.strictEqual(error._tag, "GitHubCliAuthenticationError");
+    }),
+  );
+
+  it.effect("preserves transient stack failures instead of reporting no stack", () =>
+    Effect.gen(function* () {
+      const failure = new GitHubCli.GitHubCliCommandError({
+        command: "gh",
+        cwd: "/w",
+        cause: new Error("HTTP 503"),
+      });
+      mockedExecute.mockReturnValueOnce(Effect.fail(failure));
+      const cli = yield* GitHubPullRequestCli.GitHubPullRequestCli;
+      const error = yield* Effect.flip(
+        cli.getPullRequestStack({
+          cwd: "/w",
+          repository: "acme/web",
+          host: "github.com",
+          number: 7,
+        }),
+      );
+      assert.strictEqual(error, failure);
     }),
   );
 

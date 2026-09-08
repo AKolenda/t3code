@@ -71,16 +71,10 @@ import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { useEnvironmentQuery } from "~/state/query";
 import { useLiveRefresh } from "~/hooks/useLiveRefresh";
 import { pullRequestEnvironment, pullRequestStackAtom } from "~/state/pullRequests";
-import { useThreadShell } from "~/state/entities";
-import { threadEnvironment } from "~/state/threads";
 import { usePullRequestTurnRefresh, useSharedPullRequestSummary } from "~/state/pullRequests";
 import { useAtomCommand } from "~/state/use-atom-command";
-import {
-  threadPullRequestKeysEqual,
-  visibleThreadPullRequests,
-} from "@t3tools/shared/threadPullRequests";
-import { parseChangeRequestUrl } from "~/lib/openPullRequestLink";
 import { PullRequestStackMap } from "./PullRequestStackMap";
+import { PullRequestThreadLinks } from "./PullRequestThreadLinks";
 import { vcsEnvironment } from "~/state/vcs";
 import { formatRelativeTimeLabel } from "~/timestampFormat";
 import { useUiStateStore } from "~/uiStateStore";
@@ -508,7 +502,7 @@ export function PullRequestDetailPanel({
    */
   onBack?: (() => void) | undefined;
 }) {
-  const pullRequestKey = `${reference.projectId}:${reference.repository}#${reference.number}`;
+  const pullRequestKey = `${reference.projectId}:${reference.host ?? ""}:${reference.repository}#${reference.number}`;
   const matchingListEntry =
     listEntry?.projectId === reference.projectId &&
     listEntry.repository.toLowerCase() === reference.repository.toLowerCase() &&
@@ -726,44 +720,6 @@ export function PullRequestDetailPanel({
       ? null
       : pullRequestStackAtom({ environmentId, input: reference }),
   ).data;
-  // Beside a thread, the panel can attach the pull request it shows to that thread. The thread
-  // ref is the composer target when it is one; a draft has no thread to link to yet.
-  const linkableThreadRef =
-    context === "thread" &&
-    composerDraftTarget !== undefined &&
-    typeof composerDraftTarget !== "string"
-      ? composerDraftTarget
-      : null;
-  const linkableThread = useThreadShell(linkableThreadRef);
-  const linkedHere =
-    detail !== null &&
-    linkableThread !== null &&
-    (() => {
-      const parsed = parseChangeRequestUrl(detail.url);
-      return (
-        parsed !== null &&
-        visibleThreadPullRequests(linkableThread.pullRequests).some((link) =>
-          threadPullRequestKeysEqual(link, parsed),
-        )
-      );
-    })();
-  const linkToThread = useAtomCommand(threadEnvironment.linkPullRequest, { reportFailure: true });
-  const linkThisPullRequest = useCallback(() => {
-    if (detail === null || linkableThreadRef === null) return;
-    const parsed = parseChangeRequestUrl(detail.url);
-    if (parsed === null) return;
-    void linkToThread({
-      environmentId: linkableThreadRef.environmentId,
-      input: {
-        threadId: linkableThreadRef.threadId,
-        host: parsed.host,
-        repository: parsed.repository,
-        number: parsed.number,
-        url: detail.url,
-        source: "manual",
-      },
-    });
-  }, [detail, linkToThread, linkableThreadRef]);
   const activityPending = activityQuery.isPending && activity === null;
   const activityError = activity === null ? activityQuery.error : null;
   const refreshDetail = useCallback(() => {
@@ -1585,17 +1541,20 @@ export function PullRequestDetailPanel({
         <div className="mr-4 flex h-7 shrink-0 items-center justify-end gap-1">
           {detail ? (
             <>
+              <PullRequestThreadLinks
+                environmentId={environmentId}
+                reference={reference}
+                url={detail.url}
+                threadRef={
+                  threadRef ??
+                  (typeof composerDraftTarget === "object" ? composerDraftTarget : null)
+                }
+              />
               {/* Checking a pull request out is the reason to open one here at all, so it is a
                   button of its own rather than a side effect of asking an agent for something.
                   It asks where, because the two answers are not interchangeable: one leaves your
                   work where it is, the other moves the repository you are standing in. Only on
                   the page: beside a thread the branch is already checked out right there. */}
-              {linkableThreadRef !== null && !linkedHere ? (
-                <Button size="xs" variant="outline" onClick={linkThisPullRequest}>
-                  <LinkIcon aria-hidden className="size-3.5" />
-                  Link to thread
-                </Button>
-              ) : null}
               {context === "page" ? (
                 <Menu>
                   <MenuTrigger

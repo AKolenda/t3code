@@ -268,6 +268,69 @@ function applySync(
 }
 
 describe("PullRequestSyncReactor", () => {
+  it.effect("retries a failed stack read after the summary becomes terminal", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        let attempts = 0;
+        const nativeStack: PullRequestStack = {
+          id: "stack",
+          number: 7,
+          url: "https://github.com/owner/repository/stacks/7",
+          base: "main",
+          layers: [{ number: 7, headBranch: "feature", state: "merged" }],
+        };
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([makeThread("one", { pullRequests: [makeLink(7)] })]),
+          summary: (input) =>
+            Effect.succeed(makeSummary(input, { state: "merged", mergedAt: NOW })),
+          stack: () =>
+            ++attempts === 1
+              ? Effect.fail(
+                  new PullRequestOperationError({
+                    operation: "stack",
+                    detail: "temporary failure",
+                  }),
+                )
+              : Effect.succeed(nativeStack),
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* startAndSweep(fixture);
+          const commands = yield* Ref.get(fixture.syncCommands);
+          yield* Ref.update(fixture.snapshots, (snapshot) => applySync(snapshot, commands));
+          yield* sweepAgain(fixture, reactor);
+          assert.strictEqual(attempts, 2);
+          assert.deepStrictEqual((yield* Ref.get(fixture.syncCommands)).at(-1)?.stack, {
+            kind: "native",
+            ...nativeStack,
+          });
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("explicit refresh reads a changed stack even when its PR summary is unchanged", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([makeThread("one", { pullRequests: [makeLink(7, {})] })]),
+        });
+        yield* Effect.gen(function* () {
+          const reactor = yield* startAndSweep(fixture);
+          assert.strictEqual((yield* Ref.get(fixture.stackCalls)).length, 0);
+          yield* reactor.requestSync({
+            host: "github.com",
+            repository: "owner/repository",
+            number: 7,
+          });
+          yield* Queue.take(fixture.snapshotReads);
+          yield* reactor.drain;
+          assert.strictEqual((yield* Ref.get(fixture.stackCalls)).length, 1);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
   it.effect("snapshots an unsynced link once and writes it to the thread", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -1709,13 +1709,9 @@ export const make = Effect.gen(function* () {
                   }),
                 );
           }),
-          // Stacks are a preview: a host without it, or a repository it is switched off for,
-          // answers 404, which is "not stacked" rather than a failure worth showing. `gh`
-          // reports no status code, so the narrowing is to a command that ran and was refused
-          // — a missing `gh`, a signed-out one, or a rate limit still fail the same way for
-          // every request and are not swallowed here.
+          // Hosts without the stacks preview return 404. Other failures must preserve the
+          // previously synced stack and let the caller retry.
           Effect.catchTags({
-            GitHubCliCommandError: () => Effect.succeed(null),
             GitHubPullRequestNotFoundError: () => Effect.succeed(null),
           }),
         );

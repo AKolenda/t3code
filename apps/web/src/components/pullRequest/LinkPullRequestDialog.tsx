@@ -34,7 +34,7 @@ import { Input } from "../ui/input";
  * pull-requests surface, detail panel) and rendered once by the chat view so the dialog outlives
  * a palette that closes the moment its command runs.
  */
-export const linkPullRequestDialogThreadAtom = Atom.make<ScopedThreadRef | null>(null).pipe(
+const linkPullRequestDialogThreadAtom = Atom.make<ScopedThreadRef | null>(null).pipe(
   Atom.keepAlive,
   Atom.withLabel("pull-requests:link-dialog-thread"),
 );
@@ -135,7 +135,7 @@ export function changeRequestWebUrl(
   }
 }
 
-export function LinkPullRequestDialog({
+function LinkPullRequestDialog({
   open,
   threadRef,
   projectId,

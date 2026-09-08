@@ -10,8 +10,13 @@ import { useCallback, useEffect, useMemo } from "react";
 
 import { connectionAtomRuntime } from "../connection/runtime";
 import { appAtomRegistry } from "./atom-registry";
+import { serverEnvironment } from "./server";
 import { useEnvironmentQuery } from "./query";
-import { presentThreadPr, type ThreadPrPresentation } from "./thread-pr-presentation";
+import {
+  presentThreadLinkedPullRequests,
+  presentThreadPr,
+  type ThreadPrPresentation,
+} from "./thread-pr-presentation";
 
 const pullRequestSummaryAtom = createLinkedPullRequestSummaryAtomFamily(connectionAtomRuntime);
 const MAX_THREAD_PR_SNAPSHOTS = 500;
@@ -35,16 +40,24 @@ export {
 } from "./thread-pr-presentation";
 
 /**
- * Live status for a thread's server-provided PR. Visible rows share a summary
- * request for the same PR in the same environment.
+ * Linked PRs use server snapshots. Branch fallback and legacy references share
+ * a live summary request across visible rows in the same environment.
  */
 export function useThreadPr(thread: EnvironmentThreadShell): ThreadPrPresentation | null {
-  const pullRequestRef = thread.linkedPullRequest ?? thread.branchPullRequest ?? null;
-  const host = thread.pullRequests.find(
-    (link) =>
-      link.number === pullRequestRef?.number &&
-      link.repository.toLowerCase() === pullRequestRef.repository.toLowerCase(),
-  )?.host;
+  const supportsLinks = useAtomValue(
+    serverEnvironment.configValueAtom(thread.environmentId),
+    (config) => config?.environment.capabilities.threadPullRequests === true,
+  );
+  const linkedPresentation = useMemo(
+    () => presentThreadLinkedPullRequests(thread.pullRequests),
+    [thread.pullRequests],
+  );
+  // Legacy servers decode an empty link array. Keep their single-PR reference,
+  // but never revive a dismissed link from a modern server's compat field.
+  const legacyPullRequest =
+    !supportsLinks && thread.pullRequests.length === 0 ? thread.linkedPullRequest : null;
+  const pullRequestRef =
+    linkedPresentation !== null ? null : (legacyPullRequest ?? thread.branchPullRequest ?? null);
   const threadKey = scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id));
   const snapshotIdentity = JSON.stringify(pullRequestRef);
   // Select this row's entry so writes for other rows do not re-render it.
@@ -63,7 +76,6 @@ export function useThreadPr(thread: EnvironmentThreadShell): ThreadPrPresentatio
           environmentId: thread.environmentId,
           input: {
             projectId: pullRequestRef.projectId,
-            ...(host === undefined ? {} : { host }),
             repository: pullRequestRef.repository,
             number: pullRequestRef.number,
           },
@@ -107,5 +119,5 @@ export function useThreadPr(thread: EnvironmentThreadShell): ThreadPrPresentatio
     });
   }, [live, snapshotIdentity, threadKey]);
 
-  return live === undefined ? snapshot : live;
+  return linkedPresentation ?? (live === undefined ? snapshot : live);
 }

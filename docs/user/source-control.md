@@ -99,7 +99,18 @@ Use **Link pull request** in the command palette or **Linked pull requests** pan
 pull request link in the conversation. Creating a pull request from Git actions links it automatically.
 Agents can link their pull requests with the `link_pull_request` tool.
 
+Use **Link this PR** in a branch-detected badge's tooltip to keep it with the thread. From a review
+on the Pull Requests page, **Link to thread** lets you search for an active thread. The review header
+also lists the threads that link to it, including archived threads, so you can return to their context.
+
+Thread badges show a stack's layer count or the current review number with a count of additional
+links. On mobile, the Git overview lists linked reviews and their stacks; tap a review to open it.
+Linking and unlinking are available in the web and desktop clients.
+
 The **Linked pull requests** panel lists every review and groups stacks. Unlink a review from its
 row menu. An unlinked stack layer stays out of later syncs. Open linked reviews refresh on the server;
 merged and closed reviews refresh when requested. With **Auto-settle merged threads** enabled, a
 thread can settle after every linked review is terminal. An open or unsynced link keeps it active.
+
+Cross-repository links use a project on the same host. Azure DevOps reviews require a project checked
+out from the matching organization and repository.

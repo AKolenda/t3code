@@ -144,7 +144,7 @@ export const ListThreadPullRequestsResult = Schema.Struct({
 });
 export type ListThreadPullRequestsResult = typeof ListThreadPullRequestsResult.Type;
 
-export const LinkPullRequestTool = Tool.make("link_pull_request", {
+const LinkPullRequestTool = Tool.make("link_pull_request", {
   description: `${REGISTER_EVERY_PR} Links a pull request to this thread so T3 Code tracks it, shows its status beside the thread, and settles the thread when it merges. Pass the URL, or repository plus number. Linking an already-linked pull request succeeds with alreadyLinked=true.`,
   parameters: PullRequestTargetInput,
   success: LinkPullRequestResult,
@@ -157,7 +157,7 @@ export const LinkPullRequestTool = Tool.make("link_pull_request", {
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false);
 
-export const UnlinkPullRequestTool = Tool.make("unlink_pull_request", {
+const UnlinkPullRequestTool = Tool.make("unlink_pull_request", {
   description:
     "Remove a pull request link from this thread, for example after closing a pull request you opened by mistake. Pass the URL, or repository plus number. Unlinking a pull request that is not linked succeeds with wasLinked=false.",
   parameters: PullRequestTargetInput,
@@ -171,7 +171,7 @@ export const UnlinkPullRequestTool = Tool.make("unlink_pull_request", {
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false);
 
-export const ListThreadPullRequestsTool = Tool.make("list_thread_pull_requests", {
+const ListThreadPullRequestsTool = Tool.make("list_thread_pull_requests", {
   description: `List the pull requests linked to this thread with their last known host state, and how they chain into stacks (bottom to top). ${REGISTER_EVERY_PR}`,
   success: ListThreadPullRequestsResult,
   failure: PullRequestToolError,

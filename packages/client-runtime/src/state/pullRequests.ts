@@ -109,6 +109,13 @@ export function createPullRequestEnvironmentAtoms<R, E>(
   });
   return {
     refreshes,
+    linkedThreads: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:pull-requests:linked-threads",
+      tag: WS_METHODS.pullRequestsLinkedThreads,
+      staleTimeMs: 0,
+      refreshIntervalMs: 10_000,
+      refreshTrigger: ({ environmentId }) => refreshes({ environmentId, input: {} }),
+    }),
     list: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:pull-requests:list",
       tag: WS_METHODS.pullRequestsList,

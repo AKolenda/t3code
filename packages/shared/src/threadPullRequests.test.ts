@@ -5,6 +5,7 @@ import {
   legacyLinkedPullRequestOf,
   resolveThreadCurrentPullRequest,
   resolveThreadPullRequestChains,
+  resolveThreadPullRequestBadge,
   threadPullRequestKeysEqual,
 } from "./threadPullRequests.ts";
 
@@ -163,5 +164,113 @@ describe("resolveThreadPullRequestChains", () => {
       ["native", [5, 6]],
       ["derived", [8]],
     ]);
+  });
+});
+
+describe("chain selection and badge state", () => {
+  it.each(["open", "merged", "closed"] as const)(
+    "targets the top of a derived %s chain despite a later bottom update and link",
+    (state) => {
+      const bottom = link(2, {
+        snapshot: snapshot({ state, headBranch: "base", updatedAt: "2026-02-01T00:00:00.000Z" }),
+      });
+      const top = link(1, {
+        snapshot: snapshot({ state, headBranch: "top", baseBranch: "base" }),
+      });
+      expect(resolveThreadCurrentPullRequest([bottom, top])).toMatchObject(
+        state === "open"
+          ? { kind: "stack", top: { number: 1 }, open: [top, bottom] }
+          : { kind: "single", link: { number: 1 } },
+      );
+      expect(resolveThreadPullRequestBadge([bottom, top])).toEqual({
+        kind: "stack",
+        layers: 2,
+        state,
+      });
+    },
+  );
+
+  it("keeps the top native layer after completion and treats an unsynced layer as open", () => {
+    const stack = {
+      kind: "native" as const,
+      id: "native-1",
+      number: 1,
+      url: "https://github.com/pingdotgg/t3code/stacks/1",
+      base: "main",
+      layers: [
+        { number: 2, headBranch: "base", state: "merged" as const },
+        { number: 1, headBranch: "top", state: "merged" as const },
+      ],
+    };
+    const bottom = link(2, {
+      stack,
+      snapshot: snapshot({ state: "merged", updatedAt: "2026-02-01T00:00:00.000Z" }),
+    });
+    const top = link(1, { stack, snapshot: snapshot({ state: "merged" }) });
+    expect(resolveThreadCurrentPullRequest([bottom, top])).toMatchObject({
+      kind: "single",
+      link: { number: 1 },
+    });
+    expect(resolveThreadPullRequestBadge([bottom, { ...top, snapshot: null }])).toEqual({
+      kind: "stack",
+      layers: 2,
+      state: "open",
+    });
+  });
+
+  it("uses aggregate state and distinguishes unrelated work from a stack", () => {
+    const bottom = link(1, { snapshot: snapshot({ state: "merged", headBranch: "base" }) });
+    const top = link(2, { snapshot: snapshot({ state: "closed", baseBranch: "base" }) });
+    expect(resolveThreadPullRequestBadge([bottom, top])).toEqual({
+      kind: "stack",
+      layers: 2,
+      state: "closed",
+    });
+    expect(resolveThreadPullRequestBadge([bottom, top, link(3)])).toEqual({
+      kind: "pull-request",
+      others: 2,
+    });
+    expect(resolveThreadPullRequestBadge([link(3, { source: "stack-dismissed" })])).toBeNull();
+  });
+
+  it("keeps branch matching case-sensitive while ignoring repository case", () => {
+    const bottom = link(1, {
+      repository: "PingDotGG/T3code",
+      snapshot: snapshot({ headBranch: "Base" }),
+    });
+    const top = link(2, { snapshot: snapshot({ headBranch: "top", baseBranch: "base" }) });
+    expect(resolveThreadPullRequestChains([bottom, top])).toHaveLength(2);
+    expect(
+      resolveThreadPullRequestChains([
+        bottom,
+        { ...top, snapshot: snapshot({ headBranch: "top", baseBranch: "Base" }) },
+      ])[0]?.layers,
+    ).toEqual([bottom, { ...top, snapshot: snapshot({ headBranch: "top", baseBranch: "Base" }) }]);
+  });
+
+  it("preserves cyclic links without presenting a guessed stack order", () => {
+    const links = [
+      link(1, { snapshot: snapshot({ headBranch: "a", baseBranch: "b" }) }),
+      link(2, { snapshot: snapshot({ headBranch: "b", baseBranch: "a" }) }),
+    ];
+    expect(resolveThreadPullRequestChains(links).map((chain) => chain.layers)).toEqual(
+      links.map((entry) => [entry]),
+    );
+    expect(resolveThreadCurrentPullRequest(links)).toMatchObject({
+      kind: "stack",
+      top: { number: 2 },
+    });
+    expect(resolveThreadPullRequestBadge(links)).toEqual({ kind: "pull-request", others: 1 });
+  });
+
+  it("does not guess a parent when a head branch was reused", () => {
+    const links = [
+      link(1, { snapshot: snapshot({ state: "merged", headBranch: "reused" }) }),
+      link(2, { snapshot: snapshot({ headBranch: "reused" }) }),
+      link(3, { snapshot: snapshot({ headBranch: "top", baseBranch: "reused" }) }),
+    ];
+    expect(resolveThreadPullRequestChains(links).map((chain) => chain.layers)).toEqual(
+      links.map((entry) => [entry]),
+    );
   });
 });

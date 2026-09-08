@@ -126,6 +126,7 @@ function siblingPullRequestUrl(url: string, number: number): string | null {
   return match === null ? null : `${match[1]}${number}`;
 }
 
+/** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const engine = yield* OrchestrationEngine.OrchestrationEngineService;
   const snapshots = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
@@ -134,9 +135,10 @@ export const make = Effect.gen(function* () {
 
   const lastSyncedAt = new Map<string, number>();
   const requested = new Set<string>();
+  const retryStacks = new Set<string>();
 
   const isDue = (key: string, entries: ReadonlyArray<LinkEntry>, nowMs: number): boolean => {
-    if (requested.has(key)) return true;
+    if (requested.has(key) || retryStacks.has(key)) return true;
     if (entries.some((entry) => entry.link.snapshot === null)) return true;
     if (!entries.some((entry) => entry.link.snapshot?.state === "open")) return false;
     if (entries.some((entry) => isUnsettled(entry.thread))) return true;
@@ -167,6 +169,10 @@ export const make = Effect.gen(function* () {
         groups.set(key, entries);
       }
     }
+
+    for (const key of lastSyncedAt.keys()) if (!groups.has(key)) lastSyncedAt.delete(key);
+    for (const key of retryStacks) if (!groups.has(key)) retryStacks.delete(key);
+    for (const key of requested) if (!groups.has(key)) requested.delete(key);
 
     // Layers auto-linked this sweep, so two links of one thread that share a
     // stack do not both try to add the same sibling.
@@ -244,10 +250,13 @@ export const make = Effect.gen(function* () {
       };
       const summary = yield* pullRequests.summary(ref, { recoverTransientFailure: false });
       const fields = snapshotFieldsOf(summary);
-      const needsStack = entries.some(
-        (entry) =>
-          entry.link.snapshot === null || !snapshotFieldsEqual(entry.link.snapshot, fields),
-      );
+      const needsStack =
+        requested.has(key) ||
+        retryStacks.has(key) ||
+        entries.some(
+          (entry) =>
+            entry.link.snapshot === null || !snapshotFieldsEqual(entry.link.snapshot, fields),
+        );
       const fetchedStack = needsStack
         ? yield* pullRequests.stack(ref).pipe(
             Effect.map((stack) => ({
@@ -263,6 +272,10 @@ export const make = Effect.gen(function* () {
             ),
           )
         : null;
+      if (needsStack) {
+        if (fetchedStack === null) retryStacks.add(key);
+        else retryStacks.delete(key);
+      }
       // The host answered, so the cadence clock ticks even if a dispatch below is rejected.
       lastSyncedAt.set(key, nowMs);
       requested.delete(key);

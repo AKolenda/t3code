@@ -78,20 +78,22 @@ export function resolveAutoSettlementAt(input: {
   const links = visibleThreadPullRequests(thread.pullRequests);
   if (links.some((link) => link.snapshot === null || link.snapshot.state === "open")) return null;
   if (links.length > 0) {
+    const terminalTimestamp = (link: (typeof links)[number]) => {
+      const snapshot = link.snapshot;
+      const value = snapshot?.state === "merged" ? snapshot.mergedAt : snapshot?.closedAt;
+      const timestamp = Date.parse(value ?? "");
+      return Number.isNaN(timestamp) ? Number.NEGATIVE_INFINITY : timestamp;
+    };
     const latest = links.reduce((current, candidate) =>
-      Date.parse(candidate.snapshot?.updatedAt ?? "") >
-      Date.parse(current.snapshot?.updatedAt ?? "")
-        ? candidate
-        : current,
+      terminalTimestamp(candidate) > terminalTimestamp(current) ? candidate : current,
     );
     pullRequest =
       latest.snapshot === null
         ? null
         : {
             state: latest.snapshot.state,
-            updatedAt: latest.snapshot.updatedAt,
-            closedAt: latest.snapshot.closedAt ?? null,
             mergedAt: latest.snapshot.mergedAt ?? null,
+            closedAt: latest.snapshot.closedAt ?? null,
           };
   }
   if (!isAutoSettlementCandidate(thread, input.now)) return null;

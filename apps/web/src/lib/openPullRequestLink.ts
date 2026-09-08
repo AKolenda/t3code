@@ -241,7 +241,9 @@ export function useOpenChangeRequestLink(
                   Number(right.environmentId === primaryEnvironmentId) -
                   Number(left.environmentId === primaryEnvironmentId),
               );
-      const project = findProjectForChangeRequest(projects, parsed);
+      const project = resolvedPanelRef
+        ? findProjectOnChangeRequestHost(projects, parsed)
+        : findProjectForChangeRequest(projects, parsed);
       if (project === undefined || !reads(project.environmentId)) return false;
       event.preventDefault();
       event.stopPropagation();
@@ -252,9 +254,9 @@ export function useOpenChangeRequestLink(
             ? {}
             : { environmentId: project.environmentId }),
           projectId: project.id,
-          // The identity's own spelling, not the one read out of the URL: the panel asks the
-          // provider for this repository, while matching a link only ever compares lower case.
-          repository: project.repositoryIdentity?.displayName ?? parsed.repository,
+          host: parsed.host,
+          repository: parsed.repository,
+          url: targetUrl,
           number: parsed.number,
         });
         if (!resolvedThreadRef) {
@@ -264,7 +266,7 @@ export function useOpenChangeRequestLink(
               ...previous,
               involvement: previous.involvement ?? "all",
               state: previous.state ?? "all",
-              repository: project.repositoryIdentity?.displayName ?? parsed.repository,
+              repository: parsed.repository,
               number: parsed.number,
               selectedProjectId: project.id,
               selectedEnvironmentId: project.environmentId,

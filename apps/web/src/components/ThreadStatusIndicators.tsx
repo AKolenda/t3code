@@ -8,23 +8,17 @@ import {
   type VcsStatusResult,
 } from "@t3tools/contracts";
 import {
+  resolveThreadCurrentPullRequestLink,
   resolveThreadPullRequestChains,
   visibleThreadPullRequests,
 } from "@t3tools/shared/threadPullRequests";
-import { Atom } from "effect/unstable/reactivity";
-import {
-  CloudIcon,
-  FolderGit2Icon,
-  GitPullRequestArrowIcon,
-  GitPullRequestIcon,
-  LayersIcon,
-  TerminalIcon,
-} from "lucide-react";
+import { FolderGit2Icon, GitPullRequestArrowIcon, LayersIcon, TerminalIcon } from "lucide-react";
 import { useMemo } from "react";
 import { cn } from "../lib/utils";
-import { appAtomRegistry } from "../rpc/atomRegistry";
 import { useEnvironment, usePrimaryEnvironmentId } from "../state/environments";
 import { EnvironmentMachineIcon } from "./EnvironmentMachineIcon";
+import { useServerConfigs } from "../state/entities";
+import { parseChangeRequestUrl } from "../lib/openPullRequestLink";
 import { useEnvironmentQuery } from "../state/query";
 import { linkedPullRequestDetailAtom, useSharedPullRequestSummary } from "../state/pullRequests";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
@@ -34,7 +28,7 @@ import { resolveThreadStatusPill, type ThreadStatusPill } from "./Sidebar.logic"
 import type { SidebarThreadSummary } from "../types";
 import { formatWorktreePathForDisplay } from "../worktreeCleanup";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-import { pullRequestListLines, type PullRequestListLine } from "./pullRequest/pullRequestListLines";
+import { pullRequestListLines } from "./pullRequest/pullRequestListLines";
 import { resolvePullRequestState } from "./pullRequest/pullRequestPresentation";
 
 export interface PrStatusIndicator {
@@ -59,95 +53,79 @@ export interface LinkedThreadPullRequestStatus {
   readonly sourceControlProvider: NonNullable<VcsStatusResult["sourceControlProvider"]>;
 }
 
-/** Keep cached summaries visible when an offscreen row stops live queries. */
+/** Linked badges use persisted snapshots; only branch and legacy fallbacks lease summary reads. */
 export function useLinkedThreadPullRequest(
   environmentId: EnvironmentId | null,
   linkedPullRequest: ThreadLinkedPullRequest | null | undefined,
   enabled = true,
   pullRequests?: ReadonlyArray<ThreadPullRequestLink>,
+  branchPullRequest?: ThreadLinkedPullRequest | null,
 ): LinkedThreadPullRequestStatus | null {
-  const host =
-    linkedPullRequest == null
-      ? undefined
-      : pullRequests?.find(
-          (link) =>
-            link.number === linkedPullRequest.number &&
-            link.repository.toLowerCase() === linkedPullRequest.repository.toLowerCase(),
-        )?.host;
+  const configs = useServerConfigs();
+  const supportsLinks =
+    environmentId !== null &&
+    configs.get(environmentId)?.environment.capabilities.threadPullRequests === true;
+  const current = useMemo(
+    () => resolveThreadCurrentPullRequestLink(pullRequests ?? []),
+    [pullRequests],
+  );
+  const fallback =
+    current === null
+      ? ((!supportsLinks && (pullRequests?.length ?? 0) === 0 ? linkedPullRequest : null) ??
+        branchPullRequest)
+      : null;
+  const host = fallback == null ? undefined : parseChangeRequestUrl(fallback.url)?.host;
+  const reference =
+    fallback == null ? null : { ...fallback, ...(host === undefined ? {} : { host }) };
   const queried = useEnvironmentQuery(
-    !enabled || environmentId === null || linkedPullRequest == null
+    !enabled || environmentId === null || reference === null
       ? null
-      : linkedPullRequestDetailAtom({
-          environmentId,
-          input: {
-            projectId: linkedPullRequest.projectId,
-            ...(host === undefined ? {} : { host }),
-            repository: linkedPullRequest.repository,
-            number: linkedPullRequest.number,
-          },
-        }),
+      : linkedPullRequestDetailAtom({ environmentId, input: reference }),
   ).data;
-  const detail = useSharedPullRequestSummary(
-    environmentId,
-    linkedPullRequest == null
+  const detail = useSharedPullRequestSummary(environmentId, reference, queried);
+
+  return useMemo(() => {
+    if (current !== null) return linkedPullRequestSnapshotStatus(current);
+    return detail === null
       ? null
-      : { ...linkedPullRequest, ...(host === undefined ? {} : { host }) },
-    queried,
-  );
-
-  return useMemo(
-    () =>
-      detail === null
-        ? null
-        : {
-            pr: pullRequestDetailToVcsStatus(detail),
-            sourceControlProvider: {
-              kind: detail.provider,
-              name: detail.provider,
-              baseUrl: "",
-            },
-          },
-    [detail],
-  );
+      : {
+          pr: pullRequestDetailToVcsStatus(detail),
+          sourceControlProvider: { kind: detail.provider, name: detail.provider, baseUrl: "" },
+        };
+  }, [current, detail]);
 }
 
-/** A single stack is when every visible link sits in one chain of two or more. */
-export function isSingleStack(lines: ReadonlyArray<PullRequestListLine>): boolean {
-  return lines.length > 1 && new Set(lines.map((line) => line.chainKey)).size === 1;
+export function linkedPullRequestSnapshotStatus(
+  link: ThreadPullRequestLink,
+): LinkedThreadPullRequestStatus | null {
+  const snapshot = link.snapshot;
+  if (snapshot === null) return null;
+  const kind = link.url.includes("/-/merge_requests/")
+    ? "gitlab"
+    : link.url.includes("/pullrequest/")
+      ? "azure-devops"
+      : link.url.includes("/pull-requests/")
+        ? "bitbucket"
+        : "github";
+  return {
+    pr: {
+      number: link.number,
+      url: link.url,
+      title: snapshot.title,
+      state: snapshot.state,
+      isDraft: snapshot.isDraft,
+      headRef: snapshot.headBranch,
+      baseRef: snapshot.baseBranch,
+      ...(snapshot.updatedAt === null ? {} : { updatedAt: snapshot.updatedAt }),
+    },
+    sourceControlProvider: { kind, name: kind, baseUrl: "" },
+  };
 }
 
-/**
- * How a row's pull-request badge reads. A thread whose links are one stack shows the layers
- * glyph and the layer count, coloured by where the stack stands as a whole; any other set of
- * links shows the pull-request glyph, the current number, and how many others sit behind it.
- * Null when the thread has no links, so the badge falls back to whatever the branch reports.
- */
-export type ThreadPullRequestBadge =
-  | {
-      readonly kind: "stack";
-      readonly layers: number;
-      readonly state: NonNullable<ThreadPr>["state"];
-    }
-  | { readonly kind: "pull-request"; readonly others: number };
-
-export function resolveThreadPullRequestBadge(
-  pullRequests: ReadonlyArray<ThreadPullRequestLink> | undefined,
-): ThreadPullRequestBadge | null {
-  const visible = visibleThreadPullRequests(pullRequests ?? []);
-  if (visible.length === 0) return null;
-  const lines = pullRequestListLines(resolveThreadPullRequestChains(visible));
-  if (isSingleStack(lines)) {
-    const states = lines.map((line) => line.link.snapshot?.state ?? "open");
-    // Open while any layer is; merged once every layer merged; closed otherwise.
-    const state = states.includes("open")
-      ? "open"
-      : states.every((entry) => entry === "merged")
-        ? "merged"
-        : "closed";
-    return { kind: "stack", layers: lines.length, state };
-  }
-  return { kind: "pull-request", others: visible.length - 1 };
-}
+export {
+  resolveThreadPullRequestBadge,
+  type ThreadPullRequestBadge,
+} from "@t3tools/shared/threadPullRequests";
 
 /** The glyph a row's badge wears: the layers icon for a stack, the pull-request one otherwise. */
 export function ThreadPullRequestBadgeIcon({
@@ -429,9 +407,10 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
   );
   const pullRequest = useLinkedThreadPullRequest(
     thread.environmentId,
-    thread.linkedPullRequest ?? thread.branchPullRequest,
+    thread.linkedPullRequest,
     true,
     thread.pullRequests,
+    thread.branchPullRequest,
   );
   const pr = pullRequest?.pr ?? null;
   const prStatus = prStatusIndicator(pr, pullRequest?.sourceControlProvider);
@@ -442,7 +421,8 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
     },
   });
 
-  if (!prStatus && !threadStatus) {
+  const pendingLink = pr === null ? resolveThreadCurrentPullRequestLink(thread.pullRequests) : null;
+  if (!prStatus && !threadStatus && !pendingLink) {
     return null;
   }
 
@@ -464,6 +444,12 @@ export function ThreadRowLeadingStatus({ thread }: { thread: SidebarThreadSummar
             <PrStatusTooltipContent status={prStatus} />
           </TooltipPopup>
         </Tooltip>
+      ) : null}
+      {pendingLink ? (
+        <GitPullRequestArrowIcon
+          className="size-3 text-muted-foreground"
+          aria-label={`PR #${pendingLink.number}, status pending`}
+        />
       ) : null}
       {threadStatus ? <ThreadStatusLabel status={threadStatus} /> : null}
     </span>

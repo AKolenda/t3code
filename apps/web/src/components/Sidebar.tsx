@@ -1,3 +1,8 @@
+import { LinkBranchPullRequestButton } from "./pullRequest/LinkBranchPullRequestButton";
+import {
+  resolveThreadCurrentPullRequestLink,
+  visibleThreadPullRequests,
+} from "@t3tools/shared/threadPullRequests";
 import { useAtomValue } from "@effect/atom-react";
 import * as Schema from "effect/Schema";
 import {
@@ -1057,9 +1062,10 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   const gitCwd = thread.worktreePath ?? props.project?.workspaceRoot ?? null;
   const linkedPullRequestStatus = useLinkedThreadPullRequest(
     thread.environmentId,
-    thread.linkedPullRequest ?? thread.branchPullRequest,
+    thread.linkedPullRequest,
     leaseLiveStatus,
     thread.pullRequests,
+    thread.branchPullRequest,
   );
   const gitStatus = useEnvironmentQuery(
     leaseLiveStatus && (thread.branch != null || thread.worktreePath !== null) && gitCwd !== null
@@ -1074,6 +1080,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     gitStatus.data,
   );
   const pr = linkedPullRequestStatus?.pr ?? null;
+  const currentLinkedPr = resolveThreadCurrentPullRequestLink(thread.pullRequests);
 
   // Same semantics as the legacy sidebar (never-visited counts as read):
   // switching sidebars must not light up every historical thread as unread.
@@ -1350,17 +1357,26 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   }, [showSnoozeButton]);
   const handlePrClick = useCallback(
     (event: ReactMouseEvent<HTMLAnchorElement>) => {
-      if (!pr?.url) return;
+      const url = pr?.url ?? currentLinkedPr?.url;
+      if (!url) return;
       const openedInRightPanel = openPrLink(
         event,
-        pr.url,
+        url,
         openPullRequestsInRightPanel ? threadRef : undefined,
       );
       if (openedInRightPanel && openPullRequestsInRightPanel && !props.isActive) {
         onThreadActivate(threadRef);
       }
     },
-    [onThreadActivate, openPrLink, openPullRequestsInRightPanel, pr, props.isActive, threadRef],
+    [
+      onThreadActivate,
+      openPrLink,
+      openPullRequestsInRightPanel,
+      pr,
+      currentLinkedPr,
+      props.isActive,
+      threadRef,
+    ],
   );
 
   // All sidebar rows share one surface model. Live threads used to look
@@ -1528,6 +1544,22 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           <span className="opacity-70">+{prBadgeShape.others}</span>
         ) : null}
       </a>
+    ) : currentLinkedPr ? (
+      <a
+        href={currentLinkedPr.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={handlePrClick}
+        className="inline-flex shrink-0 items-center gap-0.5 text-xs tabular-nums text-muted-foreground hover:underline"
+        aria-label={`PR #${currentLinkedPr.number}, status pending`}
+      >
+        <ThreadPullRequestBadgeIcon icon="pull-request" />
+        {currentLinkedPr.number}
+        {prBadgeShape?.kind === "pull-request" && prBadgeShape.others > 0 ? (
+          <span>+{prBadgeShape.others}</span>
+        ) : null}
+      </a>
     ) : null;
   const terminalStatusIcon = terminalStatus ? (
     <span
@@ -1639,6 +1671,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               remain visible AND clickable while the row is hovered. Only
               the time/jump label yields to the settle affordance. */}
             {prBadge}
+            {prBadge && pr && visibleThreadPullRequests(thread.pullRequests).length === 0 ? (
+              <LinkBranchPullRequestButton threadRef={threadRef} url={pr.url} />
+            ) : null}
             {sortable?.isDragging ? (
               dragDestination
             ) : (
@@ -1939,6 +1974,9 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               )}
               {terminalStatusIcon}
               {prBadge}
+              {prBadge && pr && visibleThreadPullRequests(thread.pullRequests).length === 0 ? (
+                <LinkBranchPullRequestButton threadRef={threadRef} url={pr.url} />
+              ) : null}
               {diff ? (
                 <span className="shrink-0 font-mono">
                   <span className="text-emerald-600 dark:text-emerald-400">+{diff.insertions}</span>{" "}

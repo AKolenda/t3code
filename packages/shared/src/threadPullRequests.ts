@@ -40,12 +40,6 @@ function latestUpdatedAt(link: ThreadPullRequestLink): number {
   return Number.isNaN(ms) ? 0 : ms;
 }
 
-function layerIndex(link: ThreadPullRequestLink): number {
-  const layers = link.stack?.layers;
-  if (layers === undefined) return -1;
-  return layers.findIndex((layer) => layer.number === link.number);
-}
-
 /** The single pull request a one-slot surface (sidebar badge, tab icon, copy link) shows. */
 export type ThreadCurrentPullRequest =
   | { readonly kind: "single"; readonly link: ThreadPullRequestLink }
@@ -57,9 +51,8 @@ export type ThreadCurrentPullRequest =
     };
 
 /**
- * Prefer open work: one open link is the thread's PR; several open links are a stack and
- * the surface shows a stack glyph instead of guessing; with nothing open, the most recently
- * updated terminal link stands in so a merged thread still points at what it shipped.
+ * Prefer open work and the highest open layer within a chain. A completed chain still
+ * points at its top; unrelated terminal links use the most recently updated request.
  */
 export function resolveThreadCurrentPullRequest(
   links: ReadonlyArray<ThreadPullRequestLink>,
@@ -68,13 +61,21 @@ export function resolveThreadCurrentPullRequest(
   if (visible.length === 0) return null;
   const open = visible.filter(isOpen);
   if (open.length === 1) return { kind: "single", link: open[0]! };
+  const chains = resolveThreadPullRequestChains(visible);
   if (open.length > 1) {
-    const ordered = [...open].sort((left, right) => {
-      const layerDelta = layerIndex(right) - layerIndex(left);
-      if (layerDelta !== 0) return layerDelta;
-      return Date.parse(right.linkedAt) - Date.parse(left.linkedAt);
-    });
+    const openChains = chains
+      .map((chain) => [...chain.layers].reverse().filter(isOpen))
+      .filter((layers) => layers.length > 0)
+      .sort(
+        (left, right) =>
+          Math.max(...right.map((link) => Date.parse(link.linkedAt))) -
+          Math.max(...left.map((link) => Date.parse(link.linkedAt))),
+      );
+    const ordered = openChains.flat();
     return { kind: "stack", open: ordered, top: ordered[0]! };
+  }
+  if (chains.length === 1) {
+    return { kind: "single", link: chains[0]!.layers.at(-1)! };
   }
   const terminal = [...visible].sort(
     (left, right) => latestUpdatedAt(right) - latestUpdatedAt(left),
@@ -126,7 +127,7 @@ export function resolveThreadPullRequestChains(
   const nativeStacks = new Map<string, Array<ThreadPullRequestLink>>();
   for (const link of visible) {
     if (link.stack === null) continue;
-    const stackKey = `${link.host}/${link.repository}#stack:${link.stack.id}`;
+    const stackKey = `${link.host.toLowerCase()}/${link.repository.toLowerCase()}#stack:${link.stack.id}`;
     const members = nativeStacks.get(stackKey) ?? [];
     members.push(link);
     nativeStacks.set(stackKey, members);
@@ -139,18 +140,20 @@ export function resolveThreadPullRequestChains(
   }
 
   const remaining = visible.filter((link) => !placed.has(threadPullRequestKeyOf(link)));
-  const byHead = new Map<string, ThreadPullRequestLink>();
+  const branchKey = (link: ThreadPullRequestLink, branch: string) =>
+    `${link.host.toLowerCase()}/${link.repository.toLowerCase()}:${branch}`;
+  // Reused head names cannot identify a parent unambiguously.
+  const byHead = new Map<string, ThreadPullRequestLink | null>();
   for (const link of remaining) {
     if (link.snapshot === null) continue;
-    byHead.set(`${link.host}/${link.repository}:${link.snapshot.headBranch}`.toLowerCase(), link);
+    const key = branchKey(link, link.snapshot.headBranch);
+    byHead.set(key, byHead.has(key) ? null : link);
   }
   const hasChild = new Set<string>();
   for (const link of remaining) {
     if (link.snapshot === null) continue;
-    const parent = byHead.get(
-      `${link.host}/${link.repository}:${link.snapshot.baseBranch}`.toLowerCase(),
-    );
-    if (parent !== undefined && parent !== link) hasChild.add(threadPullRequestKeyOf(parent));
+    const parent = byHead.get(branchKey(link, link.snapshot.baseBranch));
+    if (parent != null && parent !== link) hasChild.add(threadPullRequestKeyOf(parent));
   }
   // Walk from each top (a link nothing builds on) down its base chain.
   for (const top of remaining) {
@@ -163,11 +166,42 @@ export function resolveThreadPullRequestChains(
       cursor =
         cursor.snapshot === null
           ? undefined
-          : byHead.get(
-              `${cursor.host}/${cursor.repository}:${cursor.snapshot.baseBranch}`.toLowerCase(),
-            );
+          : (byHead.get(branchKey(cursor, cursor.snapshot.baseBranch)) ?? undefined);
     }
     if (layers.length > 0) chains.push({ kind: "derived", layers });
   }
+  // Cycles have no top. Keep those links visible without inventing a stack order.
+  for (const link of remaining) {
+    if (!placed.has(threadPullRequestKeyOf(link))) {
+      chains.push({ kind: "derived", layers: [link] });
+    }
+  }
   return chains;
+}
+
+export type ThreadPullRequestBadge =
+  | {
+      readonly kind: "stack";
+      readonly layers: number;
+      readonly state: "open" | "closed" | "merged";
+    }
+  | { readonly kind: "pull-request"; readonly others: number };
+
+/** Aggregate a single chain's state; unrelated links show a count beside the current PR. */
+export function resolveThreadPullRequestBadge(
+  pullRequests: ReadonlyArray<ThreadPullRequestLink> | undefined,
+): ThreadPullRequestBadge | null {
+  const visible = visibleThreadPullRequests(pullRequests ?? []);
+  if (visible.length === 0) return null;
+  const chains = resolveThreadPullRequestChains(visible);
+  if (visible.length > 1 && chains.length === 1) {
+    const states = visible.map((link) => link.snapshot?.state ?? "open");
+    const state = states.includes("open")
+      ? "open"
+      : states.every((entry) => entry === "merged")
+        ? "merged"
+        : "closed";
+    return { kind: "stack", layers: visible.length, state };
+  }
+  return { kind: "pull-request", others: visible.length - 1 };
 }

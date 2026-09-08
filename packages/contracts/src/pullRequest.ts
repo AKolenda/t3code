@@ -7,6 +7,7 @@ import {
   NonNegativeInt,
   PositiveInt,
   ProjectId,
+  ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { SourceControlProviderKind } from "./sourceControl.ts";
@@ -634,6 +635,18 @@ export const PullRequestRef = Schema.Struct({
   number: PositiveInt,
 });
 export type PullRequestRef = typeof PullRequestRef.Type;
+
+export const PullRequestLinkedThreadsResult = Schema.Struct({
+  threads: Schema.Array(
+    Schema.Struct({
+      id: ThreadId,
+      projectId: ProjectId,
+      title: TrimmedNonEmptyString,
+      archivedAt: Schema.NullOr(IsoDateTime),
+    }),
+  ),
+});
+export type PullRequestLinkedThreadsResult = typeof PullRequestLinkedThreadsResult.Type;
 
 /**
  * The small live shape a linked thread needs. Keeping it separate from detail means a sidebar

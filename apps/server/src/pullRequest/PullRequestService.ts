@@ -461,7 +461,7 @@ function withRateLimitBackoff(
     call: (...args: Args) => Effect.Effect<A, PullRequestProviderError>,
   ) => wrap(operation, call, true);
 
-  return {
+  const wrapped = {
     kind: api.kind,
     capabilities: api.capabilities,
     getViewer: wrap("getViewer", api.getViewer),
@@ -517,6 +517,9 @@ function withRateLimitBackoff(
     setReaction: interactive("setReaction", api.setReaction),
     setThreadResolution: interactive("setThreadResolution", api.setThreadResolution),
   };
+  // Optional provider methods must be forwarded too; returning the interface alone permits omissions.
+  return wrapped satisfies PullRequestProviderApi &
+    Record<Exclude<keyof PullRequestProviderApi, keyof typeof wrapped>, never>;
 }
 
 /**
@@ -658,7 +661,10 @@ export const make = Effect.gen(function* () {
             if (roots === undefined) viewerRoots.set(host, [project.workspaceRoot]);
             else if (!roots.includes(project.workspaceRoot)) roots.push(project.workspaceRoot);
           }
-          const key = listCursorKey(host, repository);
+          const key = listCursorKey(
+            host,
+            kind === "azure-devops" ? identity.canonicalKey : repository,
+          );
           if (seen.has(key)) continue;
           seen.add(key);
           if (api === null) {
@@ -681,9 +687,9 @@ export const make = Effect.gen(function* () {
   /**
    * The project whose checkout and credentials serve a reference. The project's own
    * repository is the default; a reference that names a `host` may instead point at any
-   * repository on that host, served through the first project living there, so a thread in
-   * one repository can link a pull request from another. The returned `repository` is the
-   * reference's, since that is what every provider call after this addresses.
+   * repository on that host. Prefer its own checkout; providers with explicit repository
+   * targeting can fall back to another checkout on the host. Azure derives its organization
+   * from the checkout, so it requires a matching repository.
    */
   const requireProject = (ref: PullRequestRef): Effect.Effect<SupportedProject, PullRequestError> =>
     listWorkspaceProjects({ projectId: ref.projectId }).pipe(
@@ -711,13 +717,21 @@ export const make = Effect.gen(function* () {
         }
         return listWorkspaceProjects({ host }).pipe(
           Effect.flatMap(({ supported: onHost }) => {
-            const route = onHost[0];
+            const route =
+              onHost.find((candidate) =>
+                candidate.api.kind === "azure-devops"
+                  ? candidate.project.repositoryIdentity?.displayName?.toLowerCase() ===
+                    repository.toLowerCase()
+                  : candidate.repository.toLowerCase() === repository.toLowerCase(),
+              ) ?? onHost.find((candidate) => candidate.api.kind !== "azure-devops");
             if (route === undefined) {
               return Effect.fail(
                 new PullRequestUnavailableError({ reason: "provider-unsupported" }),
               );
             }
-            return Effect.succeed({ ...route, repository });
+            return Effect.succeed(
+              route.api.kind === "azure-devops" ? route : { ...route, repository },
+            );
           }),
         );
       }),
@@ -1592,7 +1606,11 @@ export const make = Effect.gen(function* () {
               })
               .pipe(
                 Effect.mapError(toPullRequestError("runAction")),
-                Effect.as(project.repository),
+                Effect.as(
+                  project.api.kind === "azure-devops"
+                    ? input.repository.trim()
+                    : project.repository,
+                ),
               );
           }),
         );
@@ -2421,7 +2439,12 @@ export const make = Effect.gen(function* () {
       timeToLive: (exit) => (Exit.isSuccess(exit) ? DETAIL_CACHE_TTL : Duration.zero),
     },
   );
-  const summaryFromDetail = (detail: PullRequestDetail): PullRequestSummary => ({
+  const summaryFromDetail = (
+    detail: PullRequestDetail,
+    previous: PullRequestSummary | undefined,
+  ): PullRequestSummary => ({
+    // Detail does not carry review/check summaries. Keep the last summary observation.
+    ...previous,
     provider: detail.provider,
     projectId: detail.projectId,
     repository: detail.repository,
@@ -2429,7 +2452,12 @@ export const make = Effect.gen(function* () {
     title: detail.title,
     url: detail.url,
     state: detail.state,
-    ...(detail.isDraft === true ? { isDraft: true } : {}),
+    isDraft: detail.isDraft,
+    author: detail.author,
+    additions: detail.additions,
+    deletions: detail.deletions,
+    changedFiles: detail.changedFiles,
+    mergeability: detail.mergeability,
     headBranch: detail.headBranch,
     baseBranch: detail.baseBranch,
     closedAt: detail.closedAt,
@@ -2452,7 +2480,7 @@ export const make = Effect.gen(function* () {
       key,
       Cache.get(detailCache, key).pipe(
         Effect.tap((value) => {
-          const summary = summaryFromDetail(value);
+          const summary = summaryFromDetail(value, lastGoodSummary.peek(key));
           return shouldReplaceHeldSummary(key, summary)
             ? lastGoodSummary.record(key, summary)
             : Effect.void;
