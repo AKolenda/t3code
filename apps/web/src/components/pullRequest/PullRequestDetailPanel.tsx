@@ -492,7 +492,7 @@ export function PullRequestDetailPanel({
    */
   composerDraftTarget?: ScopedThreadRef | DraftId;
 }) {
-  const pullRequestKey = `${reference.projectId}:${reference.repository}#${reference.number}`;
+  const pullRequestKey = `${environmentId}:${reference.projectId}:${reference.repository}#${reference.number}`;
   const matchingListEntry =
     listEntry?.projectId === reference.projectId &&
     listEntry.repository.toLowerCase() === reference.repository.toLowerCase() &&
@@ -519,7 +519,7 @@ export function PullRequestDetailPanel({
   // summary needs it too — a large description re-parses its whole markdown on every return
   // to the tab. `visibility` keeps boxes, sizes and scroll offsets, and takes hidden content
   // out of the tab order and the accessibility tree.
-  const tabScopeKey = `${environmentId}:${pullRequestKey}`;
+  const tabScopeKey = pullRequestKey;
   const [tabMountState, setTabMountState] = useState(() => ({
     key: tabScopeKey,
     tabs: new Set<DetailTab>(["summary"]),
@@ -721,7 +721,7 @@ export function PullRequestDetailPanel({
     () => {
       detailQuery.refresh();
     },
-    { key: `pull-request:${environmentId}:${pullRequestKey}` },
+    { key: `pull-request:${pullRequestKey}` },
   );
   // The button, on the other hand, goes around the server's cache rather than through it: it is
   // the answer for a reader who can see that what they are looking at is behind. The

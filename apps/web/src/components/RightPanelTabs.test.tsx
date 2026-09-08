@@ -1,6 +1,42 @@
-import type { DesktopPreviewFavicon, PreviewSessionSnapshot } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  type DesktopPreviewFavicon,
+  type PreviewSessionSnapshot,
+} from "@t3tools/contracts";
+import type { ComponentProps } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vite-plus/test";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+
+const { serverConfigs, detailQuery, useQuery } = vi.hoisted(() => ({
+  serverConfigs: new Map<
+    string,
+    { environment: { capabilities: { unlinkedGitHubPullRequests: boolean } } }
+  >(),
+  detailQuery: vi.fn((input: unknown) => input),
+  useQuery: vi.fn((_query: unknown) => ({ data: null })),
+}));
+
+vi.mock("~/state/entities", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/state/entities")>()),
+  useServerConfigs: () => serverConfigs,
+}));
+vi.mock("~/state/query", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("~/state/query")>()),
+  useEnvironmentQuery: useQuery,
+}));
+vi.mock("~/state/pullRequests", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("~/state/pullRequests")>();
+  return {
+    ...actual,
+    pullRequestEnvironment: { ...actual.pullRequestEnvironment, detail: detailQuery },
+  };
+});
+
+beforeEach(() => {
+  serverConfigs.clear();
+  detailQuery.mockClear();
+  useQuery.mockClear();
+});
 
 import {
   RightPanelTabs,
@@ -92,6 +128,7 @@ function renderTabs(
   second?: DesktopPreviewFavicon,
   audio?: { audible?: boolean; audioMuted?: boolean },
   previewRuntimeTabId: ((tabId: string) => string) | null = (tabId) => `runtime:${tabId}`,
+  overrides?: Partial<ComponentProps<typeof RightPanelTabs>>,
 ) {
   return renderToStaticMarkup(
     <RightPanelTabs
@@ -127,11 +164,65 @@ function renderTabs(
       filesAvailable={false}
       pullRequestAvailable={false}
       agentsAvailable={false}
+      {...overrides}
     >
       <div>content</div>
     </RightPanelTabs>,
   );
 }
+
+describe("pull request tab capability checks", () => {
+  const fallbackEnvironmentId = EnvironmentId.make("older-server");
+  const capableEnvironmentId = EnvironmentId.make("capable-server");
+
+  function renderPullRequestTab(projectId: string | null, environmentId?: string) {
+    return renderTabs(null, undefined, undefined, undefined, {
+      environmentId: fallbackEnvironmentId,
+      surfaces: [
+        {
+          id: "pull-request:test",
+          kind: "pull-request",
+          projectId,
+          repository: "cli/cli",
+          number: 14384,
+          ...(environmentId === undefined ? {} : { environmentId }),
+        },
+      ],
+      activeSurfaceId: "pull-request:test",
+    });
+  }
+
+  it("does not probe restored unlinked tabs before the server advertises support", () => {
+    renderPullRequestTab(null);
+    expect(detailQuery).not.toHaveBeenCalled();
+    expect(useQuery).toHaveBeenCalledWith(null);
+
+    serverConfigs.set(fallbackEnvironmentId, {
+      environment: { capabilities: { unlinkedGitHubPullRequests: false } },
+    });
+    renderPullRequestTab(null);
+    expect(detailQuery).not.toHaveBeenCalled();
+  });
+
+  it("uses the tab's server capability instead of the fallback environment", () => {
+    serverConfigs.set(capableEnvironmentId, {
+      environment: { capabilities: { unlinkedGitHubPullRequests: true } },
+    });
+    renderPullRequestTab(null, capableEnvironmentId);
+    expect(detailQuery).toHaveBeenCalledWith({
+      environmentId: capableEnvironmentId,
+      input: { projectId: null, repository: "cli/cli", number: 14384 },
+    });
+  });
+
+  it("keeps project-linked tabs working on older servers", () => {
+    renderPullRequestTab("project-1");
+    expect(detailQuery).toHaveBeenCalledWith({
+      environmentId: fallbackEnvironmentId,
+      input: { projectId: "project-1", repository: "cli/cli", number: 14384 },
+    });
+  });
+});
 
 describe("RightPanelTabs preview favicon", () => {
   it("prefers a live capture and never asks Google about a private hostname", () => {

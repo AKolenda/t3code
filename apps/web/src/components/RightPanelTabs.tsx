@@ -56,6 +56,7 @@ import { faviconUrlForOrigin } from "~/lib/favicon";
 import { useTheme } from "~/hooks/useTheme";
 import { pullRequestEnvironment } from "~/state/pullRequests";
 import { useEnvironmentQuery } from "~/state/query";
+import { useServerConfigs } from "~/state/entities";
 import { COLLAPSED_SIDEBAR_TITLEBAR_INSET_CLASS } from "~/workspaceTitlebar";
 
 import { PreviewPanelShell, type PreviewPanelMode } from "./preview/PreviewPanelShell";
@@ -699,8 +700,12 @@ function PullRequestSurfaceIcon({
 }) {
   const resolvedEnvironmentId =
     (surface.environmentId as EnvironmentId | undefined) ?? environmentId;
+  const serverConfigs = useServerConfigs();
   const detail = useEnvironmentQuery(
-    resolvedEnvironmentId === null
+    resolvedEnvironmentId === null ||
+      (surface.projectId === null &&
+        serverConfigs.get(resolvedEnvironmentId)?.environment.capabilities
+          .unlinkedGitHubPullRequests !== true)
       ? null
       : pullRequestEnvironment.detail({
           environmentId: resolvedEnvironmentId,
