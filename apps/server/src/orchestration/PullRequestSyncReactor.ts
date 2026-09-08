@@ -60,6 +60,8 @@ function snapshotFieldsOf(summary: PullRequestSummary): SnapshotFields {
     baseBranch: summary.baseBranch,
     isDraft: summary.isDraft ?? false,
     updatedAt: summary.updatedAt,
+    closedAt: summary.closedAt ?? null,
+    mergedAt: summary.mergedAt ?? null,
     ...(summary.author === undefined ? {} : { author: summary.author }),
     ...(summary.additions === undefined ? {} : { additions: summary.additions }),
     ...(summary.deletions === undefined ? {} : { deletions: summary.deletions }),
@@ -78,6 +80,8 @@ function snapshotFieldsEqual(left: SnapshotFields, right: SnapshotFields): boole
     left.baseBranch === right.baseBranch &&
     left.isDraft === right.isDraft &&
     left.updatedAt === right.updatedAt &&
+    (left.closedAt ?? null) === (right.closedAt ?? null) &&
+    (left.mergedAt ?? null) === (right.mergedAt ?? null) &&
     (left.author?.login ?? null) === (right.author?.login ?? null) &&
     (left.author?.avatarUrl ?? null) === (right.author?.avatarUrl ?? null) &&
     left.additions === right.additions &&
@@ -182,7 +186,7 @@ export const make = Effect.gen(function* () {
       if (changed) {
         const uuid = yield* crypto.randomUUIDv4;
         yield* engine.dispatch({
-          type: "thread.pull-request.sync",
+          type: "thread.pull-request-link.sync",
           commandId: CommandId.make(`server:pr-sync:${thread.id}:${uuid}`),
           threadId: thread.id,
           host: link.host,

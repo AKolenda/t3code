@@ -26,6 +26,7 @@ import type {
   PullRequestReviewVerdict,
   PullRequestReviewerCandidateList,
   PullRequestReviewerKind,
+  PullRequestLabelCandidateList,
   PullRequestState,
   PullRequestUpdateMethod,
   PullRequestViewerPermissions,
@@ -41,7 +42,7 @@ import { SourceControlProviderKind as SourceControlProviderKindSchema } from "@t
  * provider for the whole workspace, a rate limit pauses its host, and anything else is specific
  * to the request.
  */
-export class PullRequestProviderError extends Schema.TaggedErrorClass<PullRequestProviderError>()(
+export class PullRequestProviderError extends Schema.TaggedError<PullRequestProviderError>()(
   "PullRequestProviderError",
   {
     provider: SourceControlProviderKindSchema,
@@ -77,6 +78,8 @@ export interface ProviderChangeRequest {
   readonly additions: number;
   readonly deletions: number;
   readonly createdAt: string;
+  readonly closedAt?: string | null;
+  readonly mergedAt?: string | null;
   readonly updatedAt: string;
   /** Accounts with a review requested. Team-level requests are excluded by each provider. */
   readonly reviewRequestLogins: ReadonlyArray<string>;
@@ -95,9 +98,11 @@ export interface ProviderChangeRequestSummary {
   readonly headBranch: string;
   readonly baseBranch: string;
   readonly state: PullRequestState;
+  /** Present when the host says an open pull request is still a draft. */
+  readonly isDraft?: boolean;
+  readonly closedAt?: string | null;
+  readonly mergedAt?: string | null;
   readonly updatedAt: string;
-  /** Absent where the cheap read does not carry it; the consumer treats absent as not draft. */
-  readonly isDraft?: boolean | undefined;
   /** Overview fields, present where the host's single read returns them at no extra cost. */
   readonly author?: PullRequestActor | null | undefined;
   readonly additions?: number | undefined;
@@ -207,6 +212,10 @@ export interface ProviderChangeRequestDetail extends ProviderChangeRequest {
   readonly behindBy?: number;
   /** Absent from a host that does not report whether it is armed to merge this on its own. */
   readonly autoMergeEnabled?: boolean;
+  /** The strategy stored with an armed auto-merge, where the host reports it. */
+  readonly autoMergeMethod?: PullRequestMergeMethod;
+  /** Workflow runs on this head commit that still need a maintainer's approval. */
+  readonly workflowApprovalsRequired?: number;
 }
 
 /** The conversation-shaped half of a detail, loaded after the core can already render. */
@@ -500,6 +509,23 @@ export interface PullRequestProviderApi {
         readonly kind: PullRequestReviewerKind;
       }>;
       readonly requested: boolean;
+    },
+  ) => Effect.Effect<void, PullRequestProviderError>;
+
+  /**
+   * The repository's labels, with the ones already on the change request marked. Present with
+   * `setLabels` only where `capabilities.labels` is true; the service refuses both without it.
+   */
+  readonly listLabelCandidates?: (
+    input: ProviderRepositoryRef & { readonly number: number },
+  ) => Effect.Effect<PullRequestLabelCandidateList, PullRequestProviderError>;
+
+  /** Puts labels on the change request, or takes them off. One call for both directions. */
+  readonly setLabels?: (
+    input: ProviderRepositoryRef & {
+      readonly number: number;
+      readonly labels: ReadonlyArray<string>;
+      readonly applied: boolean;
     },
   ) => Effect.Effect<void, PullRequestProviderError>;
 

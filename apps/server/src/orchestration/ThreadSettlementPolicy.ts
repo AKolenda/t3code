@@ -1,18 +1,15 @@
 import type { OrchestrationThreadShell } from "@t3tools/contracts";
+import { visibleThreadPullRequests } from "@t3tools/shared/threadPullRequests";
 
 export interface SettlementPullRequest {
   readonly state: "open" | "closed" | "merged";
-  readonly updatedAt: string | null;
+  readonly closedAt?: string | null;
+  readonly mergedAt?: string | null;
+  readonly updatedAt?: string | null;
 }
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
-export const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
-
-function parseMs(value: string | null | undefined): number {
-  if (value == null) return Number.NEGATIVE_INFINITY;
-  const ms = Date.parse(value);
-  return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms;
-}
+const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
 
 function latestTimestamp(values: ReadonlyArray<string | null | undefined>): string | null {
   let latest: string | null = null;
@@ -55,49 +52,64 @@ function pullRequestSettles(
   if (pullRequest.state !== "closed" && (pullRequest.state !== "merged" || !autoSettleOnMerge)) {
     return false;
   }
-  if (pullRequest.updatedAt === null) return false;
+  const terminalAt = pullRequest.state === "merged" ? pullRequest.mergedAt : pullRequest.closedAt;
+  if (terminalAt == null) return false;
   const userAnchor = latestTimestamp([
     thread.createdAt,
     thread.latestUserMessageAt,
     thread.latestTurn?.requestedAt,
   ]);
   if (userAnchor === null) return false;
-  const pullRequestAt = Date.parse(pullRequest.updatedAt);
+  const pullRequestAt = Date.parse(terminalAt);
   const userAnchorAt = Date.parse(userAnchor);
   if (Number.isNaN(pullRequestAt) || Number.isNaN(userAnchorAt)) return false;
   return pullRequestAt >= userAnchorAt;
 }
 
-/**
- * Any open pull request keeps the thread active. With only terminal ones, the most recently
- * updated decides, so a thread whose stack merged layer by layer settles once the last layer
- * lands. Threads without pull requests fall through to the inactivity rule.
- */
-export function shouldAutoSettleThread(input: {
+export function resolveAutoSettlementAt(input: {
   readonly thread: OrchestrationThreadShell;
-  readonly pullRequests: ReadonlyArray<SettlementPullRequest>;
+  readonly pullRequest: SettlementPullRequest | null;
   readonly now: string;
   readonly autoSettleAfterDays: number | null;
   readonly autoSettleOnMerge: boolean;
-}): boolean {
-  const { thread, pullRequests } = input;
-  if (!isAutoSettlementCandidate(thread, input.now)) return false;
-  if (pullRequests.some((pullRequest) => pullRequest.state === "open")) return false;
-  if (pullRequests.length > 0) {
-    const latest = pullRequests.reduce((current, candidate) =>
-      parseMs(candidate.updatedAt) > parseMs(current.updatedAt) ? candidate : current,
+}): string | null {
+  const { thread } = input;
+  let pullRequest = input.pullRequest;
+  const links = visibleThreadPullRequests(thread.pullRequests);
+  if (links.some((link) => link.snapshot === null || link.snapshot.state === "open")) return null;
+  if (links.length > 0) {
+    const latest = links.reduce((current, candidate) =>
+      Date.parse(candidate.snapshot?.updatedAt ?? "") >
+      Date.parse(current.snapshot?.updatedAt ?? "")
+        ? candidate
+        : current,
     );
-    if (pullRequestSettles(thread, latest, input.autoSettleOnMerge)) return true;
+    pullRequest =
+      latest.snapshot === null
+        ? null
+        : {
+            state: latest.snapshot.state,
+            updatedAt: latest.snapshot.updatedAt,
+            closedAt: latest.snapshot.closedAt ?? null,
+            mergedAt: latest.snapshot.mergedAt ?? null,
+          };
   }
-  if (input.autoSettleAfterDays === null) return false;
+  if (!isAutoSettlementCandidate(thread, input.now)) return null;
   const activityAt = latestTimestamp([
     thread.latestUserMessageAt,
     thread.latestTurn?.requestedAt,
     thread.latestTurn?.startedAt,
     thread.latestTurn?.completedAt,
   ]);
-  if (activityAt === null) return false;
-  return Date.parse(activityAt) < Date.parse(input.now) - input.autoSettleAfterDays * DAY_MS;
+  if (pullRequest !== null) {
+    if (pullRequestSettles(thread, pullRequest, input.autoSettleOnMerge)) {
+      return activityAt ?? thread.createdAt;
+    }
+  }
+  if (input.autoSettleAfterDays === null || activityAt === null) return null;
+  return Date.parse(activityAt) < Date.parse(input.now) - input.autoSettleAfterDays * DAY_MS
+    ? activityAt
+    : null;
 }
 
 /** Cheap checks that run before any source control lookup. */

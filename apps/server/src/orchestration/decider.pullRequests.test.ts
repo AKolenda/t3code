@@ -253,7 +253,7 @@ it.layer(NodeServices.layer)("pull request link decider", (it) => {
     Effect.gen(function* () {
       const error = yield* decideOrchestrationCommand({
         command: {
-          type: "thread.pull-request.sync",
+          type: "thread.pull-request-link.sync",
           commandId: CommandId.make("cmd-sync-missing"),
           threadId: THREAD_ID,
           host: "github.com",
@@ -272,7 +272,7 @@ it.layer(NodeServices.layer)("pull request link decider", (it) => {
     Effect.gen(function* () {
       const decided = yield* decideOrchestrationCommand({
         command: {
-          type: "thread.pull-request.sync",
+          type: "thread.pull-request-link.sync",
           commandId: CommandId.make("cmd-sync"),
           threadId: THREAD_ID,
           host: "GitHub.com",

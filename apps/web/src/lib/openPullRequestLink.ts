@@ -1,59 +1,22 @@
 import type {
   EnvironmentId,
-  LocalApi,
   RepositoryIdentity,
   ScopedThreadRef,
   ThreadLinkedPullRequest,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
-import * as Schema from "effect/Schema";
 import { type MouseEvent, useCallback } from "react";
 
 import { pullRequestHostOf, type SourceControlProviderKind } from "@t3tools/contracts";
 import { parseChangeRequestUrl, type ChangeRequestLink } from "@t3tools/shared/changeRequestUrl";
 
+import { useOpenLink } from "../browser/useOpenLink";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
-import { readLocalApi } from "../localApi";
 import { useRightPanelStore } from "../rightPanelStore";
 import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 
 import { useProjects, useServerConfigs } from "../state/entities";
 import { usePrimaryEnvironmentId } from "../state/environments";
-
-export class PullRequestLinkOpenError extends Schema.TaggedErrorClass<PullRequestLinkOpenError>()(
-  "PullRequestLinkOpenError",
-  {
-    targetOrigin: Schema.NullOr(Schema.String),
-    cause: Schema.Defect(),
-  },
-) {
-  static fromCause(targetUrl: string, cause: unknown): PullRequestLinkOpenError {
-    let targetOrigin: string | null = null;
-    try {
-      targetOrigin = new URL(targetUrl).origin;
-    } catch {
-      // Keep malformed URLs out of diagnostics while preserving the open failure below.
-    }
-    return new PullRequestLinkOpenError({ targetOrigin, cause });
-  }
-
-  override get message(): string {
-    return this.targetOrigin === null
-      ? "Unable to open pull request link."
-      : `Unable to open pull request link at ${this.targetOrigin}.`;
-  }
-}
-
-export async function openPullRequestLink(
-  shell: Pick<LocalApi["shell"], "openExternal">,
-  targetUrl: string,
-): Promise<void> {
-  try {
-    await shell.openExternal(targetUrl);
-  } catch (cause) {
-    throw PullRequestLinkOpenError.fromCause(targetUrl, cause);
-  }
-}
 
 /** Builds a GitHub URL that remains available when the pull request API cannot be read. */
 export function gitHubPullRequestBrowserUrl(
@@ -98,6 +61,34 @@ export function gitHubPullRequestBrowserUrl(
  * the reader out of their browser and into a page that cannot find the change request.
  */
 export { parseChangeRequestUrl, type ChangeRequestLink };
+
+/**
+ * The pull-request URL a GitHub-style `#123` autolink might name. GitHub writes every bare
+ * reference through `/issues/`, including pull requests, so this only builds a candidate: the
+ * caller must successfully read it as a pull request before treating it as one.
+ */
+export function pullRequestCandidateUrlFromReferenceAutolink(targetUrl: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(targetUrl);
+  } catch {
+    return null;
+  }
+  if (
+    (url.protocol !== "https:" && url.protocol !== "http:") ||
+    !(
+      url.hostname.toLowerCase() === "github.com" ||
+      url.hostname.toLowerCase().endsWith(".github.com") ||
+      url.hostname.toLowerCase().startsWith("github.")
+    )
+  ) {
+    return null;
+  }
+  const match = /^\/([^/]+\/[^/]+)\/issues\/(\d+)(?:\/|$)/u.exec(url.pathname);
+  if (match?.[1] === undefined || match[2] === undefined) return null;
+  url.pathname = `/${match[1]}/pull/${match[2]}`;
+  return url.toString();
+}
 
 /** Match a stored PR without requiring its project to remain available. */
 export function matchesLinkedPullRequestUrl(
@@ -209,6 +200,7 @@ export function shouldOpenPullRequestExternally(
 
 export function useOpenChangeRequestLink(
   threadRef?: ScopedThreadRef,
+  panelRef?: ScopedThreadRef,
 ): (
   event: Pick<
     MouseEvent<HTMLElement>,
@@ -216,15 +208,17 @@ export function useOpenChangeRequestLink(
   >,
   targetUrl: string,
   targetThreadRef?: ScopedThreadRef,
+  targetEnvironmentId?: EnvironmentId,
 ) => boolean {
   const navigate = useNavigate();
   const allProjects = useProjects();
   const serverConfigs = useServerConfigs();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   return useCallback(
-    (event, targetUrl, targetThreadRef) => {
+    (event, targetUrl, targetThreadRef, targetEnvironmentId) => {
       if (shouldOpenPullRequestExternally(event)) return false;
       const resolvedThreadRef = targetThreadRef ?? threadRef;
+      const resolvedPanelRef = panelRef ?? resolvedThreadRef;
       const parsed = parseChangeRequestUrl(targetUrl);
       if (parsed === null) return false;
       const reads = (environmentId: string) =>
@@ -238,25 +232,46 @@ export function useOpenChangeRequestLink(
       // against all of them, the primary first where two hold the same repository.
       const projects = resolvedThreadRef
         ? allProjects.filter((project) => project.environmentId === resolvedThreadRef.environmentId)
-        : allProjects
-            .filter((project) => reads(project.environmentId))
-            .toSorted(
-              (left, right) =>
-                Number(right.environmentId === primaryEnvironmentId) -
-                Number(left.environmentId === primaryEnvironmentId),
-            );
+        : targetEnvironmentId
+          ? allProjects.filter((project) => project.environmentId === targetEnvironmentId)
+          : allProjects
+              .filter((project) => reads(project.environmentId))
+              .toSorted(
+                (left, right) =>
+                  Number(right.environmentId === primaryEnvironmentId) -
+                  Number(left.environmentId === primaryEnvironmentId),
+              );
       const project = findProjectForChangeRequest(projects, parsed);
       if (project === undefined || !reads(project.environmentId)) return false;
       event.preventDefault();
       event.stopPropagation();
-      if (resolvedThreadRef) {
-        useRightPanelStore.getState().openPullRequest(resolvedThreadRef, {
+      if (resolvedPanelRef) {
+        useRightPanelStore.getState().openPullRequest(resolvedPanelRef, {
+          // The standalone PR panel has a synthetic ref; each tab keeps its real environment.
+          ...(resolvedPanelRef.environmentId === project.environmentId
+            ? {}
+            : { environmentId: project.environmentId }),
           projectId: project.id,
           // The identity's own spelling, not the one read out of the URL: the panel asks the
           // provider for this repository, while matching a link only ever compares lower case.
           repository: project.repositoryIdentity?.displayName ?? parsed.repository,
           number: parsed.number,
         });
+        if (!resolvedThreadRef) {
+          void navigate({
+            to: "/pull-requests",
+            search: (previous) => ({
+              ...previous,
+              involvement: previous.involvement ?? "all",
+              state: previous.state ?? "all",
+              repository: project.repositoryIdentity?.displayName ?? parsed.repository,
+              number: parsed.number,
+              selectedProjectId: project.id,
+              selectedEnvironmentId: project.environmentId,
+            }),
+            replace: true,
+          });
+        }
         return true;
       }
       void navigate({
@@ -275,12 +290,13 @@ export function useOpenChangeRequestLink(
       });
       return true;
     },
-    [allProjects, navigate, primaryEnvironmentId, serverConfigs, threadRef],
+    [allProjects, navigate, panelRef, primaryEnvironmentId, serverConfigs, threadRef],
   );
 }
 
 export function useOpenPrLink(threadRef?: ScopedThreadRef) {
   const openChangeRequest = useOpenChangeRequestLink(threadRef);
+  const openLink = useOpenLink(threadRef);
   return useCallback(
     (event: MouseEvent<HTMLElement>, prUrl: string, targetThreadRef?: ScopedThreadRef) => {
       event.stopPropagation();
@@ -295,16 +311,9 @@ export function useOpenPrLink(threadRef?: ScopedThreadRef) {
       event.preventDefault();
       if (!openInBrowser && openChangeRequest(event, prUrl, targetThreadRef)) return true;
 
-      const api = readLocalApi();
-      if (!api) {
-        toastManager.add({
-          type: "error",
-          title: "Link opening is unavailable.",
-        });
-        return false;
-      }
-
-      void openPullRequestLink(api.shell, prUrl).catch((error) => {
+      // No project to show it in, so it is an ordinary link and follows the
+      // "Open links in" setting; the modifier still forces the system browser.
+      void openLink(prUrl, { event, threadRef: targetThreadRef }).catch((error: unknown) => {
         console.error(error);
         toastManager.add(
           stackedThreadToast({
@@ -316,6 +325,6 @@ export function useOpenPrLink(threadRef?: ScopedThreadRef) {
       });
       return false;
     },
-    [openChangeRequest],
+    [openChangeRequest, openLink],
   );
 }

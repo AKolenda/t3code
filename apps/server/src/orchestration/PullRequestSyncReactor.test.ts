@@ -35,7 +35,10 @@ import * as PullRequestSyncReactor from "./PullRequestSyncReactor.ts";
 const NOW = "2026-08-28T12:00:00.000Z";
 const PROJECT_ID = ProjectId.make("sync-project");
 
-type SyncCommand = Extract<OrchestrationCommand, { readonly type: "thread.pull-request.sync" }>;
+type SyncCommand = Extract<
+  OrchestrationCommand,
+  { readonly type: "thread.pull-request-link.sync" }
+>;
 type LinkCommand = Extract<OrchestrationCommand, { readonly type: "thread.pull-request.link" }>;
 
 const testCrypto = Crypto.make({
@@ -181,7 +184,7 @@ const makeHarness = Effect.fn("makePullRequestSyncHarness")(function* (options: 
     });
 
   const dispatch: OrchestrationEngineShape["dispatch"] = (command) => {
-    if (command.type === "thread.pull-request.sync") {
+    if (command.type === "thread.pull-request-link.sync") {
       return Ref.update(syncCommands, (recorded) => [...recorded, command]).pipe(
         Effect.as({ sequence: 1 }),
       );
@@ -290,7 +293,7 @@ describe("PullRequestSyncReactor", () => {
             (yield* Ref.get(fixture.syncCommands)).map(({ commandId: _, ...rest }) => rest),
             [
               {
-                type: "thread.pull-request.sync",
+                type: "thread.pull-request-link.sync",
                 threadId: ThreadId.make("one"),
                 host: "github.com",
                 repository: "owner/repository",
@@ -303,6 +306,8 @@ describe("PullRequestSyncReactor", () => {
                   isDraft: true,
                   updatedAt: "2026-08-27T00:00:00.000Z",
                   syncedAt: NOW,
+                  closedAt: null,
+                  mergedAt: null,
                 },
                 stack: null,
               },

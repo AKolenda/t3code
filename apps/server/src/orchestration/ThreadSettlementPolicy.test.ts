@@ -6,7 +6,7 @@ import {
   TurnId,
   type OrchestrationThreadShell,
 } from "@t3tools/contracts";
-import { shouldAutoSettleThread } from "./ThreadSettlementPolicy.ts";
+import { type SettlementPullRequest, resolveAutoSettlementAt } from "./ThreadSettlementPolicy.ts";
 
 const NOW = "2026-08-28T12:00:00.000Z";
 const makeThread = (
@@ -18,9 +18,9 @@ const makeThread = (
   modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
   runtimeMode: "full-access",
   interactionMode: "default",
+  pullRequests: [],
   branch: "feature",
   worktreePath: "/repo",
-  pullRequests: [],
   latestTurn: null,
   createdAt: "2026-08-01T00:00:00.000Z",
   updatedAt: "2026-08-20T00:00:00.000Z",
@@ -35,94 +35,55 @@ const makeThread = (
   ...overrides,
 });
 
-type PullRequest = { state: "open" | "closed" | "merged"; updatedAt: string | null };
-
 const decide = (
   thread: OrchestrationThreadShell,
-  pullRequest: PullRequest | ReadonlyArray<PullRequest> | null = null,
+  pullRequest: SettlementPullRequest | null = null,
   settings: { days?: number | null; merge?: boolean } = {},
 ) =>
-  shouldAutoSettleThread({
+  resolveAutoSettlementAt({
     thread,
-    pullRequests:
-      pullRequest === null ? [] : Array.isArray(pullRequest) ? pullRequest : [pullRequest],
+    pullRequest,
     now: NOW,
     autoSettleAfterDays: settings.days === undefined ? 3 : settings.days,
     autoSettleOnMerge: settings.merge ?? true,
+  }) !== null;
+
+describe("resolveAutoSettlementAt", () => {
+  it("returns the last activity time for persisted settlement", () => {
+    expect(
+      resolveAutoSettlementAt({
+        thread: makeThread({
+          latestTurn: {
+            turnId: TurnId.make("turn-terminal"),
+            state: "completed",
+            requestedAt: "2026-08-19T00:00:00.000Z",
+            startedAt: "2026-08-19T00:01:00.000Z",
+            completedAt: "2026-08-21T00:00:00.000Z",
+            assistantMessageId: null,
+          },
+        }),
+        pullRequest: null,
+        now: NOW,
+        autoSettleAfterDays: 3,
+        autoSettleOnMerge: true,
+      }),
+    ).toBe("2026-08-21T00:00:00.000Z");
   });
 
-describe("shouldAutoSettleThread", () => {
-  it("decides across every linked pull request", () => {
-    const recent = makeThread({ latestUserMessageAt: "2026-08-27T00:00:00.000Z" });
-    const merged = (updatedAt: string): PullRequest => ({ state: "merged", updatedAt });
-    const cases: ReadonlyArray<{
-      readonly name: string;
-      readonly thread: OrchestrationThreadShell;
-      readonly pullRequests: ReadonlyArray<PullRequest>;
-      readonly settings?: { days?: number | null; merge?: boolean };
-      readonly expected: boolean;
-    }> = [
-      {
-        name: "one open link blocks even when others merged",
-        thread: makeThread(),
-        pullRequests: [merged(NOW), { state: "open", updatedAt: NOW }],
-        expected: false,
-      },
-      {
-        name: "open link blocks the inactivity rule too",
-        thread: makeThread(),
-        pullRequests: [{ state: "open", updatedAt: null }],
-        expected: false,
-      },
-      {
-        name: "all merged settles on the latest layer",
-        thread: recent,
-        pullRequests: [merged("2026-08-26T00:00:00.000Z"), merged("2026-08-27T12:00:00.000Z")],
-        settings: { days: null },
-        expected: true,
-      },
-      {
-        name: "latest terminal update older than the user keeps the thread active",
-        thread: recent,
-        pullRequests: [merged("2026-08-25T00:00:00.000Z"), merged("2026-08-26T00:00:00.000Z")],
-        settings: { days: null },
-        expected: false,
-      },
-      {
-        name: "merged layers need the merge setting",
-        thread: recent,
-        pullRequests: [merged(NOW), { state: "closed", updatedAt: "2026-08-26T00:00:00.000Z" }],
-        settings: { days: null, merge: false },
-        expected: false,
-      },
-      {
-        name: "closed latest layer settles without the merge setting",
-        thread: recent,
-        pullRequests: [merged("2026-08-26T00:00:00.000Z"), { state: "closed", updatedAt: NOW }],
-        settings: { days: null, merge: false },
-        expected: true,
-      },
-      {
-        name: "terminal links without a timestamp fall through to inactivity",
-        thread: makeThread(),
-        pullRequests: [
-          { state: "closed", updatedAt: null },
-          { state: "merged", updatedAt: null },
-        ],
-        expected: true,
-      },
-      {
-        name: "no links keeps the inactivity rule",
-        thread: makeThread(),
-        pullRequests: [],
-        expected: true,
-      },
-    ];
-    for (const testCase of cases) {
-      expect(decide(testCase.thread, testCase.pullRequests, testCase.settings), testCase.name).toBe(
-        testCase.expected,
-      );
-    }
+  it("uses creation time for PR settlement when the thread has no activity", () => {
+    expect(
+      resolveAutoSettlementAt({
+        thread: makeThread({
+          latestUserMessageAt: null,
+          latestTurn: null,
+          updatedAt: "2026-08-27T00:00:00.000Z",
+        }),
+        pullRequest: { state: "closed", closedAt: NOW },
+        now: NOW,
+        autoSettleAfterDays: null,
+        autoSettleOnMerge: true,
+      }),
+    ).toBe("2026-08-01T00:00:00.000Z");
   });
 
   it("settles inactive threads and leaves never-used threads active", () => {
@@ -135,15 +96,15 @@ describe("shouldAutoSettleThread", () => {
     expect(decide(makeThread({ latestUserMessageAt: "2026-08-25T12:00:00.000Z" }))).toBe(false);
   });
 
-  it("keeps open pull requests active", () => {
-    expect(decide(makeThread(), { state: "open", updatedAt: NOW })).toBe(false);
+  it("settles inactive threads with open pull requests", () => {
+    expect(decide(makeThread(), { state: "open", updatedAt: NOW })).toBe(true);
   });
 
   it("settles closed requests and honors the merge setting", () => {
-    expect(decide(makeThread(), { state: "closed", updatedAt: NOW }, { merge: false })).toBe(true);
-    expect(decide(makeThread(), { state: "merged", updatedAt: NOW }, { merge: false })).toBe(true);
+    expect(decide(makeThread(), { state: "closed", closedAt: NOW }, { merge: false })).toBe(true);
+    expect(decide(makeThread(), { state: "merged", mergedAt: NOW }, { merge: false })).toBe(true);
     expect(
-      decide(makeThread(), { state: "merged", updatedAt: NOW }, { merge: false, days: null }),
+      decide(makeThread(), { state: "merged", mergedAt: NOW }, { merge: false, days: null }),
     ).toBe(false);
   });
 
@@ -151,17 +112,36 @@ describe("shouldAutoSettleThread", () => {
     expect(
       decide(
         makeThread({ latestUserMessageAt: "2026-08-27T00:00:00.000Z" }),
-        { state: "merged", updatedAt: "2026-08-26T00:00:00.000Z" },
+        { state: "merged", mergedAt: "2026-08-26T00:00:00.000Z" },
         { days: null },
       ),
     ).toBe(false);
   });
 
+  it.each(["closed", "merged"] as const)(
+    "ignores metadata edits after resumed work for %s requests",
+    (state) => {
+      expect(
+        decide(
+          makeThread({ latestUserMessageAt: "2026-08-27T00:00:00.000Z" }),
+          {
+            state,
+            closedAt: "2026-08-26T00:00:00.000Z",
+            mergedAt: "2026-08-26T00:00:00.000Z",
+            updatedAt: NOW,
+          },
+          { days: null },
+        ),
+      ).toBe(false);
+      expect(decide(makeThread(), { state, updatedAt: NOW }, { days: null })).toBe(false);
+    },
+  );
+
   it("does not inherit a terminal pull request older than the thread", () => {
     expect(
       decide(
         makeThread({ createdAt: "2026-08-20T00:00:00.000Z", latestUserMessageAt: null }),
-        { state: "closed", updatedAt: "2026-08-19T00:00:00.000Z" },
+        { state: "closed", closedAt: "2026-08-19T00:00:00.000Z" },
         { days: null },
       ),
     ).toBe(false);
@@ -169,9 +149,9 @@ describe("shouldAutoSettleThread", () => {
 
   it("requires a comparable PR timestamp for immediate settlement", () => {
     const recentThread = makeThread({ latestUserMessageAt: "2026-08-27T00:00:00.000Z" });
-    expect(decide(recentThread, { state: "closed", updatedAt: null })).toBe(false);
-    expect(decide(recentThread, { state: "merged", updatedAt: "unknown" })).toBe(false);
-    expect(decide(makeThread(), { state: "closed", updatedAt: null })).toBe(true);
+    expect(decide(recentThread, { state: "closed", closedAt: null })).toBe(false);
+    expect(decide(recentThread, { state: "merged", mergedAt: "unknown" })).toBe(false);
+    expect(decide(makeThread(), { state: "closed", closedAt: null })).toBe(true);
   });
 
   it("uses user request time instead of completion time as the PR anchor", () => {
@@ -185,7 +165,7 @@ describe("shouldAutoSettleThread", () => {
         assistantMessageId: null,
       },
     });
-    expect(decide(thread, { state: "merged", updatedAt: "2026-08-26T00:00:00.000Z" })).toBe(true);
+    expect(decide(thread, { state: "merged", mergedAt: "2026-08-26T00:00:00.000Z" })).toBe(true);
   });
 
   it("blocks pins, snooze, pending work, live sessions, and queued starts", () => {

@@ -53,7 +53,7 @@ export const PullRequestTargetInput = Schema.Struct({
 });
 export type PullRequestTargetInput = typeof PullRequestTargetInput.Type;
 
-export class PullRequestTargetError extends Schema.TaggedErrorClass<PullRequestTargetError>()(
+export class PullRequestTargetError extends Schema.TaggedError<PullRequestTargetError>()(
   "PullRequestTargetError",
   { detail: Schema.String },
 ) {
@@ -62,7 +62,7 @@ export class PullRequestTargetError extends Schema.TaggedErrorClass<PullRequestT
   }
 }
 
-export class PullRequestThreadNotFoundError extends Schema.TaggedErrorClass<PullRequestThreadNotFoundError>()(
+export class PullRequestThreadNotFoundError extends Schema.TaggedError<PullRequestThreadNotFoundError>()(
   "PullRequestThreadNotFoundError",
   { threadId: Schema.String },
 ) {
@@ -71,7 +71,7 @@ export class PullRequestThreadNotFoundError extends Schema.TaggedErrorClass<Pull
   }
 }
 
-export class PullRequestLinkFailedError extends Schema.TaggedErrorClass<PullRequestLinkFailedError>()(
+export class PullRequestLinkFailedError extends Schema.TaggedError<PullRequestLinkFailedError>()(
   "PullRequestLinkFailedError",
   { operation: Schema.Literals(["link", "unlink", "list"]), detail: Schema.String },
 ) {
