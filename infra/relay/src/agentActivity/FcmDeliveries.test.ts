@@ -711,3 +711,22 @@ it("continues shrinking text when a longer activity line is already minimal", ()
   expect(new TextEncoder().encode(encodeJson(data)).length).toBeLessThanOrEqual(3800);
   expect(data.activity_line_0).toBe("Approval\t😀😀😀😀\t😀😀😀😀");
 });
+
+it.effect("notification-only jobs do not consume another environment's card alert", () => {
+  const h = harness();
+  const other = {
+    ...state,
+    environmentId: EnvironmentId.make("other"),
+    threadId: ThreadId.make("other"),
+  };
+  h.current.target.last_aggregate_json = encodeJson(aggregateFor([other]));
+  h.current.otherStates = [{ ...other, phase: "waiting_for_approval" }];
+  h.current.state = { ...state, phase: "waiting_for_input" };
+  h.current.notificationOnlyEnvironments = [state.environmentId];
+  return Effect.gen(function* () {
+    const deliveries = yield* FcmDeliveries;
+    yield* deliveries.process({ ...h.job, state: h.current.state });
+    yield* deliveries.process({ ...h.job, state: h.current.otherStates[0]! });
+    expect(h.sent.filter((delivery) => delivery.alert)).toHaveLength(2);
+  }).pipe(Effect.provide(h.layer));
+});

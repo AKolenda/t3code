@@ -199,6 +199,7 @@ export const make = Effect.gen(function* () {
           ? Option.getOrNull(decodePreviousActivity(target.last_aggregate_json))
           : null;
         let alert: ReturnType<typeof androidAlertForState> = null;
+        let acknowledgeAggregate = true;
         if (job.state && preferences.value.notificationsEnabled) {
           const state = yield* rows.getForUserThread({
             userId: job.userId,
@@ -221,6 +222,11 @@ export const make = Effect.gen(function* () {
               })
             : [];
           const deliveryUser = deliveryUsers.find((user) => user.userId === job.userId);
+          // A notification-only job must not acknowledge transitions on another
+          // environment's live card before that environment's own job can alert.
+          acknowledgeAggregate =
+            deliveryUser?.liveActivitiesEnabled === true ||
+            !preferences.value.liveActivitiesEnabled;
           if (
             deliveryUser?.liveActivitiesEnabled &&
             preferences.value.liveActivitiesEnabled &&
@@ -308,7 +314,7 @@ export const make = Effect.gen(function* () {
                 eq(relayMobileDevices.pushToken, job.token),
               ),
             );
-        } else {
+        } else if (acknowledgeAggregate) {
           yield* devices.markDelivery({
             userId: job.userId,
             deviceId: job.deviceId,

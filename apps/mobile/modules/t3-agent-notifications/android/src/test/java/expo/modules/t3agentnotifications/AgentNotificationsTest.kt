@@ -80,7 +80,10 @@ class AgentNotificationsTest {
   fun missingLauncherDoesNotDiscardTheAlert() {
     shadowOf(context.packageManager).removeActivity(ComponentName(context, Activity::class.java))
     AgentNotifications.receive(context, update("no-launcher", false))
-    assertEquals("Test thread", manager.activeNotifications.single().notification.extras.getString(Notification.EXTRA_TITLE))
+    assertEquals(
+      "Test thread",
+      manager.activeNotifications.single().notification.extras.getString(Notification.EXTRA_TITLE)
+    )
   }
 
   @Test
