@@ -42,6 +42,7 @@ const Results = Schema.fromJsonString(
       id: Schema.String,
       title: Schema.String,
       latencyMs: Schema.Number,
+      linkedContextDigest: Schema.String,
     }),
   ),
 );
@@ -62,16 +63,26 @@ await Effect.runPromise(
     const review = [];
     const answerKey = [];
     for (const fixture of threadTitleEvaluationCases) {
+      const previous = baseline.find((entry) => entry.id === fixture.id);
+      if (values.baseline && !previous) throw new Error(`Baseline is missing ${fixture.id}.`);
       const firstMessage: ThreadTitleMessage = fixture.messages[0]!;
       const context = formatThreadTitleContext(fixture.messages);
       const message = values.initial ? firstMessage.text : context.message;
       const attachments = values.initial ? firstMessage.attachments : context.attachments;
-      const [elapsed, generated] = yield* Effect.gen(function* () {
+      const [elapsed, { generated, linkedContextDigest }] = yield* Effect.gen(function* () {
         const linkedContext = yield* resolveThreadTitleLinks({
           cwd,
           message,
         });
-        return yield* generation.generateThreadTitle({
+        const linkedContextDigest = NodeCrypto.createHash("sha256")
+          .update(linkedContext ?? "")
+          .digest("hex");
+        if (previous && previous.linkedContextDigest !== linkedContextDigest) {
+          throw new Error(
+            `Linked context changed for ${fixture.id}. Record a new baseline before comparing titles.`,
+          );
+        }
+        const generated = yield* generation.generateThreadTitle({
           cwd,
           message,
           previousTitle: values.initial ? undefined : fixture.previousTitle,
@@ -79,9 +90,8 @@ await Effect.runPromise(
           linkedContext,
           modelSelection: { instanceId: ProviderInstanceId.make("codex"), model },
         });
+        return { generated, linkedContextDigest };
       }).pipe(Effect.timed);
-      const previous = baseline.find((entry) => entry.id === fixture.id);
-      if (values.baseline && !previous) throw new Error(`Baseline is missing ${fixture.id}.`);
       const oldTitle = previous?.title ?? fixture.previousTitle;
       const newFirst = NodeCrypto.randomInt(2) === 0;
       results.push({
@@ -89,6 +99,7 @@ await Effect.runPromise(
         title: generated.title,
         latencyMs: Duration.toMillis(elapsed),
         needsRefinement: generated.needsRefinement ?? false,
+        linkedContextDigest,
       });
       review.push({
         id: fixture.id,
