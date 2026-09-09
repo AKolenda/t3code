@@ -14,6 +14,7 @@ import type * as HttpClientRequest from "effect/unstable/http/HttpClientRequest"
 import { RelayConfiguration } from "../Config.ts";
 import { FcmClient, layer } from "./FcmClient.ts";
 
+import * as WebCrypto from "../WebCrypto.ts";
 import * as FcmAssertionSigner from "./FcmAssertionSigner.ts";
 
 const { privateKey, publicKey } = NodeCrypto.generateKeyPairSync("rsa", {
@@ -63,7 +64,11 @@ function testLayer(requests: HttpClientRequest.HttpClientRequest[], responses: R
       : Effect.die("unexpected request");
   });
   return layer.pipe(
-    Layer.provide(FcmAssertionSigner.layer),
+    Layer.provide(
+      FcmAssertionSigner.layer.pipe(
+        Layer.provide(Layer.succeed(WebCrypto.WebCrypto, { subtle: globalThis.crypto.subtle })),
+      ),
+    ),
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(RelayConfiguration, config),
@@ -115,7 +120,13 @@ describe("FCM delivery", () => {
       }).pipe(
         Effect.provide(
           layer.pipe(
-            Layer.provide(FcmAssertionSigner.layer),
+            Layer.provide(
+              FcmAssertionSigner.layer.pipe(
+                Layer.provide(
+                  Layer.succeed(WebCrypto.WebCrypto, { subtle: globalThis.crypto.subtle }),
+                ),
+              ),
+            ),
             Layer.provide(Layer.succeed(RelayConfiguration, config)),
             Layer.provide(Layer.succeed(HttpClient.HttpClient, http)),
           ),
@@ -148,7 +159,13 @@ describe("FCM delivery", () => {
         iat: 1000,
         exp: 4600,
       });
-    }).pipe(Effect.provide(FcmAssertionSigner.layer)),
+    }).pipe(
+      Effect.provide(
+        FcmAssertionSigner.layer.pipe(
+          Layer.provide(Layer.succeed(WebCrypto.WebCrypto, { subtle: globalThis.crypto.subtle })),
+        ),
+      ),
+    ),
   );
 
   it.effect(

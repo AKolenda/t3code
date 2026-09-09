@@ -9,6 +9,7 @@ import * as Schema from "effect/Schema";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
 import * as RelayConfiguration from "../src/Config.ts";
+import * as WebCrypto from "../src/WebCrypto.ts";
 import * as FcmAssertionSigner from "../src/agentActivity/FcmAssertionSigner.ts";
 import * as FcmClient from "../src/agentActivity/FcmClient.ts";
 
@@ -103,7 +104,11 @@ const main = Effect.gen(function* () {
     ),
     Effect.provide(
       FcmClient.layer.pipe(
-        Layer.provide(FcmAssertionSigner.layer),
+        Layer.provide(
+          FcmAssertionSigner.layer.pipe(
+            Layer.provide(Layer.succeed(WebCrypto.WebCrypto, { subtle: globalThis.crypto.subtle })),
+          ),
+        ),
         Layer.provide(
           Layer.mergeAll(
             Layer.succeed(RelayConfiguration.RelayConfiguration, config),

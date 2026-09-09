@@ -18,11 +18,13 @@ import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
-import { RpcClient, RpcSerialization } from "effect/unstable/rpc";
+import * as RpcClient from "effect/unstable/rpc/RpcClient";
+import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization";
 import * as Socket from "effect/unstable/socket/Socket";
 
 import * as RelayConfiguration from "../src/Config.ts";
 import { androidActivityData, fitFcmData } from "../src/agentActivity/fcmPayloads.ts";
+import * as WebCrypto from "../src/WebCrypto.ts";
 import * as FcmAssertionSigner from "../src/agentActivity/FcmAssertionSigner.ts";
 import * as FcmClient from "../src/agentActivity/FcmClient.ts";
 import * as FcmDeliveries from "../src/agentActivity/FcmDeliveries.ts";
@@ -78,7 +80,11 @@ const main = Effect.gen(function* () {
     Layer.provide(RpcSerialization.layerJson),
   );
   const fcm = FcmClient.layer.pipe(
-    Layer.provide(FcmAssertionSigner.layer),
+    Layer.provide(
+      FcmAssertionSigner.layer.pipe(
+        Layer.provide(Layer.succeed(WebCrypto.WebCrypto, { subtle: globalThis.crypto.subtle })),
+      ),
+    ),
     Layer.provide(
       Layer.mergeAll(
         FetchHttpClient.layer,
