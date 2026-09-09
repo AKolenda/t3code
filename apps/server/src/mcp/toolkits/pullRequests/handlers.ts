@@ -158,11 +158,7 @@ const make = Effect.gen(function* () {
     const scope = yield* McpInvocationContext.requireMcpCapability("pull-requests");
     const thread = yield* snapshots
       .getThreadShellById(scope.threadId)
-      .pipe(
-        Effect.mapError(
-          (cause) => new PullRequestLinkFailedError({ operation, detail: cause.message }),
-        ),
-      );
+      .pipe(Effect.mapError((cause) => new PullRequestLinkFailedError({ operation, cause })));
     if (Option.isNone(thread)) {
       return yield* new PullRequestThreadNotFoundError({ threadId: scope.threadId });
     }
@@ -172,9 +168,7 @@ const make = Effect.gen(function* () {
   const projectOf = (thread: OrchestrationThreadShell, operation: "link" | "unlink") =>
     snapshots.getProjectShellById(thread.projectId).pipe(
       Effect.map(Option.getOrUndefined),
-      Effect.mapError(
-        (cause) => new PullRequestLinkFailedError({ operation, detail: cause.message }),
-      ),
+      Effect.mapError((cause) => new PullRequestLinkFailedError({ operation, cause })),
     );
 
   const dispatchFailure =
@@ -182,7 +176,7 @@ const make = Effect.gen(function* () {
     <E>(cause: Cause.Cause<E>): Effect.Effect<never, PullRequestLinkFailedError> =>
       Cause.hasInterruptsOnly(cause)
         ? Effect.failCause(cause as Cause.Cause<never>)
-        : Effect.fail(new PullRequestLinkFailedError({ operation, detail: Cause.pretty(cause) }));
+        : Effect.fail(new PullRequestLinkFailedError({ operation, cause }));
 
   return PullRequestsToolkit.of({
     link_pull_request: (input) =>
@@ -205,7 +199,7 @@ const make = Effect.gen(function* () {
             Effect.as(false),
             // The decider rejects a second link of the same PR; for the agent that is
             // the outcome it asked for, not an error.
-            Effect.catchTag("OrchestrationCommandInvariantError", () => Effect.succeed(true)),
+            Effect.catchTags({ OrchestrationCommandInvariantError: () => Effect.succeed(true) }),
             Effect.catchCause(dispatchFailure("link")),
           );
         return { ...target, alreadyLinked };
@@ -226,7 +220,7 @@ const make = Effect.gen(function* () {
           })
           .pipe(
             Effect.as(true),
-            Effect.catchTag("OrchestrationCommandInvariantError", () => Effect.succeed(false)),
+            Effect.catchTags({ OrchestrationCommandInvariantError: () => Effect.succeed(false) }),
             Effect.catchCause(dispatchFailure("unlink")),
           );
         return {

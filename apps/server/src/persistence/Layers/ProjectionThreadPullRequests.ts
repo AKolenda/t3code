@@ -15,7 +15,6 @@ import {
   ListProjectionThreadPullRequestsInput,
   ProjectionThreadPullRequest,
   ProjectionThreadPullRequestRepository,
-  type ProjectionThreadPullRequestRepositoryShape,
 } from "../Services/ProjectionThreadPullRequests.ts";
 
 const ProjectionThreadPullRequestDbRow = ProjectionThreadPullRequest.mapFields(
@@ -133,19 +132,21 @@ const makeProjectionThreadPullRequestRepository = Effect.gen(function* () {
     `,
   });
 
-  const upsert: ProjectionThreadPullRequestRepositoryShape["upsert"] = (row) =>
+  const upsert: ProjectionThreadPullRequestRepository["Service"]["upsert"] = (row) =>
     upsertProjectionThreadPullRequestRow(row).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadPullRequestRepository.upsert:query")),
     );
 
-  const listByThreadId: ProjectionThreadPullRequestRepositoryShape["listByThreadId"] = (input) =>
+  const listByThreadId: ProjectionThreadPullRequestRepository["Service"]["listByThreadId"] = (
+    input,
+  ) =>
     listProjectionThreadPullRequestRows(input).pipe(
       Effect.mapError(
         toPersistenceSqlError("ProjectionThreadPullRequestRepository.listByThreadId:query"),
       ),
     );
 
-  const listByPullRequest: ProjectionThreadPullRequestRepositoryShape["listByPullRequest"] = (
+  const listByPullRequest: ProjectionThreadPullRequestRepository["Service"]["listByPullRequest"] = (
     input,
   ) =>
     listProjectionThreadPullRequestRowsByPullRequest(input).pipe(
@@ -154,12 +155,12 @@ const makeProjectionThreadPullRequestRepository = Effect.gen(function* () {
       ),
     );
 
-  const deleteLink: ProjectionThreadPullRequestRepositoryShape["delete"] = (input) =>
+  const deleteLink: ProjectionThreadPullRequestRepository["Service"]["delete"] = (input) =>
     deleteProjectionThreadPullRequestRow(input).pipe(
       Effect.mapError(toPersistenceSqlError("ProjectionThreadPullRequestRepository.delete:query")),
     );
 
-  const deleteByThreadId: ProjectionThreadPullRequestRepositoryShape["deleteByThreadId"] = (
+  const deleteByThreadId: ProjectionThreadPullRequestRepository["Service"]["deleteByThreadId"] = (
     input,
   ) =>
     deleteProjectionThreadPullRequestRows(input).pipe(
@@ -168,7 +169,7 @@ const makeProjectionThreadPullRequestRepository = Effect.gen(function* () {
       ),
     );
 
-  const deleteByThreadIdAndSource: ProjectionThreadPullRequestRepositoryShape["deleteByThreadIdAndSource"] =
+  const deleteByThreadIdAndSource: ProjectionThreadPullRequestRepository["Service"]["deleteByThreadIdAndSource"] =
     (input) =>
       deleteProjectionThreadPullRequestRowsBySource(input).pipe(
         Effect.mapError(
@@ -185,7 +186,7 @@ const makeProjectionThreadPullRequestRepository = Effect.gen(function* () {
     delete: deleteLink,
     deleteByThreadId,
     deleteByThreadIdAndSource,
-  } satisfies ProjectionThreadPullRequestRepositoryShape;
+  } satisfies ProjectionThreadPullRequestRepository["Service"];
 });
 
 export const ProjectionThreadPullRequestRepositoryLive = Layer.effect(

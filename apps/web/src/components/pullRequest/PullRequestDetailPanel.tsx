@@ -1429,14 +1429,15 @@ export function PullRequestDetailPanel({
                   <Tooltip>
                     <TooltipTrigger
                       render={
-                        <button
-                          type="button"
+                        <Button
+                          size="icon-micro"
+                          variant="ghost-muted"
                           onClick={onBack}
-                          className="-ml-1.5 inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+                          className="-ml-1.5"
                           aria-label="Back to this thread's pull requests"
                         >
                           <ArrowLeftIcon aria-hidden className="size-3.5" />
-                        </button>
+                        </Button>
                       }
                     />
                     <TooltipPopup side="top">Back to pull requests</TooltipPopup>
@@ -1503,15 +1504,16 @@ export function PullRequestDetailPanel({
                   <Tooltip>
                     <TooltipTrigger
                       render={
-                        <button
-                          type="button"
+                        <Button
+                          size="icon-micro"
+                          variant="ghost-muted"
                           tabIndex={condensed ? 0 : -1}
                           onClick={onBack}
-                          className="-ml-1.5 inline-flex size-5 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground"
+                          className="-ml-1.5"
                           aria-label="Back to this thread's pull requests"
                         >
                           <ArrowLeftIcon aria-hidden className="size-3.5" />
-                        </button>
+                        </Button>
                       }
                     />
                     <TooltipPopup side="top">Back to pull requests</TooltipPopup>

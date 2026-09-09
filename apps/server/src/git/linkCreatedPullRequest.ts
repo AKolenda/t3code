@@ -85,7 +85,7 @@ export const linkCreatedPullRequest = <E>(input: {
         ...key,
         source: "created",
       })
-      .pipe(Effect.catchTag("OrchestrationCommandInvariantError", () => Effect.void));
+      .pipe(Effect.catchTags({ OrchestrationCommandInvariantError: () => Effect.void }));
   }).pipe(
     Effect.withSpan("linkCreatedPullRequest"),
     Effect.catchCause((cause) =>

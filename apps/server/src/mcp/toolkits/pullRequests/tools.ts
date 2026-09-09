@@ -73,10 +73,10 @@ export class PullRequestThreadNotFoundError extends Schema.TaggedError<PullReque
 
 export class PullRequestLinkFailedError extends Schema.TaggedError<PullRequestLinkFailedError>()(
   "PullRequestLinkFailedError",
-  { operation: Schema.Literals(["link", "unlink", "list"]), detail: Schema.String },
+  { operation: Schema.Literals(["link", "unlink", "list"]), cause: Schema.Defect() },
 ) {
   override get message(): string {
-    return `Could not ${this.operation} the pull request: ${this.detail}`;
+    return `Could not ${this.operation} the pull request.`;
   }
 }
 

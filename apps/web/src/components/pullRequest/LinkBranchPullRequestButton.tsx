@@ -22,9 +22,8 @@ export function LinkBranchPullRequestButton({
       <TooltipTrigger
         render={
           <Button
-            size="icon-xs"
-            variant="ghost"
-            className="size-4 shrink-0 text-muted-foreground"
+            size="icon-tiny"
+            variant="ghost-muted"
             aria-label="Link this PR"
             disabled={pending}
             onPointerDown={(event) => event.stopPropagation()}

@@ -57,28 +57,26 @@ export const DeleteProjectionThreadPullRequestsBySourceInput = Schema.Struct({
 export type DeleteProjectionThreadPullRequestsBySourceInput =
   typeof DeleteProjectionThreadPullRequestsBySourceInput.Type;
 
-export interface ProjectionThreadPullRequestRepositoryShape {
-  readonly upsert: (
-    row: ProjectionThreadPullRequest,
-  ) => Effect.Effect<void, ProjectionRepositoryError>;
-  readonly listByThreadId: (
-    input: ListProjectionThreadPullRequestsInput,
-  ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequest>, ProjectionRepositoryError>;
-  readonly listByPullRequest: (
-    input: ListProjectionThreadPullRequestsByPullRequestInput,
-  ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequest>, ProjectionRepositoryError>;
-  readonly delete: (
-    input: DeleteProjectionThreadPullRequestInput,
-  ) => Effect.Effect<void, ProjectionRepositoryError>;
-  readonly deleteByThreadId: (
-    input: DeleteProjectionThreadPullRequestsInput,
-  ) => Effect.Effect<void, ProjectionRepositoryError>;
-  readonly deleteByThreadIdAndSource: (
-    input: DeleteProjectionThreadPullRequestsBySourceInput,
-  ) => Effect.Effect<void, ProjectionRepositoryError>;
-}
-
 export class ProjectionThreadPullRequestRepository extends Context.Service<
   ProjectionThreadPullRequestRepository,
-  ProjectionThreadPullRequestRepositoryShape
+  {
+    readonly upsert: (
+      row: ProjectionThreadPullRequest,
+    ) => Effect.Effect<void, ProjectionRepositoryError>;
+    readonly listByThreadId: (
+      input: ListProjectionThreadPullRequestsInput,
+    ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequest>, ProjectionRepositoryError>;
+    readonly listByPullRequest: (
+      input: ListProjectionThreadPullRequestsByPullRequestInput,
+    ) => Effect.Effect<ReadonlyArray<ProjectionThreadPullRequest>, ProjectionRepositoryError>;
+    readonly delete: (
+      input: DeleteProjectionThreadPullRequestInput,
+    ) => Effect.Effect<void, ProjectionRepositoryError>;
+    readonly deleteByThreadId: (
+      input: DeleteProjectionThreadPullRequestsInput,
+    ) => Effect.Effect<void, ProjectionRepositoryError>;
+    readonly deleteByThreadIdAndSource: (
+      input: DeleteProjectionThreadPullRequestsBySourceInput,
+    ) => Effect.Effect<void, ProjectionRepositoryError>;
+  }
 >()("t3/persistence/Services/ProjectionThreadPullRequests/ProjectionThreadPullRequestRepository") {}
