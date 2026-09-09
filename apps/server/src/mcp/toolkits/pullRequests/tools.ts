@@ -55,10 +55,17 @@ export type PullRequestTargetInput = typeof PullRequestTargetInput.Type;
 
 export class PullRequestTargetError extends Schema.TaggedError<PullRequestTargetError>()(
   "PullRequestTargetError",
-  { detail: Schema.String },
+  { reason: Schema.Literals(["invalid-url", "incomplete-target", "host-required"]) },
 ) {
   override get message(): string {
-    return this.detail;
+    switch (this.reason) {
+      case "invalid-url":
+        return "This is not a recognised pull request URL. Pass repository and number instead.";
+      case "incomplete-target":
+        return "Pass either url, or both repository and number.";
+      case "host-required":
+        return "This thread's project has no recognised remote. Pass host or url.";
+    }
   }
 }
 

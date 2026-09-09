@@ -66,22 +66,21 @@ const resolveTarget = Effect.fn("PullRequestsToolkit.resolveTarget")(function* (
     const parsed = parseChangeRequestUrl(input.url);
     if (parsed === null) {
       return yield* new PullRequestTargetError({
-        detail: `"${input.url}" is not a pull request URL on a host T3 Code recognises. Pass repository and number instead.`,
+        reason: "invalid-url",
       });
     }
     return { ...parsed, url: input.url } satisfies ResolvedTarget;
   }
   if (input.repository === undefined || input.number === undefined) {
     return yield* new PullRequestTargetError({
-      detail: "Pass either url, or both repository and number.",
+      reason: "incomplete-target",
     });
   }
   const projectHost = projectHostAndProvider(project);
   const host = (input.host ?? projectHost.host)?.toLowerCase();
   if (host === undefined) {
     return yield* new PullRequestTargetError({
-      detail:
-        "This thread's project has no recognised remote, so host cannot be defaulted. Pass host or url.",
+      reason: "host-required",
     });
   }
   const repository = input.repository.toLowerCase();

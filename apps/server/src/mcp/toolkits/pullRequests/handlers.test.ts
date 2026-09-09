@@ -271,11 +271,14 @@ describe("pull request toolkit handlers", () => {
       const error = yield* harness
         .call("link_pull_request", { repository: "x/y" })
         .pipe(Effect.flip);
-      expect(error).toMatchObject({ _tag: "PullRequestTargetError" });
+      expect(error).toMatchObject({ _tag: "PullRequestTargetError", reason: "incomplete-target" });
       const unknown = yield* harness
-        .call("link_pull_request", { url: "https://github.com/t3tools/t3code/issues/1" })
+        .call("link_pull_request", {
+          url: "https://github.com/t3tools/t3code/issues/1?token=private-value",
+        })
         .pipe(Effect.flip);
-      expect(unknown).toMatchObject({ _tag: "PullRequestTargetError" });
+      expect(unknown).toMatchObject({ _tag: "PullRequestTargetError", reason: "invalid-url" });
+      expect(unknown.message).not.toContain("private-value");
       expect(yield* Ref.get(harness.commands)).toEqual([]);
     }),
   );
