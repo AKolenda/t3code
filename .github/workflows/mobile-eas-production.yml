@@ -1,290 +1,165 @@
-name: Mobile EAS Production
+# Staging-only workflow on staging/android-pr10416. This branch is not for merging.
+name: Android relay staging verification
 
-# Production builds and OTA updates run from CI (Linux) — never from a laptop.
-# Under the fingerprint runtime-version policy the fingerprint must be computed
-# in the same OS/pnpm as the EAS build; a macOS `eas build` computes a different
-# fingerprint (platform-specific deps + pnpm version) and errors. On this Linux
-# runner, with corepack pinning pnpm 10.24 in eas.json, local == build.
-#
-# Every merge to main that touches the mobile app reconciles, per platform:
-#   1. Store builds: if the latest production build's version differs from
-#      app.config.ts, cut a new build and submit it (TestFlight + Play internal
-#      track). Bumping `version` is therefore all it takes to
-#      start the next release train — the first build of a version enters
-#      external-TestFlight beta review immediately, and later builds of the
-#      same version auto-approve until that version is released. After App
-#      Store approval, Apple closes the release train and `version` must be
-#      bumped before another iOS build can be submitted. Releasing to the App
-#      Store stays a manual App Store Connect step.
-#   2. OTA: publish a production-channel update for each platform where at
-#      least one finished production build matches the current native
-#      fingerprint. Old-version binaries with a matching fingerprint receive
-#      it too. When native drift means no binary could install the update,
-#      it is skipped and flagged in the job summary instead of published
-#      into the void.
-# workflow_dispatch remains as a manual override for both modes (e.g. to
-# retry an errored build or force an OTA).
 on:
   workflow_dispatch:
     inputs:
-      mode:
-        description: "build (+ auto-submit to TestFlight) or update (OTA)"
-        required: true
+      phase:
+        description: Plan isolated relay, deploy it, or start its Android APK build
         type: choice
-        default: build
-        options:
-          - build
-          - update
-      platform:
-        description: "Target platform"
         required: true
-        type: choice
-        default: ios
-        options:
-          - ios
-          - android
-          - all
-      version:
-        description: "Optional build version override (blank uses app.config.ts; an override is committed before building)"
-        required: false
-        type: string
-      message:
-        description: "OTA update message (mode=update only)"
-        required: false
-        type: string
-  push:
-    branches: [main]
-    paths:
-      - apps/mobile/**
-      - packages/client-runtime/**
-      - packages/contracts/**
-      - packages/shared/**
-      - assets/**
-      - scripts/**
-      - patches/**
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - .github/workflows/mobile-eas-production.yml
+        default: plan
+        options: [plan, deploy, build]
 
-# Serialize runs so OTAs publish in merge order. GitHub keeps at most one
-# queued run per group, so a burst of merges collapses into one run of the
-# newest commit — intermediate commits don't need their own OTA.
+permissions:
+  contents: read
+
 concurrency:
-  group: mobile-eas-production
+  group: relay-staging-android-10416
   cancel-in-progress: false
 
 jobs:
-  production:
-    name: EAS Production ${{ github.event_name == 'push' && 'auto' || inputs.mode }}
+  staging:
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    permissions:
-      contents: read
+    timeout-minutes: 30
+    # Read the existing credentials; the Alchemy stage and domain below are isolated.
+    environment: production
     env:
-      APP_VARIANT: production
+      STAGING_STAGE: staging_android_10416
+      STAGING_RELAY_URL: https://relay-staging-android-10416.t3.codes
+      RELAY_DOMAIN: relay-staging-android-10416.t3.codes
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      PLANETSCALE_ORGANIZATION: ${{ vars.PLANETSCALE_ORGANIZATION }}
+      AXIOM_ORG_ID: ${{ vars.AXIOM_ORG_ID }}
+      RELAY_API_ZONE_NAME: ${{ vars.RELAY_API_ZONE_NAME }}
+      RELAY_TUNNEL_ZONE_NAME: ${{ vars.RELAY_TUNNEL_ZONE_NAME }}
+      CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
+      CLERK_JWT_AUDIENCE: ${{ vars.CLERK_JWT_AUDIENCE }}
+      APNS_ENVIRONMENT: ${{ vars.APNS_ENVIRONMENT }}
+      APNS_TEAM_ID: ${{ vars.APNS_TEAM_ID }}
+      APNS_KEY_ID: ${{ vars.APNS_KEY_ID }}
+      APNS_BUNDLE_ID: ${{ vars.APNS_BUNDLE_ID }}
+      ALCHEMY_TELEMETRY_DISABLED: "1"
       NODE_OPTIONS: --max-old-space-size=8192
     steps:
-      - id: expo-token
-        name: Check for EXPO_TOKEN
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: |
-          if [ -n "$EXPO_TOKEN" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "EXPO_TOKEN is not available; skipping EAS production job."
-          fi
-
-      - id: version_app_token
-        name: Mint release app token for version override
-        if: steps.expo-token.outputs.present == 'true' && github.event_name == 'workflow_dispatch' && inputs.mode == 'build' && inputs.version != ''
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.RELEASE_APP_ID }}
-          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-
-      - name: Checkout
-        if: steps.expo-token.outputs.present == 'true'
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          token: ${{ steps.version_app_token.outputs.token || github.token }}
-          # No sparse-checkout here: it makes actions/checkout fetch with
-          # --filter=blob:none, and eas-cli archives the project via
-          # `git clone --depth 1 file://<workspace>`, which fails (exit 128)
-          # when the partial clone can't serve the unfetched blobs.
-
-      - name: Setup Vite+
-        if: steps.expo-token.outputs.present == 'true'
-        uses: voidzero-dev/setup-vp@v1
+      - name: Guard staging target
+        run: |
+          test "$GITHUB_REF" = refs/heads/staging/android-pr10416
+          test "$STAGING_STAGE" = staging_android_10416
+          test "$RELAY_DOMAIN" = relay-staging-android-10416.t3.codes
+      - uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
           cache: true
           run-install: |
             args:
+              - --filter=t3code-relay...
               - --filter=@t3tools/mobile...
-
+      - name: Plan or deploy isolated relay
+        if: inputs.phase != 'build'
+        env:
+          PHASE: ${{ inputs.phase }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          PLANETSCALE_API_TOKEN_ID: ${{ secrets.PLANETSCALE_API_TOKEN_ID }}
+          PLANETSCALE_API_TOKEN: ${{ secrets.PLANETSCALE_API_TOKEN }}
+          AXIOM_TOKEN: ${{ secrets.AXIOM_TOKEN }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+          APNS_PRIVATE_KEY: ${{ secrets.APNS_PRIVATE_KEY }}
+          FCM_SERVICE_ACCOUNT: ${{ secrets.FCM_SERVICE_ACCOUNT }}
+        run: |
+          test -n "$FCM_SERVICE_ACCOUNT"
+          if [ "$PHASE" = plan ]; then
+            vp run --filter t3code-relay deploy --stage "$STAGING_STAGE" --dry-run
+          else
+            vp run --filter t3code-relay deploy --stage "$STAGING_STAGE" --yes --github-output
+          fi
       - name: Expose pnpm
-        if: steps.expo-token.outputs.present == 'true'
+        if: inputs.phase != 'deploy'
         run: |
           pnpm_version="$(node --print "require('./package.json').packageManager.split('@').pop()")"
-          vp_pnpm_bin="$HOME/.vite-plus/package_manager/pnpm/$pnpm_version/pnpm/bin"
-          echo "$vp_pnpm_bin" >> "$GITHUB_PATH"
-          "$vp_pnpm_bin/pnpm" --version
-
+          echo "$HOME/.vite-plus/package_manager/pnpm/$pnpm_version/pnpm/bin" >> "$GITHUB_PATH"
       - name: Setup EAS
-        if: steps.expo-token.outputs.present == 'true'
+        if: inputs.phase != 'deploy'
         uses: expo/expo-github-action@v8
         with:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
-          # npm, not pnpm: this only installs eas-cli into the action's own
-          # tool dir, and pnpm 11 hard-fails that install on dtrace-provider's
-          # ignored build script (no allowBuilds config outside the repo).
           packager: npm
-
-      - name: Pull production environment variables
-        if: steps.expo-token.outputs.present == 'true'
+      - name: Inspect Firebase app configuration
+        if: inputs.phase != 'deploy'
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: eas env:pull production --non-interactive
-
-      - name: Apply manual version override
-        if: steps.version_app_token.outcome == 'success'
-        env:
-          GH_TOKEN: ${{ steps.version_app_token.outputs.token }}
-          APP_SLUG: ${{ steps.version_app_token.outputs.app-slug }}
-          RELEASE_VERSION: ${{ inputs.version }}
+          FCM_SERVICE_ACCOUNT: ${{ secrets.FCM_SERVICE_ACCOUNT }}
         run: |
-          if [ "$GITHUB_REF_TYPE" != "branch" ]; then
-            echo "Version overrides require dispatching this workflow from a branch; received $GITHUB_REF_TYPE '$GITHUB_REF_NAME'." >&2
-            exit 1
-          fi
-          if ! [[ "$RELEASE_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]]; then
-            echo "Version override must contain two or three dot-separated integers; received '$RELEASE_VERSION'." >&2
-            exit 1
-          fi
-
-          node --input-type=module -e '
-            import fs from "node:fs";
-            const path = "apps/mobile/app.config.ts";
-            const source = fs.readFileSync(path, "utf8");
-            const next = source.replace(
-              /^(  version: ")[^"]+(".*)$/m,
-              `$1${process.env.RELEASE_VERSION}$2`,
-            );
-            if (next === source && !source.includes(`  version: "${process.env.RELEASE_VERSION}"`)) {
-              throw new Error("Could not update app version");
+          eas env:pull production --path .env.staging-eas-production --non-interactive
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import { parseEnv } from 'node:util';
+          const file = parseEnv(fs.readFileSync('.env.staging-eas-production', 'utf8')).T3CODE_ANDROID_GOOGLE_SERVICES_FILE;
+          if (file && fs.existsSync(file)) fs.copyFileSync(file, '.env.staging-firebase-production.json');
+          JS
+          eas env:pull preview --path .env.staging-eas-preview --non-interactive
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import { parseEnv } from 'node:util';
+          const senderProject = JSON.parse(process.env.FCM_SERVICE_ACCOUNT).project_id;
+          let selected;
+          for (const environment of ['preview', 'production']) {
+            const env = parseEnv(fs.readFileSync(`.env.staging-eas-${environment}`, 'utf8'));
+            const file = environment === 'production' ? '.env.staging-firebase-production.json' : env.T3CODE_ANDROID_GOOGLE_SERVICES_FILE;
+            if (!file || !fs.existsSync(file)) {
+              console.log(`${environment}: readable Firebase app configuration is missing`);
+              continue;
             }
-            fs.writeFileSync(path, next);
-          '
-          vp fmt apps/mobile/app.config.ts
-
-          if git diff --quiet -- apps/mobile/app.config.ts; then
-            echo "app.config.ts is already at $RELEASE_VERSION; no version commit needed."
-            exit 0
-          fi
-
-          user_id="$(gh api "/users/${APP_SLUG}[bot]" --jq .id)"
-          git config user.name "${APP_SLUG}[bot]"
-          git config user.email "${user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
-          git add apps/mobile/app.config.ts
-          git commit \
-            -m "chore(mobile): bump app version to $RELEASE_VERSION" \
-            -m "Co-authored-by: codex <codex@users.noreply.github.com>"
-          git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
-
-      - name: Summarize manual build version
-        if: steps.expo-token.outputs.present == 'true' && github.event_name == 'workflow_dispatch' && inputs.mode == 'build'
-        working-directory: apps/mobile
-        run: |
-          version="$(npx expo config --json --type public | jq -r '.version')"
-          {
-            echo "## Manual production build"
-            echo
-            echo "- App version: \`$version\`"
-            echo "- Platform: \`${{ inputs.platform }}\`"
-            echo
-            echo "> Apple closes an iOS release train after App Store approval. Before building iOS, confirm \`$version\` is newer than the approved App Store version."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Build and submit (manual)
-        if: steps.expo-token.outputs.present == 'true' && github.event_name == 'workflow_dispatch' && inputs.mode == 'build'
-        working-directory: apps/mobile
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: eas build --platform ${{ inputs.platform }} --profile production --auto-submit --non-interactive --no-wait
-
-      - name: Publish OTA update (manual)
-        if: steps.expo-token.outputs.present == 'true' && github.event_name == 'workflow_dispatch' && inputs.mode == 'update'
+            const config = JSON.parse(fs.readFileSync(file, 'utf8'));
+            const packages = (config.client ?? []).map(c => c.client_info?.android_client_info?.package_name);
+            console.log(`${environment}: Firebase project ${config.project_info.project_id}; packages ${packages.join(', ')}`);
+            if (!selected && config.project_info.project_id === senderProject && packages.includes('com.t3tools.t3code.preview')) selected = environment;
+          }
+          if (!selected) throw new Error('No readable EAS Firebase file matches the relay project and com.t3tools.t3code.preview');
+          fs.appendFileSync(process.env.GITHUB_ENV, `STAGING_EAS_ENVIRONMENT=${selected}\n`);
+          console.log(`Using ${selected} EAS variables for the staging preview APK`);
+          JS
+      - name: Build standalone staging APK
+        if: inputs.phase == 'build'
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
-          eas update \
-            --channel production \
-            --environment production \
-            --platform ${{ inputs.platform }} \
-            --message "${{ inputs.message || format('Production OTA ({0})', github.sha) }}" \
-            --non-interactive
-
-      # No --status filter on build:list: an in-queue/in-progress build must
-      # count as existing, or every merge during the build window would cut a
-      # duplicate. After an errored build, retry via workflow_dispatch
-      # mode=build — pushes won't re-trigger it until the app version changes.
-      - id: store_builds
-        name: Ensure store builds exist for the current app version
-        if: steps.expo-token.outputs.present == 'true' && github.event_name == 'push'
-        continue-on-error: true
-        working-directory: apps/mobile
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: |
-          failed=0
-          version="$(npx expo config --json --type public | jq -r '.version')"
-          for platform in ios android; do
-            latest="$(eas build:list --platform "$platform" --build-profile production --limit 1 --json --non-interactive | jq -r '.[0].appVersion // "none"')"
-            if [ "$latest" = "$version" ]; then
-              echo "$platform: production build for $version already exists (or is in progress)"
-              continue
-            fi
-            echo "$platform: latest production build is $latest, app.config.ts says $version — building"
-            if eas build --platform "$platform" --profile production --auto-submit --non-interactive --no-wait; then
-              echo ":building_construction: $platform: scheduled production build and submission for $version" >> "$GITHUB_STEP_SUMMARY"
-            else
-              failed=1
-              echo ":x: $platform: production build or submission failed for $version" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done
-          exit "$failed"
-
-      - name: Publish fingerprint-gated OTA
-        if: steps.expo-token.outputs.present == 'true' && github.event_name == 'push'
-        working-directory: apps/mobile
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: |
-          message="$(git log -1 --pretty=%s | head -c 120) ($(git rev-parse --short=9 HEAD))"
-          for platform in ios android; do
-            # eas-cli prints an environment-loaded notice to stdout before the
-            # JSON even with --json, so discard everything before the document.
-            hash="$(eas fingerprint:generate --platform "$platform" --environment production --json --non-interactive | sed -n '/^{/,$p' | jq -er '.hash | select(type == "string" and length > 0)')"
-            matching="$(eas build:list --platform "$platform" --build-profile production --status finished --fingerprint-hash "$hash" --limit 1 --json --non-interactive | jq 'length')"
-            if [ "$matching" -gt 0 ]; then
-              eas update \
-                --channel production \
-                --environment production \
-                --platform "$platform" \
-                --message "$message" \
-                --non-interactive
-              echo ":white_check_mark: $platform: OTA published to production (fingerprint \`$hash\`)" >> "$GITHUB_STEP_SUMMARY"
-            else
-              echo ":warning: $platform: no finished production build matches fingerprint \`$hash\` — OTA skipped; JS changes reach $platform only once a matching build ships" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done
-
-      - name: Propagate store build failure
-        if: steps.store_builds.outcome == 'failure'
-        run: exit 1
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const config = JSON.parse(fs.readFileSync('eas.json', 'utf8'));
+          config.build['staging:android'] = {
+            extends: 'preview',
+            environment: process.env.STAGING_EAS_ENVIRONMENT,
+            channel: 'staging-android-10416',
+            env: {
+              APP_VARIANT: 'preview',
+              T3CODE_RELAY_URL: process.env.STAGING_RELAY_URL,
+              T3CODE_CLERK_PUBLISHABLE_KEY: process.env.CLERK_PUBLISHABLE_KEY,
+              T3CODE_CLERK_JWT_TEMPLATE: 't3-relay',
+              T3CODE_MOBILE_UPDATES_ENABLED: '0',
+            },
+            android: { buildType: 'apk' },
+          };
+          fs.writeFileSync('eas.json', JSON.stringify(config, null, 2) + '\n');
+          JS
+          eas build --platform android --profile staging:android --non-interactive --no-wait --json > "$RUNNER_TEMP/staging-android-build.json"
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const builds = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/staging-android-build.json`, 'utf8'));
+          for (const build of builds) {
+            const url = `https://expo.dev/accounts/pingdotgg/projects/t3-code/builds/${build.id}`;
+            console.log(url);
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Android staging build: ${url}\nRelay: ${process.env.STAGING_RELAY_URL}\n`);
+          }
+          JS
+      - uses: actions/upload-artifact@v4
+        if: inputs.phase == 'build' && success()
+        with:
+          name: staging-android-build
+          path: ${{ runner.temp }}/staging-android-build.json
