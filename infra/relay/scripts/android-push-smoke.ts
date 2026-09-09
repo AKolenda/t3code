@@ -24,38 +24,50 @@ const decodeDevice = Schema.decodeUnknownEffect(Schema.fromJsonString(Device));
 const Phase = Schema.Literals(["running", "approval", "input", "completed", "failed", "end"]);
 const decodePhase = Schema.decodeUnknownEffect(Phase);
 
-class SmokeError extends Schema.TaggedError<SmokeError>()("SmokeError", {
-  reason: Schema.Literals(["usage", "read-credentials", "read-device", "unregistered"]),
-  cause: Schema.optional(Schema.Defect()),
-}) {
+class SmokeUsageError extends Schema.TaggedError<SmokeUsageError>()("SmokeUsageError", {}) {
   override get message() {
-    switch (this.reason) {
-      case "usage":
-        return "Usage: node scripts/android-push-smoke.ts <service-account.json> <device.json> <running|approval|input|completed|failed|end>";
-      case "read-credentials":
-        return "Could not read service-account file.";
-      case "read-device":
-        return "Could not read device file.";
-      case "unregistered":
-        return "This device token is no longer registered with Firebase.";
-    }
+    return "Usage: node scripts/android-push-smoke.ts <service-account.json> <device.json> <running|approval|input|completed|failed|end>";
+  }
+}
+
+class SmokeCredentialReadError extends Schema.TaggedError<SmokeCredentialReadError>()(
+  "SmokeCredentialReadError",
+  { cause: Schema.Defect() },
+) {
+  override get message() {
+    return "Could not read service-account file.";
+  }
+}
+
+class SmokeDeviceReadError extends Schema.TaggedError<SmokeDeviceReadError>()(
+  "SmokeDeviceReadError",
+  { cause: Schema.Defect() },
+) {
+  override get message() {
+    return "Could not read device file.";
+  }
+}
+
+class SmokeUnregisteredDeviceError extends Schema.TaggedError<SmokeUnregisteredDeviceError>()(
+  "SmokeUnregisteredDeviceError",
+  {},
+) {
+  override get message() {
+    return "This device token is no longer registered with Firebase.";
   }
 }
 
 const main = Effect.gen(function* () {
   const [credentialPath, devicePath, phaseArg] = process.argv.slice(2);
-  if (!credentialPath || !devicePath || !phaseArg)
-    return yield* new SmokeError({
-      reason: "usage",
-    });
+  if (!credentialPath || !devicePath || !phaseArg) return yield* new SmokeUsageError({});
   const phase = yield* decodePhase(phaseArg);
   const credentials = yield* Effect.tryPromise({
     try: () => NodeFSP.readFile(credentialPath, "utf8"),
-    catch: (cause) => new SmokeError({ reason: "read-credentials", cause }),
+    catch: (cause) => new SmokeCredentialReadError({ cause }),
   });
   const device = yield* Effect.tryPromise({
     try: () => NodeFSP.readFile(devicePath, "utf8"),
-    catch: (cause) => new SmokeError({ reason: "read-device", cause }),
+    catch: (cause) => new SmokeDeviceReadError({ cause }),
   }).pipe(Effect.flatMap(decodeDevice));
   const title =
     phase === "completed"
@@ -131,10 +143,7 @@ const main = Effect.gen(function* () {
       ),
     ),
   );
-  if (result.unregistered)
-    return yield* new SmokeError({
-      reason: "unregistered",
-    });
+  if (result.unregistered) return yield* new SmokeUnregisteredDeviceError({});
   yield* Effect.logInfo(
     `Firebase accepted the ${phase} notification. Verify delivery on the device.`,
   );

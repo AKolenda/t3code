@@ -42,16 +42,23 @@ const Connection = Schema.Struct({
 });
 const readFile = (path: string) => Effect.tryPromise(() => NodeFSP.readFile(path, "utf8"));
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
-class WatchError extends Schema.TaggedError<WatchError>()("AndroidPushWatchError", {
-  reason: Schema.Literals(["unregistered", "stopped"]),
-  cause: Schema.optional(Schema.Defect()),
-}) {
+class WatchUnregisteredDeviceError extends Schema.TaggedError<WatchUnregisteredDeviceError>()(
+  "WatchUnregisteredDeviceError",
+  {},
+) {
   override get message() {
-    return this.reason === "unregistered"
-      ? "Device token is no longer registered"
-      : "Android push watcher stopped. Check the private connection and Firebase configuration.";
+    return "Device token is no longer registered";
   }
 }
+
+class WatchStoppedError extends Schema.TaggedError<WatchStoppedError>()("WatchStoppedError", {
+  cause: Schema.Defect(),
+}) {
+  override get message() {
+    return "Android push watcher stopped. Check the private connection and Firebase configuration.";
+  }
+}
+
 const preferences = {
   notificationsEnabled: true,
   liveActivitiesEnabled: true,
@@ -170,9 +177,7 @@ const main = Effect.gen(function* () {
             nowMs: now,
           });
           const active = (aggregate?.activeCount ?? 0) > 0;
-          const same =
-            encodeJson([...next.values()].map(({ updatedAt: _, ...value }) => value)) ===
-            encodeJson([...states.values()].map(({ updatedAt: _, ...value }) => value));
+          const same = encodeJson([...next.values()]) === encodeJson([...states.values()]);
           states = next;
           if ((!active && !previouslyActive && !alert) || (same && !alert)) return;
           const result = yield* sender.send({
@@ -188,7 +193,7 @@ const main = Effect.gen(function* () {
               ...alert,
             }),
           });
-          if (result.unregistered) return yield* new WatchError({ reason: "unregistered" });
+          if (result.unregistered) return yield* new WatchUnregisteredDeviceError({});
           previouslyActive = active;
           yield* Effect.logInfo(
             `Android push accepted: ${state?.phase ?? (active ? "active" : "ended")}`,
@@ -202,7 +207,7 @@ const main = Effect.gen(function* () {
 NodeRuntime.runMain(
   main.pipe(
     Effect.scoped,
-    Effect.catchCause((cause) => Effect.fail(new WatchError({ reason: "stopped", cause }))),
+    Effect.catchCause((cause) => Effect.fail(new WatchStoppedError({ cause }))),
     // Socket failures may contain credential-bearing request headers. Keep the
     // cause on the error, but print only the fixed message at the CLI boundary.
     Effect.tapError((error) => Effect.logError(error.message)),
