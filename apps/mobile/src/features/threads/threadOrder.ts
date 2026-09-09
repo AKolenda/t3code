@@ -8,7 +8,7 @@ export type ThreadMoveDestination =
   | "down"
   | {
       readonly targetId: string | null;
-      readonly section?: "pinned" | "active";
+      readonly section?: "pinned" | "active" | "settled";
       readonly placement: "before" | "after";
     };
 
@@ -18,6 +18,7 @@ export function threadOrderAfterMove(
   movedId: string,
   destination: ThreadMoveDestination,
 ): string[] | null {
+  if (typeof destination === "object" && destination.section === "settled") return null;
   const from = orderedIds.indexOf(movedId);
   if (from < 0 && (typeof destination === "string" || destination.section === undefined))
     return null;
@@ -172,4 +173,17 @@ export function threadDropLifecycle(
     unsettle: thread.settledOverride === "settled",
     unsnooze: effectiveSnoozed(thread, { now }),
   };
+}
+
+export type ThreadDragSection = "pinned" | "active" | "snoozed" | "settled";
+
+/** The action shown during hover describes the lifecycle change made on drop. */
+export function threadDragAction(source: ThreadDragSection, destination: ThreadDragSection) {
+  if (destination === "snoozed") return null;
+  if (destination === "settled") return source === "settled" ? null : "Settle";
+  if (source === destination) return "Reorder";
+  if (destination === "pinned") return "Pin";
+  if (source === "pinned") return "Unpin";
+  if (source === "settled") return "Unsettle";
+  return "Unsnooze";
 }

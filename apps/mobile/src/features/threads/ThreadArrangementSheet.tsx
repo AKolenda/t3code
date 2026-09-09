@@ -21,7 +21,11 @@ import {
 } from "../../state/thread-order";
 import { queuedThreadKeysAtom } from "../../state/use-thread-outbox";
 import { useThreadListActions } from "../home/useThreadListActions";
-import { createThreadMovePlanner, type ThreadMoveDestination } from "./threadOrder";
+import {
+  createThreadMovePlanner,
+  threadDragAction,
+  type ThreadMoveDestination,
+} from "./threadOrder";
 import { getThreadListV2OrderedSection } from "./threadListV2";
 
 const ROW_HEIGHT = 72;
@@ -38,6 +42,7 @@ type Row = {
 };
 type Drag = {
   orderVersion: string;
+  sourceSection: Section;
   thread: EnvironmentThreadShell;
   startY: number;
   translation: number;
@@ -212,8 +217,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
     const result: Row[] = [];
     let offset = 0;
     for (const section of ["pinned", "active", "snoozed", "settled"] as const) {
-      if ((section === "snoozed" || section === "settled") && sections[section].length === 0)
-        continue;
+      if (section === "snoozed" && sections[section].length === 0) continue;
       result.push({ key: section, section, offset, height: HEADER_HEIGHT });
       offset += HEADER_HEIGHT;
       if ((section === "snoozed" || section === "settled") && !expanded[section]) continue;
@@ -268,7 +272,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
       target &&
       y >= 0 &&
       y <= height &&
-      (target.section === "pinned" || target.section === "active")
+      (target.section === "pinned" || target.section === "active" || target.section === "settled")
     ) {
       const candidate: Destination = {
         section: target.section,
@@ -276,7 +280,13 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
         placement:
           !target.thread || contentY < target.offset + target.height / 2 ? "before" : "after",
       };
-      if (latest.current.planners[target.section](keyOf(current.thread), candidate) !== null)
+      if (target.section === "settled") {
+        if (
+          current.sourceSection !== "settled" &&
+          configs.get(current.thread.environmentId)?.environment.capabilities.threadSettlement
+        )
+          destination = { section: "settled", targetId: null, placement: "before" };
+      } else if (latest.current.planners[target.section](keyOf(current.thread), candidate) !== null)
         destination = candidate;
     }
     if (
@@ -292,6 +302,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
     if (!row.thread || preview !== null) return;
     drag.current = {
       orderVersion,
+      sourceSection: row.section,
       thread: row.thread,
       startY: row.offset + ROW_HEIGHT / 2 - geometry.current.offset,
       translation: 0,
@@ -365,7 +376,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
             </Pressable>
           </View>
           <Text className="px-5 pb-3 text-sm text-foreground-muted">
-            Drag between Pinned and Active. Changes save when you drop.
+            Drag to reorder, pin, or settle. Changes save when you drop.
           </Text>
           <View
             onLayout={(event) => {
@@ -480,9 +491,10 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                 </Text>
                 {visiblePreview.destination?.section ? (
                   <Text className="text-xs text-foreground-muted">
-                    {visiblePreview.destination.section === "pinned"
-                      ? "Move to Pinned"
-                      : "Move to Active"}
+                    {threadDragAction(
+                      visiblePreview.sourceSection,
+                      visiblePreview.destination.section,
+                    )}
                   </Text>
                 ) : null}
               </Animated.View>

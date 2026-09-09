@@ -497,6 +497,15 @@ export function useThreadListActions(): {
           : thread.pinnedAt != null
             ? "pinned"
             : "active";
+      if (section === "settled") {
+        if (!environmentSupportsSettlement(thread.environmentId)) return false;
+        appAtomRegistry.set(threadDropBusyAtom, true);
+        try {
+          return await settleThread(thread);
+        } finally {
+          appAtomRegistry.set(threadDropBusyAtom, false);
+        }
+      }
       const configs = appAtomRegistry.get(environmentServerConfigsAtom);
       const supportsReorder = (environmentId: EnvironmentThreadShell["environmentId"]) => {
         const capabilities = configs.get(environmentId)?.environment.capabilities;
@@ -622,6 +631,7 @@ export function useThreadListActions(): {
       }
     },
     [
+      settleThread,
       reorderActiveMutation,
       reorderPinnedMutation,
       pinMutation,
