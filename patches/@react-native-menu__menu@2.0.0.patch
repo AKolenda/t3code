@@ -258,10 +258,10 @@ index 352d8fa656aac2e39160104df2394ebe6719bac5..937174c8b69c48cf5756fb64946c5138
          didSet {
              guard let actions = self.actions else {
 diff --git a/ios/Shared/MenuViewImplementation.swift b/ios/Shared/MenuViewImplementation.swift
-index 5c4e0da4292b15d3a27b5ea1555f11452a470815..42f3081eb587115beced5cc70b79e91cb040c362 100644
+index 5c4e0da4292b15d3a27b5ea1555f11452a470815..755defc3bf166d2644f72650df08eb8734b9739d 100644
 --- a/ios/Shared/MenuViewImplementation.swift
 +++ b/ios/Shared/MenuViewImplementation.swift
-@@ -8,7 +8,261 @@
+@@ -8,7 +8,264 @@
  import UIKit
  @available(iOS 14.0, *)
  @objc(MenuViewImplementation)
@@ -317,9 +317,12 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..42f3081eb587115beced5cc70b79e91c
 +        func refresh() {
 +            guard let scroll else { return }
 +            // Recycled cells must never retain the old thread's picture or opacity.
-+            if rows.contains(where: { $0.menu?.dragItemId as String? != $0.id }) {
-+                finish()
-+                return
++            rows.removeAll { row in
++                if row.menu?.dragItemId as String? == row.id,
++                   row.host?.isDescendant(of: scroll) == true { return false }
++                row.host?.layer.opacity = row.opacity
++                row.picture?.removeFromSuperview()
++                return true
 +            }
 +            func visit(_ view: UIView) {
 +                if let menu = view as? MenuViewImplementation,
@@ -524,7 +527,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..42f3081eb587115beced5cc70b79e91c
  
      @objc public var actions: [NSDictionary]? {
          didSet {
-@@ -60,17 +314,46 @@ public class MenuViewImplementation: UIButton {
+@@ -60,17 +317,46 @@ public class MenuViewImplementation: UIButton {
      }
     
      public override func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
@@ -573,7 +576,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..42f3081eb587115beced5cc70b79e91c
      func setup () {
          let menu = UIMenu(title: _title,
              identifier: nil,
-@@ -86,8 +369,99 @@ public class MenuViewImplementation: UIButton {
+@@ -86,8 +372,99 @@ public class MenuViewImplementation: UIButton {
              }
          }
  
@@ -673,7 +676,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..42f3081eb587115beced5cc70b79e91c
      }
  
      public override func reactSetFrame(_ frame: CGRect) {
-@@ -124,4 +498,8 @@ public class MenuViewImplementation: UIButton {
+@@ -124,4 +501,8 @@ public class MenuViewImplementation: UIButton {
      @objc func sendMenuOpen() {
          // NO-OP (should be overriden by parent)
      }
