@@ -268,7 +268,11 @@ export interface ThreadListV2SettledShelfListItem {
 }
 
 export type ThreadListV2ListItem =
-  | { readonly type: "v2-drop-header"; readonly key: string; readonly section: "pinned" | "active" }
+  | {
+      readonly type: "v2-drop-header";
+      readonly key: string;
+      readonly section: "pinned" | "active" | "settled";
+    }
   | ThreadListV2ThreadListItem
   | ThreadListV2PendingListItem
   | ThreadListV2SnoozedShelfListItem
@@ -341,6 +345,8 @@ export function buildThreadListV2ListItems(input: {
       expanded: input.settledShelfExpanded !== false,
     });
     result.push(...threadItems.slice(settledShelfHeaderIndex));
+  } else if (input.arrangementTargets) {
+    result.push({ type: "v2-drop-header", key: "v2-settled-drop", section: "settled" });
   }
   return result;
 }

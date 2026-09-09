@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { useThreadListActions } from "../home/useThreadListActions";
 import { useAtomValue } from "@effect/atom-react";
 import { threadDropBusyAtom } from "../../state/thread-order";
@@ -6,7 +7,7 @@ import { appAtomRegistry } from "../../state/atom-registry";
 import { threadArrangementOpenAtom } from "../../state/thread-order";
 import { environmentThreadShells } from "../../state/threads";
 import { scopedThreadKey } from "../../lib/scopedEntities";
-import type { ThreadMoveDestination } from "./threadOrder";
+import { threadDragAction, type ThreadMoveDestination } from "./threadOrder";
 import type {
   EnvironmentProject,
   EnvironmentThreadShell,
@@ -163,33 +164,37 @@ export const ThreadListV2SettledShelfHeader = memo(function ThreadListV2SettledS
   readonly pane?: "screen" | "sidebar";
 }) {
   return (
-    <Pressable
-      accessibilityHint={
-        props.expanded ? "Collapses the settled threads." : "Expands the settled threads."
-      }
-      accessibilityLabel={props.count === 1 ? "1 settled thread" : `${props.count} settled threads`}
-      accessibilityRole="button"
-      accessibilityState={{ disabled: props.disabled, expanded: props.expanded }}
-      className={cn(
-        "mb-1.5 mt-4 flex-row items-center gap-2.5",
-        props.pane === "sidebar" ? "px-3" : "px-5",
-      )}
-      disabled={props.disabled}
-      onPress={props.onToggle}
-      style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}
-    >
-      <Text className="text-xs font-t3-medium text-foreground-tertiary">
-        {props.expanded ? "Settled" : `Settled (${props.count})`}
-      </Text>
-      <View className="h-px flex-1 bg-border" />
-      <SymbolView
-        name="chevron.down"
-        size={10}
-        tintColorClassName={"accent-foreground-muted"}
-        type="monochrome"
-        style={{ transform: [{ rotate: props.expanded ? "180deg" : "0deg" }] }}
-      />
-    </Pressable>
+    <ThreadListV2DropHeader section="settled">
+      <Pressable
+        accessibilityHint={
+          props.expanded ? "Collapses the settled threads." : "Expands the settled threads."
+        }
+        accessibilityLabel={
+          props.count === 1 ? "1 settled thread" : `${props.count} settled threads`
+        }
+        accessibilityRole="button"
+        accessibilityState={{ disabled: props.disabled, expanded: props.expanded }}
+        className={cn(
+          "mb-1.5 mt-4 flex-row items-center gap-2.5",
+          props.pane === "sidebar" ? "px-3" : "px-5",
+        )}
+        disabled={props.disabled}
+        onPress={props.onToggle}
+        style={({ pressed }) => ({ opacity: pressed ? 0.6 : 1 })}
+      >
+        <Text className="text-xs font-t3-medium text-foreground-tertiary">
+          {props.expanded ? "Settled" : `Settled (${props.count})`}
+        </Text>
+        <View className="h-px flex-1 bg-border" />
+        <SymbolView
+          name="chevron.down"
+          size={10}
+          tintColorClassName={"accent-foreground-muted"}
+          type="monochrome"
+          style={{ transform: [{ rotate: props.expanded ? "180deg" : "0deg" }] }}
+        />
+      </Pressable>
+    </ThreadListV2DropHeader>
   );
 });
 
@@ -1094,6 +1099,25 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
               variant === "card" && !snoozedRow && props.reorderBusy !== true && !dropBusy
             }
             dragGroup="t3-thread-arrange"
+            dropSection={pinnedRow ? "pinned" : "active"}
+            dragActionLabels={JSON.stringify(
+              Object.fromEntries(
+                (["pinned", "active", "settled"] as const).flatMap((destination) => {
+                  if (destination === "settled" && !props.settlementSupported) return [];
+                  const action = threadDragAction(
+                    pinnedRow
+                      ? "pinned"
+                      : snoozedRow
+                        ? "snoozed"
+                        : variant === "slim"
+                          ? "settled"
+                          : "active",
+                    destination,
+                  );
+                  return action === null ? [] : [[destination, action]];
+                }),
+              ),
+            )}
             onItemDrop={({ nativeEvent }) => {
               if (nativeEvent.placement !== "before" && nativeEvent.placement !== "after") return;
               const source = appAtomRegistry
@@ -1118,9 +1142,13 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
 });
 
 /** Always present on iOS so an empty section is still a reachable drop target. */
-export function ThreadListV2DropHeader(props: { section: "pinned" | "active" }) {
+export function ThreadListV2DropHeader(props: {
+  section: "pinned" | "active" | "settled";
+  children?: ReactNode;
+}) {
   const { moveThread } = useThreadListActions();
   const busy = useAtomValue(threadDropBusyAtom);
+  if (Platform.OS !== "ios") return props.children ?? null;
   return (
     <ControlPillMenu
       actions={[]}
@@ -1129,6 +1157,7 @@ export function ThreadListV2DropHeader(props: { section: "pinned" | "active" }) 
       dropEnabled={!busy}
       dragItemId={`t3-drop-section:${props.section}`}
       dragGroup="t3-thread-arrange"
+      dropSection={props.section}
       onItemDrop={({ nativeEvent }) => {
         const source = appAtomRegistry
           .get(environmentThreadShells.threadShellsAtom)
@@ -1137,11 +1166,17 @@ export function ThreadListV2DropHeader(props: { section: "pinned" | "active" }) 
           void moveThread(source, { section: props.section, targetId: null, placement: "before" });
       }}
     >
-      <View style={{ minHeight: 44, justifyContent: "center", paddingHorizontal: 20 }}>
-        <Text className="text-xs font-t3-medium text-foreground-muted">
-          {props.section === "pinned" ? "Pinned" : "Active"}
-        </Text>
-      </View>
+      {props.children ?? (
+        <View style={{ minHeight: 44, justifyContent: "center", paddingHorizontal: 20 }}>
+          <Text className="text-xs font-t3-medium text-foreground-muted">
+            {props.section === "pinned"
+              ? "Pinned"
+              : props.section === "active"
+                ? "Active"
+                : "Settled"}
+          </Text>
+        </View>
+      )}
     </ControlPillMenu>
   );
 }

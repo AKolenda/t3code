@@ -1,8 +1,8 @@
 diff --git a/ios/MenuViewManager.mm b/ios/MenuViewManager.mm
-index 3d149b3e7426b8f7c999603ddf1e15e12331c33a..0983ecc26684e3767bfc6b3b9fbe8324fd5ab3d3 100644
+index 3d149b3e7426b8f7c999603ddf1e15e12331c33a..140e250eaccc3f49665d21f439c5f0b28177baef 100644
 --- a/ios/MenuViewManager.mm
 +++ b/ios/MenuViewManager.mm
-@@ -65,6 +65,16 @@ RCT_EXPORT_VIEW_PROPERTY(onCloseMenu, RCTDirectEventBlock);
+@@ -65,6 +65,18 @@ RCT_EXPORT_VIEW_PROPERTY(onCloseMenu, RCTDirectEventBlock);
   * onOpenMenu: callback to be called when the menu is opened
   */
  RCT_EXPORT_VIEW_PROPERTY(onOpenMenu, RCTDirectEventBlock);
@@ -14,6 +14,8 @@ index 3d149b3e7426b8f7c999603ddf1e15e12331c33a..0983ecc26684e3767bfc6b3b9fbe8324
 +RCT_EXPORT_VIEW_PROPERTY(dragEnabled, BOOL);
 +RCT_EXPORT_VIEW_PROPERTY(dropEnabled, BOOL);
 +RCT_EXPORT_VIEW_PROPERTY(dragGroup, NSString);
++RCT_EXPORT_VIEW_PROPERTY(dragActionLabels, NSString);
++RCT_EXPORT_VIEW_PROPERTY(dropSection, NSString);
 +RCT_EXPORT_VIEW_PROPERTY(onDragBegin, RCTDirectEventBlock);
 +RCT_EXPORT_VIEW_PROPERTY(onItemDrop, RCTDirectEventBlock);
  /**
@@ -67,29 +69,31 @@ index 33d27c5a66593ae1a9b143804413578eb79f1a7d..155cae6d627c917681b54038639429e8
 +
  }
 diff --git a/ios/NewArch/FabricViewImplementationProtocol.swift b/ios/NewArch/FabricViewImplementationProtocol.swift
-index 2cef2fb8c74497da46775a490edc58cf8cbf29cc..19f8e73ab6e7f1af5453c059b3d18baea3e72f52 100644
+index 2cef2fb8c74497da46775a490edc58cf8cbf29cc..5e387fbd36845cc3064b62bd6afa66ff2c189a40 100644
 --- a/ios/NewArch/FabricViewImplementationProtocol.swift
 +++ b/ios/NewArch/FabricViewImplementationProtocol.swift
-@@ -1,5 +1,11 @@
+@@ -1,5 +1,13 @@
  import Foundation
  @objc public protocol FabricViewImplementationProtocol {
 +    var dragEnabled: Bool { get set }
 +    var dropEnabled: Bool { get set }
 +    var dragItemId: NSString? { get set }
 +    var dragGroup: NSString? { get set }
++    var dragActionLabels: NSString? { get set }
++    var dropSection: NSString? { get set }
 +    var onDragBegin: (() -> Void)? { get set }
 +    var onItemDrop: ((String, String) -> Void)? { get set }
      var actions: [NSDictionary]? { get set }
      var title: NSString? { get set }
      var themeVariant: NSString? { get set }
-@@ -8,4 +14,5 @@ import Foundation
+@@ -8,4 +16,5 @@ import Foundation
      var onPressAction: ((String) -> Void)? { get set }
      var onCloseMenu: (() -> Void)? { get set }
      var onOpenMenu: (() -> Void)? { get set }
 +    var onMenuInteractionStart: (() -> Void)? { get set }
  }
 diff --git a/ios/NewArch/MenuView.mm b/ios/NewArch/MenuView.mm
-index a54e619eb39e3402fa63f2ee4f734063d4f8fc58..429cfaf19b6c11a815818f68a44bcdb9c05dd13d 100644
+index a54e619eb39e3402fa63f2ee4f734063d4f8fc58..cd54ee06deeedef6d7e85bcfcc531b46fd5fe3b6 100644
 --- a/ios/NewArch/MenuView.mm
 +++ b/ios/NewArch/MenuView.mm
 @@ -46,6 +46,19 @@ using namespace facebook::react;
@@ -173,7 +177,7 @@ index a54e619eb39e3402fa63f2ee4f734063d4f8fc58..429cfaf19b6c11a815818f68a44bcdb9
              },
              @"subactions": subactionsArray,
          };
-@@ -153,6 +198,19 @@ using namespace facebook::react;
+@@ -153,6 +198,25 @@ using namespace facebook::react;
      const auto &newViewProps = *std::static_pointer_cast<MenuViewProps const>(props);
  
  
@@ -185,6 +189,12 @@ index a54e619eb39e3402fa63f2ee4f734063d4f8fc58..429cfaf19b6c11a815818f68a44bcdb9
 +    }
 +    if (oldViewProps.dragItemId != newViewProps.dragItemId) {
 +        _view.dragItemId = [NSString stringWithUTF8String:newViewProps.dragItemId.c_str()];
++    }
++    if (oldViewProps.dragActionLabels != newViewProps.dragActionLabels) {
++        _view.dragActionLabels = [NSString stringWithUTF8String:newViewProps.dragActionLabels.c_str()];
++    }
++    if (oldViewProps.dropSection != newViewProps.dropSection) {
++        _view.dropSection = [NSString stringWithUTF8String:newViewProps.dropSection.c_str()];
 +    }
 +    if (oldViewProps.dragGroup != newViewProps.dragGroup) {
 +        _view.dragGroup = [NSString stringWithUTF8String:newViewProps.dragGroup.c_str()];
@@ -243,14 +253,16 @@ index 6a2a205f95c1001f3fdf6fb835815fa7c4c02c16..5fcce7d003d2ff0c6b725e81c6380269
 +
  }
 diff --git a/ios/Shared/ActionSheetView.swift b/ios/Shared/ActionSheetView.swift
-index 352d8fa656aac2e39160104df2394ebe6719bac5..937174c8b69c48cf5756fb64946c5138d4c8b1e9 100644
+index 352d8fa656aac2e39160104df2394ebe6719bac5..220c03803adff58985bfd15f60e9521ddf240657 100644
 --- a/ios/Shared/ActionSheetView.swift
 +++ b/ios/Shared/ActionSheetView.swift
-@@ -17,6 +17,10 @@ public class ActionSheetView: UIView {
+@@ -17,6 +17,12 @@ public class ActionSheetView: UIView {
      }
  
      private var _actions: [UIAlertAction] = []
 +    @objc public var dropEnabled: Bool = false
++    @objc public var dragActionLabels: NSString?
++    @objc public var dropSection: NSString?
 +    @objc public var dragEnabled: Bool = false
 +    @objc public var dragItemId: NSString?
 +    @objc public var dragGroup: NSString?
@@ -258,16 +270,18 @@ index 352d8fa656aac2e39160104df2394ebe6719bac5..937174c8b69c48cf5756fb64946c5138
          didSet {
              guard let actions = self.actions else {
 diff --git a/ios/Shared/MenuViewImplementation.swift b/ios/Shared/MenuViewImplementation.swift
-index 5c4e0da4292b15d3a27b5ea1555f11452a470815..755defc3bf166d2644f72650df08eb8734b9739d 100644
+index 5c4e0da4292b15d3a27b5ea1555f11452a470815..d74908dfa79da88d3980e54c355196e0c339ace6 100644
 --- a/ios/Shared/MenuViewImplementation.swift
 +++ b/ios/Shared/MenuViewImplementation.swift
-@@ -8,7 +8,264 @@
+@@ -8,7 +8,304 @@
  import UIKit
  @available(iOS 14.0, *)
  @objc(MenuViewImplementation)
 -public class MenuViewImplementation: UIButton {
 +public class MenuViewImplementation: UIButton, UIDragInteractionDelegate, UIDropInteractionDelegate {
 +    @objc public var dropEnabled: Bool = false
++    @objc public var dragActionLabels: NSString?
++    @objc public var dropSection: NSString?
 +    @objc public var dragEnabled: Bool = false { didSet { itemDragInteraction?.isEnabled = dragEnabled } }
 +    @objc public var dragItemId: NSString? { didSet { updateDragInteractions() } }
 +    @objc public var dragGroup: NSString? { didSet { updateDragInteractions() } }
@@ -282,6 +296,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..755defc3bf166d2644f72650df08eb87
 +    private final class LocalDragItem {
 +        let id: String
 +        let group: String
++        var actionLabels: [String: String] = [:]
 +        var preview: ReorderPreview?
 +        init(id: String, group: String) { self.id = id; self.group = group }
 +    }
@@ -303,14 +318,26 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..755defc3bf166d2644f72650df08eb87
 +        private let sourceFrame: CGRect
 +        private var rows: [Row] = []
 +        private var insertion: CGFloat
++        private let actionLabels: [String: String]
++        private let badge = UILabel()
 +
 +        init?(source: MenuViewImplementation, scroll: UIScrollView, item: LocalDragItem) {
 +            guard let host = source.itemDragInteraction?.view else { return nil }
 +            self.scroll = scroll
++            actionLabels = item.actionLabels
 +            sourceId = item.id
 +            group = item.group
 +            sourceFrame = host.convert(host.bounds, to: scroll)
 +            insertion = sourceFrame.minY
++            badge.isUserInteractionEnabled = false
++            badge.isHidden = true
++            badge.font = .systemFont(ofSize: 13, weight: .semibold)
++            badge.textColor = .label
++            badge.backgroundColor = .secondarySystemBackground
++            badge.textAlignment = .center
++            badge.layer.cornerRadius = 8
++            badge.clipsToBounds = true
++            scroll.window?.addSubview(badge)
 +            refresh()
 +        }
 +
@@ -355,19 +382,37 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..755defc3bf166d2644f72650df08eb87
 +
 +        func update(location: CGPoint) {
 +            guard let scroll else { return }
++            if let window = scroll.window {
++                let point = scroll.convert(location, to: window)
++                badge.center = CGPoint(
++                    x: max(badge.bounds.width / 2 + 8, min(window.bounds.width - badge.bounds.width / 2 - 8, point.x)),
++                    y: min(window.bounds.height - window.safeAreaInsets.bottom - badge.bounds.height / 2 - 8,
++                           point.y + sourceFrame.height / 2 + 16))
++            }
 +            let row = rows.first(where: { $0.frame.contains(location) })
 +            if scroll.bounds.contains(location), let row, row.id != sourceId,
-+               let menu = row.menu, menu.dropEnabled {
++               let menu = row.menu, menu.dropEnabled, actionLabels[menu.dropSection as String? ?? ""] != nil {
 +                update(target: menu, before: location.y < row.frame.midY)
-+            } else if insertion != sourceFrame.minY {
-+                insertion = sourceFrame.minY
-+                apply(animated: true)
++            } else {
++                badge.isHidden = true
++                if insertion != sourceFrame.minY {
++                    insertion = sourceFrame.minY
++                    apply(animated: true)
++                }
 +            }
 +        }
 +
 +        func update(target: MenuViewImplementation, before: Bool) {
 +            guard let scroll, let host = target.itemDropInteraction?.view,
 +                  host.isDescendant(of: scroll) else { return }
++            let action = actionLabels[target.dropSection as String? ?? ""]
++            badge.isHidden = action == nil
++            if badge.text != action {
++                badge.text = action
++                badge.sizeToFit()
++                badge.bounds.size.width += 20
++                badge.bounds.size.height += 12
++            }
 +            let frame = host.convert(host.bounds, to: scroll)
 +            // Section headings insert below the heading, including empty sections.
 +            let next = target.dragEnabled && before ? frame.minY : frame.maxY
@@ -399,6 +444,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..755defc3bf166d2644f72650df08eb87
 +        }
 +
 +        func finish() {
++            badge.removeFromSuperview()
 +            for row in rows {
 +                row.host?.layer.opacity = row.opacity
 +                row.picture?.removeFromSuperview()
@@ -431,7 +477,12 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..755defc3bf166d2644f72650df08eb87
 +        guard dragEnabled, let id = dragItemId as String?, !id.isEmpty,
 +              let group = dragGroup as String?, !group.isEmpty else { return [] }
 +        let item = UIDragItem(itemProvider: NSItemProvider())
-+        item.localObject = LocalDragItem(id: id, group: group)
++        let local = LocalDragItem(id: id, group: group)
++        if let data = (dragActionLabels as String?)?.data(using: .utf8),
++           let labels = try? JSONSerialization.jsonObject(with: data) as? [String: String] {
++            local.actionLabels = labels
++        }
++        item.localObject = local
 +        sendDragBegin()
 +        return [item]
 +    }
@@ -485,6 +536,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..755defc3bf166d2644f72650df08eb87
 +        guard dropEnabled, session.localDragSession != nil, session.items.count == 1,
 +              let item = session.items.first?.localObject as? LocalDragItem,
 +              item.group == dragGroup as String?, item.id != dragItemId as String? else { return nil }
++        if let section = dropSection as String?, !section.isEmpty, item.actionLabels[section] == nil { return nil }
 +        return item
 +    }
 +
@@ -527,7 +579,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..755defc3bf166d2644f72650df08eb87
  
      @objc public var actions: [NSDictionary]? {
          didSet {
-@@ -60,17 +317,46 @@ public class MenuViewImplementation: UIButton {
+@@ -60,17 +357,46 @@ public class MenuViewImplementation: UIButton {
      }
     
      public override func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
@@ -576,7 +628,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..755defc3bf166d2644f72650df08eb87
      func setup () {
          let menu = UIMenu(title: _title,
              identifier: nil,
-@@ -86,8 +372,99 @@ public class MenuViewImplementation: UIButton {
+@@ -86,8 +412,99 @@ public class MenuViewImplementation: UIButton {
              }
          }
  
@@ -676,7 +728,7 @@ index 5c4e0da4292b15d3a27b5ea1555f11452a470815..755defc3bf166d2644f72650df08eb87
      }
  
      public override func reactSetFrame(_ frame: CGRect) {
-@@ -124,4 +501,8 @@ public class MenuViewImplementation: UIButton {
+@@ -124,4 +541,8 @@ public class MenuViewImplementation: UIButton {
      @objc func sendMenuOpen() {
          // NO-OP (should be overriden by parent)
      }
@@ -710,10 +762,10 @@ index bb6bb2b7ad56135089f267587c974b166760539d..949b3f7ec49af7ba26d966a8923a51f6
  
              if #available(iOS 16.0, *) {
 diff --git a/lib/commonjs/NativeModuleSpecs/UIMenuNativeComponent.ts b/lib/commonjs/NativeModuleSpecs/UIMenuNativeComponent.ts
-index e6509355275596c451f9d082223cc16bfe504e1a..e269b74212a9f226462c0c52fca57e7d9ba0b30c 100644
+index e6509355275596c451f9d082223cc16bfe504e1a..62f83265ee2052dd392d0d8d3fa545854cecc6bd 100644
 --- a/lib/commonjs/NativeModuleSpecs/UIMenuNativeComponent.ts
 +++ b/lib/commonjs/NativeModuleSpecs/UIMenuNativeComponent.ts
-@@ -45,9 +45,16 @@ type MenuAction = {
+@@ -45,9 +45,18 @@ type MenuAction = {
  	subactions?: Array<SubAction>;
  };
  export interface NativeProps extends ViewProps {
@@ -721,6 +773,8 @@ index e6509355275596c451f9d082223cc16bfe504e1a..e269b74212a9f226462c0c52fca57e7d
 +    dragEnabled?: boolean;
 +    dropEnabled?: boolean;
 +    dragGroup?: string;
++    dragActionLabels?: string;
++    dropSection?: string;
 +    onDragBegin?: DirectEventHandler<{ event: string }>;
 +    onItemDrop?: DirectEventHandler<{ itemId: string; placement: string }>;
  	onPressAction?: DirectEventHandler<{ event: string }>;
@@ -731,10 +785,10 @@ index e6509355275596c451f9d082223cc16bfe504e1a..e269b74212a9f226462c0c52fca57e7d
  	actionsHash: string; // just a workaround to make sure we don't have to manually compare MenuActions manually in C++ (since it's a struct and that's a pain)
  	title?: string;
 diff --git a/lib/module/NativeModuleSpecs/UIMenuNativeComponent.ts b/lib/module/NativeModuleSpecs/UIMenuNativeComponent.ts
-index e6509355275596c451f9d082223cc16bfe504e1a..e269b74212a9f226462c0c52fca57e7d9ba0b30c 100644
+index e6509355275596c451f9d082223cc16bfe504e1a..62f83265ee2052dd392d0d8d3fa545854cecc6bd 100644
 --- a/lib/module/NativeModuleSpecs/UIMenuNativeComponent.ts
 +++ b/lib/module/NativeModuleSpecs/UIMenuNativeComponent.ts
-@@ -45,9 +45,16 @@ type MenuAction = {
+@@ -45,9 +45,18 @@ type MenuAction = {
  	subactions?: Array<SubAction>;
  };
  export interface NativeProps extends ViewProps {
@@ -742,6 +796,8 @@ index e6509355275596c451f9d082223cc16bfe504e1a..e269b74212a9f226462c0c52fca57e7d
 +    dragEnabled?: boolean;
 +    dropEnabled?: boolean;
 +    dragGroup?: string;
++    dragActionLabels?: string;
++    dropSection?: string;
 +    onDragBegin?: DirectEventHandler<{ event: string }>;
 +    onItemDrop?: DirectEventHandler<{ itemId: string; placement: string }>;
  	onPressAction?: DirectEventHandler<{ event: string }>;
@@ -752,10 +808,10 @@ index e6509355275596c451f9d082223cc16bfe504e1a..e269b74212a9f226462c0c52fca57e7d
  	actionsHash: string; // just a workaround to make sure we don't have to manually compare MenuActions manually in C++ (since it's a struct and that's a pain)
  	title?: string;
 diff --git a/lib/typescript/src/NativeModuleSpecs/UIMenuNativeComponent.d.ts b/lib/typescript/src/NativeModuleSpecs/UIMenuNativeComponent.d.ts
-index 24ee7fdcd9f81cfe2c813cfca9d4e276b846fb7b..235bea0c43b45ac2f20a4a7796b028e3359d8480 100644
+index 24ee7fdcd9f81cfe2c813cfca9d4e276b846fb7b..4a1cbca742dfb7041be52e7201f6a475d6eac160 100644
 --- a/lib/typescript/src/NativeModuleSpecs/UIMenuNativeComponent.d.ts
 +++ b/lib/typescript/src/NativeModuleSpecs/UIMenuNativeComponent.d.ts
-@@ -32,6 +32,12 @@ type MenuAction = {
+@@ -32,6 +32,14 @@ type MenuAction = {
      subactions?: Array<SubAction>;
  };
  export interface NativeProps extends ViewProps {
@@ -763,12 +819,14 @@ index 24ee7fdcd9f81cfe2c813cfca9d4e276b846fb7b..235bea0c43b45ac2f20a4a7796b028e3
 +    dragEnabled?: boolean;
 +    dropEnabled?: boolean;
 +    dragGroup?: string;
++    dragActionLabels?: string;
++    dropSection?: string;
 +    onDragBegin?: DirectEventHandler<{ event: string }>;
 +    onItemDrop?: DirectEventHandler<{ itemId: string; placement: string }>;
      onPressAction?: DirectEventHandler<{
          event: string;
      }>;
-@@ -41,6 +47,9 @@ export interface NativeProps extends ViewProps {
+@@ -41,6 +49,9 @@ export interface NativeProps extends ViewProps {
      onOpenMenu?: DirectEventHandler<{
          event: string;
      }>;
@@ -779,10 +837,10 @@ index 24ee7fdcd9f81cfe2c813cfca9d4e276b846fb7b..235bea0c43b45ac2f20a4a7796b028e3
      actionsHash: string;
      title?: string;
 diff --git a/lib/typescript/src/index.d.ts b/lib/typescript/src/index.d.ts
-index 61d210aa9364f0354f77bddaecdc0a127b1cdbb4..8c076d62d7443b402550b18d980d1c12ee9f7eec 100644
+index 61d210aa9364f0354f77bddaecdc0a127b1cdbb4..e2c420b0ba331530de66516a1dcf9612a18221f1 100644
 --- a/lib/typescript/src/index.d.ts
 +++ b/lib/typescript/src/index.d.ts
-@@ -4,6 +4,14 @@ declare const MenuView: import("react").ForwardRefExoticComponent<{
+@@ -4,6 +4,16 @@ declare const MenuView: import("react").ForwardRefExoticComponent<{
      onPressAction?: ({ nativeEvent }: NativeActionEvent) => void;
      onCloseMenu?: () => void;
      onOpenMenu?: () => void;
@@ -792,16 +850,18 @@ index 61d210aa9364f0354f77bddaecdc0a127b1cdbb4..8c076d62d7443b402550b18d980d1c12
 +    dragEnabled?: boolean;
 +    dropEnabled?: boolean;
 +    dragGroup?: string;
++    dragActionLabels?: string;
++    dropSection?: string;
 +    onDragBegin?: () => void;
 +    onItemDrop?: (event: { nativeEvent: { itemId: string; placement: string } }) => void;
      actions: MenuAction[];
      title?: string;
      isAnchoredToRight?: boolean;
 diff --git a/lib/typescript/src/types.d.ts b/lib/typescript/src/types.d.ts
-index eac7940ab7eb6a69ac329848c9f3eeffdcbaf43d..4bffed2c35492dbf569f89dd2a7a5c97a434623a 100644
+index eac7940ab7eb6a69ac329848c9f3eeffdcbaf43d..901105933ea133236f411475bb0d2efa03a48633 100644
 --- a/lib/typescript/src/types.d.ts
 +++ b/lib/typescript/src/types.d.ts
-@@ -113,6 +113,19 @@ type MenuComponentPropsBase = {
+@@ -113,6 +113,21 @@ type MenuComponentPropsBase = {
       * Callback function that will be called when the menu opens.
       */
      onOpenMenu?: () => void;
@@ -816,12 +876,14 @@ index eac7940ab7eb6a69ac329848c9f3eeffdcbaf43d..4bffed2c35492dbf569f89dd2a7a5c97
 +    dragEnabled?: boolean;
 +    dropEnabled?: boolean;
 +    dragGroup?: string;
++    dragActionLabels?: string;
++    dropSection?: string;
 +    onDragBegin?: () => void;
 +    onItemDrop?: (event: { nativeEvent: { itemId: string; placement: string } }) => void;
      /**
       * Actions to be displayed in the menu.
       */
-@@ -170,6 +183,14 @@ export type NativeMenuComponentProps = {
+@@ -170,6 +185,16 @@ export type NativeMenuComponentProps = {
      onPressAction?: ({ nativeEvent }: NativeActionEvent) => void;
      onCloseMenu?: () => void;
      onOpenMenu?: () => void;
@@ -831,13 +893,15 @@ index eac7940ab7eb6a69ac329848c9f3eeffdcbaf43d..4bffed2c35492dbf569f89dd2a7a5c97
 +    dragEnabled?: boolean;
 +    dropEnabled?: boolean;
 +    dragGroup?: string;
++    dragActionLabels?: string;
++    dropSection?: string;
 +    onDragBegin?: () => void;
 +    onItemDrop?: (event: { nativeEvent: { itemId: string; placement: string } }) => void;
      actions: ProcessedMenuAction[];
      actionsHash: string;
      title?: string;
 diff --git a/src/NativeModuleSpecs/UIMenuNativeComponent.ts b/src/NativeModuleSpecs/UIMenuNativeComponent.ts
-index e6509355275596c451f9d082223cc16bfe504e1a..998cd76e96dd3891b8062abd077072d7401cd787 100644
+index e6509355275596c451f9d082223cc16bfe504e1a..e93f02778ab503b1c8c3adfdce8984d706b04864 100644
 --- a/src/NativeModuleSpecs/UIMenuNativeComponent.ts
 +++ b/src/NativeModuleSpecs/UIMenuNativeComponent.ts
 @@ -13,6 +13,22 @@ import codegenNativeComponent from "react-native/Libraries/Utilities/codegenNati
@@ -875,7 +939,7 @@ index e6509355275596c451f9d082223cc16bfe504e1a..998cd76e96dd3891b8062abd077072d7
  };
  type MenuAction = {
  	id?: string;
-@@ -41,13 +61,21 @@ type MenuAction = {
+@@ -41,13 +61,23 @@ type MenuAction = {
  		destructive?: boolean;
  		disabled?: boolean;
  		hidden?: boolean;
@@ -888,6 +952,8 @@ index e6509355275596c451f9d082223cc16bfe504e1a..998cd76e96dd3891b8062abd077072d7
 +    dragEnabled?: boolean;
 +    dropEnabled?: boolean;
 +    dragGroup?: string;
++    dragActionLabels?: string;
++    dropSection?: string;
 +    onDragBegin?: DirectEventHandler<{ event: string }>;
 +    onItemDrop?: DirectEventHandler<{ itemId: string; placement: string }>;
  	onPressAction?: DirectEventHandler<{ event: string }>;
@@ -898,10 +964,10 @@ index e6509355275596c451f9d082223cc16bfe504e1a..998cd76e96dd3891b8062abd077072d7
  	actionsHash: string; // just a workaround to make sure we don't have to manually compare MenuActions manually in C++ (since it's a struct and that's a pain)
  	title?: string;
 diff --git a/src/types.ts b/src/types.ts
-index 9c323d9c510e7359c83d4d6633affde673570632..ef7d5eace76f1d84973aa636107eaaf86cd25f67 100644
+index 9c323d9c510e7359c83d4d6633affde673570632..945f05e863516b971dc52646005b85dd9517797d 100644
 --- a/src/types.ts
 +++ b/src/types.ts
-@@ -123,6 +123,19 @@ type MenuComponentPropsBase = {
+@@ -123,6 +123,21 @@ type MenuComponentPropsBase = {
  	 * Callback function that will be called when the menu opens.
  	 */
  	onOpenMenu?: () => void;
@@ -916,12 +982,14 @@ index 9c323d9c510e7359c83d4d6633affde673570632..ef7d5eace76f1d84973aa636107eaaf8
 +    dragEnabled?: boolean;
 +    dropEnabled?: boolean;
 +    dragGroup?: string;
++    dragActionLabels?: string;
++    dropSection?: string;
 +    onDragBegin?: () => void;
 +    onItemDrop?: (event: { nativeEvent: { itemId: string; placement: string } }) => void;
  	/**
  	 * Actions to be displayed in the menu.
  	 */
-@@ -189,6 +202,14 @@ export type NativeMenuComponentProps = {
+@@ -189,6 +204,16 @@ export type NativeMenuComponentProps = {
  	onPressAction?: ({ nativeEvent }: NativeActionEvent) => void;
  	onCloseMenu?: () => void;
  	onOpenMenu?: () => void;
@@ -931,6 +999,8 @@ index 9c323d9c510e7359c83d4d6633affde673570632..ef7d5eace76f1d84973aa636107eaaf8
 +    dragEnabled?: boolean;
 +    dropEnabled?: boolean;
 +    dragGroup?: string;
++    dragActionLabels?: string;
++    dropSection?: string;
 +    onDragBegin?: () => void;
 +    onItemDrop?: (event: { nativeEvent: { itemId: string; placement: string } }) => void;
  	actions: ProcessedMenuAction[];

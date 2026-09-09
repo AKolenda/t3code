@@ -1478,11 +1478,12 @@ describe("cross-section thread drops", () => {
   });
 });
 
-it("keeps both native drop targets available when Pinned and Active are empty", () => {
+it("keeps native drop targets available when Pinned, Active, and Settled are empty", () => {
   expect(
     buildThreadListV2ListItems({ items: [], pendingTasks: [], arrangementTargets: true }),
   ).toEqual([
     { type: "v2-drop-header", key: "v2-pinned-drop", section: "pinned" },
     { type: "v2-drop-header", key: "v2-active-drop", section: "active" },
+    { type: "v2-drop-header", key: "v2-settled-drop", section: "settled" },
   ]);
 });
