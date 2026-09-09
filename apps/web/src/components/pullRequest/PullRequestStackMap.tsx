@@ -1,6 +1,7 @@
 import type { PullRequestStack } from "@t3tools/contracts";
 import { GitPullRequestArrowIcon } from "lucide-react";
 
+import { InlineButton } from "../ui/button";
 import { cn } from "~/lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { resolvePullRequestState } from "./pullRequestPresentation";
@@ -66,7 +67,7 @@ export function PullRequestStackMap({
               <TooltipTrigger
                 render={
                   onSelect && !isCurrent ? (
-                    <button type="button" onClick={() => onSelect(layer.number)} />
+                    <InlineButton onClick={() => onSelect(layer.number)} />
                   ) : (
                     <span aria-current={isCurrent ? "true" : undefined} />
                   )

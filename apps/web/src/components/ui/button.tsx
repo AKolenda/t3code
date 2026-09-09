@@ -86,3 +86,23 @@ function Button({ className, variant, size, render, ...props }: ButtonProps) {
 }
 
 export { Button, buttonVariants };
+
+/** An inline action that keeps the geometry of surrounding text or a graph node. */
+export function InlineButton({
+  className,
+  underline = false,
+  ...props
+}: React.ComponentProps<"button"> & { underline?: boolean }) {
+  return (
+    <button
+      type="button"
+      data-slot="inline-button"
+      className={cn(
+        "inline-flex shrink-0 cursor-pointer items-center gap-0.5 whitespace-nowrap focus-visible:outline-2 focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-64",
+        underline && "border-b border-transparent hover:border-current",
+        className,
+      )}
+      {...props}
+    />
+  );
+}

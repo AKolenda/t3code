@@ -220,7 +220,7 @@ import {
 } from "../providerInstances";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { Button } from "./ui/button";
+import { Button, InlineButton } from "./ui/button";
 import { Input } from "./ui/input";
 import {
   Combobox,
@@ -1499,7 +1499,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       // Sidebar chrome follows the interface font; tabular digits keep the number from
       // reflowing as PR states stream in. A border rather than text-decoration, so the line
       // runs under the glyph as well as the number.
-      "inline-flex shrink-0 cursor-pointer items-center gap-0.5 border-b border-transparent text-xs tabular-nums hover:border-current",
+      "text-xs tabular-nums",
       variant === "slim" && variantAction === "unsettle"
         ? props.isActive
           ? "text-secondary-label"
@@ -1514,8 +1514,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     prBadgeShape?.kind === "stack" ? (
       // A stack is one thing with N layers; naming one of them would misrepresent it, so the
       // badge counts layers and opens the thread's pull-requests surface.
-      <button
-        type="button"
+      <InlineButton
+        underline
         onPointerDown={(event) => event.stopPropagation()}
         onClick={handlePrStackClick}
         className={prBadgeClassName(prBadgeShape.state, PR_STATE_COLOR_CLASS[prBadgeShape.state])}
@@ -1523,7 +1523,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       >
         <ThreadPullRequestBadgeIcon icon="stack" />
         {prBadgeShape.layers}
-      </button>
+      </InlineButton>
     ) : prStatus && pr ? (
       <a
         href={pr.url}
