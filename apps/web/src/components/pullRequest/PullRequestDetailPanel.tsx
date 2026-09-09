@@ -136,6 +136,7 @@ import {
   readPullRequestDetailSnapshot,
   resolveDisplayedPullRequestDetail,
   resolvePullRequestPrimaryControl,
+  allowsSinglePullRequestMerge,
   resolveBaseFreshness,
   resolvePullRequestMergeMethod,
   type PullRequestFinding,
@@ -737,6 +738,18 @@ export function PullRequestDetailPanel({
       : pullRequestStackAtom({ environmentId, input: reference }),
   );
   const nativeStack = nativeStackQuery.data;
+  const supportsStackActions =
+    supportsThreadPullRequests &&
+    detail?.capabilities.stacks === true &&
+    detail.capabilities.stackActions === true &&
+    environmentConfigs.get(environmentId)?.environment.capabilities.pullRequestStackActions ===
+      true;
+  const canMergeSinglePullRequest = allowsSinglePullRequestMerge({
+    supportsStackActions,
+    hasStack: nativeStack !== null,
+    stackPending: nativeStackQuery.isPending,
+    stackError: nativeStackQuery.error,
+  });
   const activityPending = activityQuery.isPending && activity === null;
   const activityError = activity === null ? activityQuery.error : null;
   const refreshDetail = useCallback(() => {
@@ -1353,9 +1366,9 @@ export function PullRequestDetailPanel({
         checksState,
         autoMergeEnabled: detail.autoMergeEnabled,
         hasMergeMethod: allowedMergeMethods.length > 0,
-        canMerge: !nativeStack && can("merge"),
+        canMerge: canMergeSinglePullRequest && can("merge"),
         canMarkReady: can("ready"),
-        canEnableAutoMerge: !nativeStack && can("enable-auto-merge"),
+        canEnableAutoMerge: canMergeSinglePullRequest && can("enable-auto-merge"),
       })
     : null;
   // What the menu's action group holds. Named once so the separators around it are drawn from
@@ -1365,7 +1378,7 @@ export function PullRequestDetailPanel({
     can(detail.isDraft ? "ready" : "draft") &&
     !(detail.isDraft && primaryAction === "ready");
   const showsAutoMerge =
-    !nativeStack &&
+    canMergeSinglePullRequest &&
     detail?.state === "open" &&
     ((autoMergeArmed && can("disable-auto-merge")) ||
       (!autoMergeArmed &&
@@ -1375,7 +1388,7 @@ export function PullRequestDetailPanel({
         can("enable-auto-merge") &&
         allowedMergeMethods.length > 0));
   const showsMergeNow =
-    !nativeStack &&
+    canMergeSinglePullRequest &&
     detail?.state === "open" &&
     (primaryAction === "enable-auto-merge" || primaryAction === "auto-merge-armed") &&
     can("merge") &&
@@ -1562,6 +1575,11 @@ export function PullRequestDetailPanel({
         <div className="mr-4 flex h-7 shrink-0 items-center justify-end gap-1">
           {detail ? (
             <>
+              {supportsStackActions && nativeStackQuery.error ? (
+                <Button variant="outline" size="xs" onClick={nativeStackQuery.refresh}>
+                  Retry stack lookup
+                </Button>
+              ) : null}
               {nativeStack ? (
                 <PullRequestStackMenu
                   stack={nativeStack}
@@ -1569,19 +1587,8 @@ export function PullRequestDetailPanel({
                   environmentId={environmentId}
                   onSelect={onSelectPullRequest}
                   mergeMethod={selectedMergeMethod}
-                  canMerge={
-                    environmentConfigs.get(environmentId)?.environment.capabilities
-                      .pullRequestStackActions === true &&
-                    detail.capabilities.stackActions === true &&
-                    can("merge") &&
-                    allowedMergeMethods.length > 0
-                  }
-                  canRebase={
-                    environmentConfigs.get(environmentId)?.environment.capabilities
-                      .pullRequestStackActions === true &&
-                    detail.capabilities.stackActions === true &&
-                    detail.viewerPermissions.stackRebase === true
-                  }
+                  canMerge={supportsStackActions && can("merge") && allowedMergeMethods.length > 0}
+                  canRebase={supportsStackActions && detail.viewerPermissions.stackRebase === true}
                   onActed={() => {
                     nativeStackQuery.refresh();
                     refreshDetail();
