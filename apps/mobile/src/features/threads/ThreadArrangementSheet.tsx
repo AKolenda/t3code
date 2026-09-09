@@ -37,6 +37,7 @@ type Row = {
   height: number;
 };
 type Drag = {
+  orderVersion: string;
   thread: EnvironmentThreadShell;
   startY: number;
   translation: number;
@@ -290,6 +291,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
   function start(row: Row) {
     if (!row.thread || preview !== null) return;
     drag.current = {
+      orderVersion,
       thread: row.thread,
       startY: row.offset + ROW_HEIGHT / 2 - geometry.current.offset,
       translation: 0,
@@ -324,8 +326,11 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
     };
     frame.current = requestAnimationFrame(tick);
   }
-  const sourceRow = preview ? rows.find((row) => row.key === keyOf(preview.thread)) : undefined;
-  const destination = preview?.destination;
+  const visiblePreview = preview?.orderVersion === orderVersion ? preview : null;
+  const sourceRow = visiblePreview
+    ? rows.find((row) => row.key === keyOf(visiblePreview.thread))
+    : undefined;
+  const destination = visiblePreview?.destination;
   const targetRow = destination
     ? rows.find(
         (row) =>
@@ -373,7 +378,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
               ref={list}
               data={rows}
               keyExtractor={(row) => row.key}
-              scrollEnabled={preview === null}
+              scrollEnabled={visiblePreview === null}
               removeClippedSubviews={false}
               onScroll={(event) => {
                 geometry.current.offset = event.nativeEvent.contentOffset.y;
@@ -393,7 +398,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                 return (
                   <ArrangementRow
                     height={item.height}
-                    dragging={preview !== null}
+                    dragging={visiblePreview !== null}
                     lifted={item.key === sourceRow?.key}
                     offset={
                       sourceRow && insertionOffset !== undefined
@@ -464,18 +469,20 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
                 );
               }}
             />
-            {preview ? (
+            {visiblePreview ? (
               <Animated.View
                 pointerEvents="none"
                 className="absolute left-5 right-5 justify-center rounded-xl border border-border bg-screen px-4"
                 style={{ top: 0, height: ROW_HEIGHT, transform: [{ translateY }] }}
               >
                 <Text numberOfLines={2} className="text-base font-t3-medium">
-                  {preview.thread.title}
+                  {visiblePreview.thread.title}
                 </Text>
-                {preview.destination?.section ? (
+                {visiblePreview.destination?.section ? (
                   <Text className="text-xs text-foreground-muted">
-                    {preview.destination.section === "pinned" ? "Move to Pinned" : "Move to Active"}
+                    {visiblePreview.destination.section === "pinned"
+                      ? "Move to Pinned"
+                      : "Move to Active"}
                   </Text>
                 ) : null}
               </Animated.View>
