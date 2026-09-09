@@ -65,6 +65,10 @@ async function websocketRoundTrip(url, message) {
   });
 }
 
+const DRIP_CHUNKS = 16;
+const DRIP_CHUNK_BYTES = 1024;
+const DRIP_INTERVAL_MS = 5_000;
+
 const largeResponse = new Uint8Array(512 * 1024);
 for (let index = 0; index < largeResponse.length; index += 1) {
   largeResponse[index] = index % 251;
@@ -83,6 +87,22 @@ const origin = Bun.serve({
       return new Response(largeResponse, {
         headers: { "content-type": "application/octet-stream" },
       });
+    }
+    if (url.pathname === "/drip") {
+      // Emit a chunk every few seconds for longer than the idle window.
+      let sent = 0;
+      const body = new ReadableStream({
+        async pull(controller) {
+          if (sent >= DRIP_CHUNKS) {
+            controller.close();
+            return;
+          }
+          if (sent > 0) await Bun.sleep(DRIP_INTERVAL_MS);
+          controller.enqueue(new Uint8Array(DRIP_CHUNK_BYTES));
+          sent += 1;
+        },
+      });
+      return new Response(body, { headers: { "content-type": "application/octet-stream" } });
     }
     if (url.pathname === "/no-content") {
       return new Response(null, { status: 204, headers: { "x-canary-empty": "yes" } });
@@ -231,19 +251,19 @@ try {
     "Effect RPC ping reached the origin instead of using the Durable Object auto-response.",
   );
 
-  // Slow reader: keep pulling 16 KiB every 500 ms for ~10 s. This must finish
-  // even though total time exceeds any single idle window.
-  const slowResponse = await fetch(new URL("/large", workerUrl));
+  // Slow reader: the origin drips a body over ~75 s, longer than the 60 s
+  // idle window, while every chunk keeps arriving well inside it. This must
+  // complete; only a reader that stops making progress is cut off.
+  const slowStartedAt = Date.now();
+  const slowResponse = await fetch(new URL("/drip", workerUrl));
   assert(slowResponse.ok, `Slow-reader response failed with ${slowResponse.status}.`);
-  const slowReader = slowResponse.body.getReader();
-  let slowBytes = 0;
-  for (;;) {
-    const chunk = await slowReader.read();
-    if (chunk.done) break;
-    slowBytes += chunk.value.byteLength;
-    await Bun.sleep(150);
-  }
-  assert(slowBytes === largeResponse.length, "Slow reader did not receive the whole body.");
+  const slowBytes = new Uint8Array(await slowResponse.arrayBuffer());
+  const slowElapsed = Date.now() - slowStartedAt;
+  assert(slowBytes.length === DRIP_CHUNKS * DRIP_CHUNK_BYTES, "Slow reader body was truncated.");
+  assert(
+    slowElapsed > 60_000,
+    `Slow reader finished in ${slowElapsed} ms; it did not span the idle window.`,
+  );
 
   // Abandoned reader: open a download and never read it. The Durable Object
   // must drop the pending request on its own so it can hibernate again.

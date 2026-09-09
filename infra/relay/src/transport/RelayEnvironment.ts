@@ -5,6 +5,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
@@ -42,6 +43,7 @@ import {
 import { relayPublicRequestUrl } from "./publicRequestUrl.ts";
 import {
   relayHttpResponseBodyStream,
+  relayHttpResponseIdleWatchdog,
   type RelayHttpResponseBodyEvent,
 } from "./httpResponseBody.ts";
 
@@ -468,7 +470,17 @@ export default class RelayEnvironment extends Cloudflare.DurableObject<RelayEnvi
               pendingHttp.delete(streamId);
               return HttpServerResponse.text("Environment request failed", { status: 502 });
             }
-            const responseStream = relayHttpResponseBodyStream(body).pipe(
+            // The body stream cannot see a client that stopped reading, so a
+            // watchdog on its own fiber shuts the queue when no chunk has been
+            // handed out for the idle window. The stream then fails on its next
+            // pull, its ensuring cleanup runs, and the object can hibernate
+            // instead of staying awake and billed for an abandoned download.
+            const progress = { lastChunkAt: (yield* DateTime.now).epochMilliseconds };
+            const idleWatchdog = yield* relayHttpResponseIdleWatchdog(progress).pipe(
+              Effect.andThen(Queue.shutdown(body)),
+              Effect.forkDetach,
+            );
+            const responseStream = relayHttpResponseBodyStream(body, progress).pipe(
               Stream.tap((chunk) =>
                 !isActiveConnector(pending.connector)
                   ? Effect.void
@@ -481,6 +493,7 @@ export default class RelayEnvironment extends Cloudflare.DurableObject<RelayEnvi
               ),
               Stream.ensuring(
                 Effect.gen(function* () {
+                  yield* Fiber.interrupt(idleWatchdog);
                   pendingHttp.delete(streamId);
                   if (!pending.completed && isActiveConnector(pending.connector)) {
                     yield* pending.connector.send(
