@@ -12,10 +12,10 @@ import { RelayDb } from "../db.ts";
 import { EnvironmentLinks } from "../environments/EnvironmentLinks.ts";
 import { AgentActivityRows } from "./AgentActivityRows.ts";
 import { LiveActivities, type TargetRow } from "./LiveActivities.ts";
+import * as FcmDeliveryQueueSender from "./FcmDeliveryQueueSender.ts";
 import { FcmClient, FcmClientError } from "./FcmClient.ts";
 import {
   FcmDeliveries,
-  FcmDeliveryQueueSender,
   androidAlertForState,
   androidAlertForAggregate,
   layer,
@@ -103,7 +103,7 @@ function harness() {
   const services = Layer.mergeAll(
     NodeCryptoLayer.layer,
     Layer.succeed(RelayConfiguration, config),
-    Layer.succeed(FcmDeliveryQueueSender, {
+    Layer.succeed(FcmDeliveryQueueSender.FcmDeliveryQueueSender, {
       send: (job) =>
         Effect.sync(() => {
           queued.push(job);

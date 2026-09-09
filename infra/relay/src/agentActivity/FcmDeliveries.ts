@@ -1,4 +1,3 @@
-import * as Cloudflare from "alchemy/Cloudflare";
 import { and, eq } from "drizzle-orm";
 import {
   RelayAgentActivityState,
@@ -21,6 +20,7 @@ import { relayMobileDevices } from "../persistence/schema.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as AgentActivityRows from "./AgentActivityRows.ts";
 import * as LiveActivities from "./LiveActivities.ts";
+import * as FcmDeliveryQueueSender from "./FcmDeliveryQueueSender.ts";
 import * as FcmClient from "./FcmClient.ts";
 import { androidActivityData, androidActivityHero, fitFcmData } from "./fcmPayloads.ts";
 import { makeAggregateState, statusForPhase } from "./agentActivityAggregate.ts";
@@ -56,36 +56,6 @@ export class FcmDeliveryError extends Schema.TaggedError<FcmDeliveryError>()("Fc
     return `Failed to ${this.operation} Android notification delivery.`;
   }
 }
-
-export class FcmDeliveryQueueSender extends Context.Service<
-  FcmDeliveryQueueSender,
-  {
-    readonly send: (body: FcmDeliveryJob) => Effect.Effect<void, Cloudflare.Queues.SendError>;
-  }
->()("t3code-relay/agentActivity/FcmDeliveries/FcmDeliveryQueueSender") {}
-
-export class FcmDeliveries extends Context.Service<
-  FcmDeliveries,
-  {
-    readonly enqueue: (input: {
-      readonly target: LiveActivities.TargetRow;
-      readonly state: RelayAgentActivityState | null;
-    }) => Effect.Effect<RelayDeliveryResult | null, FcmDeliveryError>;
-    readonly process: (
-      body: unknown,
-    ) => Effect.Effect<
-      void,
-      | FcmDeliveryError
-      | FcmClient.FcmClientError
-      | PlatformError.PlatformError
-      | LiveActivities.LiveActivityTargetListPersistenceError
-      | LiveActivities.LiveActivityDeliveryMarkPersistenceError
-      | AgentActivityRows.AgentActivityRowListPersistenceError
-      | EnvironmentLinks.EnvironmentLinkLookupPersistenceError
-      | EnvironmentLinks.EnvironmentLinkUserListPersistenceError
-    >;
-  }
->()("t3code-relay/agentActivity/FcmDeliveries") {}
 
 export function androidAlertForState(
   state: RelayAgentActivityState,
@@ -140,10 +110,33 @@ export function androidAlertForAggregate(input: {
   };
 }
 
+export class FcmDeliveries extends Context.Service<
+  FcmDeliveries,
+  {
+    readonly enqueue: (input: {
+      readonly target: LiveActivities.TargetRow;
+      readonly state: RelayAgentActivityState | null;
+    }) => Effect.Effect<RelayDeliveryResult | null, FcmDeliveryError>;
+    readonly process: (
+      body: unknown,
+    ) => Effect.Effect<
+      void,
+      | FcmDeliveryError
+      | FcmClient.FcmClientError
+      | PlatformError.PlatformError
+      | LiveActivities.LiveActivityTargetListPersistenceError
+      | LiveActivities.LiveActivityDeliveryMarkPersistenceError
+      | AgentActivityRows.AgentActivityRowListPersistenceError
+      | EnvironmentLinks.EnvironmentLinkLookupPersistenceError
+      | EnvironmentLinks.EnvironmentLinkUserListPersistenceError
+    >;
+  }
+>()("t3code-relay/agentActivity/FcmDeliveries") {}
+
 export const make = Effect.gen(function* () {
   const config = yield* RelayConfiguration.RelayConfiguration;
   const crypto = yield* Crypto.Crypto;
-  const sender = yield* FcmDeliveryQueueSender;
+  const sender = yield* FcmDeliveryQueueSender.FcmDeliveryQueueSender;
   const client = yield* FcmClient.FcmClient;
   const devices = yield* LiveActivities.LiveActivities;
   const rows = yield* AgentActivityRows.AgentActivityRows;

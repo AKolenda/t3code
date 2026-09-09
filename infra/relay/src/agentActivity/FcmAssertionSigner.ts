@@ -14,6 +14,13 @@ export class FcmAssertionSigningError extends Schema.TaggedError<FcmAssertionSig
   }
 }
 
+function base64Url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
 export class FcmAssertionSigner extends Context.Service<
   FcmAssertionSigner,
   {
@@ -24,13 +31,6 @@ export class FcmAssertionSigner extends Context.Service<
     }) => Effect.Effect<string, FcmAssertionSigningError>;
   }
 >()("t3code-relay/agentActivity/FcmAssertionSigner") {}
-
-function base64Url(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replace(/=+$/, "");
-}
 
 export const make = Effect.sync(() => {
   const subtle = globalThis.crypto.subtle;

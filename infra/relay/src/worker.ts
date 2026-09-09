@@ -54,6 +54,7 @@ import {
 } from "./queues.ts";
 import * as FcmAssertionSigner from "./agentActivity/FcmAssertionSigner.ts";
 import * as FcmClient from "./agentActivity/FcmClient.ts";
+import * as FcmDeliveryQueueSender from "./agentActivity/FcmDeliveryQueueSender.ts";
 import * as FcmDeliveries from "./agentActivity/FcmDeliveries.ts";
 import * as RelayConfiguration from "./Config.ts";
 import * as AgentActivityPublisher from "./agentActivity/AgentActivityPublisher.ts";
@@ -224,7 +225,7 @@ export const ApiLive = Api.make(
       Layer.provideMerge(
         FcmDeliveries.layer.pipe(
           Layer.provide(
-            Layer.succeed(FcmDeliveries.FcmDeliveryQueueSender, {
+            Layer.succeed(FcmDeliveryQueueSender.FcmDeliveryQueueSender, {
               send: (body) =>
                 fcmDeliveryQueueSender
                   .send(body)
