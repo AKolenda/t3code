@@ -896,8 +896,8 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           }
           yield* projectionThreadPullRequestRepository.delete({
             threadId: event.payload.threadId,
-            host: event.payload.host,
-            repository: event.payload.repository,
+            host: event.payload.host.toLowerCase(),
+            repository: event.payload.repository.toLowerCase(),
             number: event.payload.number,
           });
           yield* projectionThreadRepository.upsert({

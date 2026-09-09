@@ -641,7 +641,7 @@ export const PullRequestLinkedThreadsResult = Schema.Struct({
     Schema.Struct({
       id: ThreadId,
       projectId: ProjectId,
-      title: TrimmedNonEmptyString,
+      title: Schema.String,
       archivedAt: Schema.NullOr(IsoDateTime),
     }),
   ),

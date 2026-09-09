@@ -879,8 +879,8 @@ it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-projection-pull
           type: "thread.pull-request-unlinked",
           payload: {
             threadId,
-            host: "github.com",
-            repository: "pingdotgg/t3code",
+            host: "GitHub.COM",
+            repository: "PingDotGG/T3Code",
             number: 42,
             updatedAt: "2026-01-01T00:00:05.000Z",
           },

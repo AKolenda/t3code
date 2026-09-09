@@ -470,7 +470,7 @@ it.effect("uses a provider's raw cursor advance when it consumed malformed rows"
 
     // Keyed by the selector Azure is actually asked with, which is the repository's own name.
     assert.deepStrictEqual(result.nextCursors, {
-      "dev.azure.com web": "2026-07-02T00:00:00Z|4|7",
+      "dev.azure.com dev.azure.com/acme/web": "2026-07-02T00:00:00Z|4|7",
     });
   }),
 );
@@ -4313,5 +4313,42 @@ it.effect("names the signed-in account in the detail, and says nothing where the
 
     assert.strictEqual(named.viewer, "bilal");
     assert.strictEqual(unnamed.viewer, undefined);
+  }),
+);
+
+it.effect("keeps Azure continuation cursors separate for repositories with the same name", () =>
+  Effect.gen(function* () {
+    const seen: string[] = [];
+    const service = yield* makeService({
+      projects: ["org-a", "org-b"].map((organization) =>
+        project({
+          id: organization,
+          title: organization,
+          workspaceRoot: `/${organization}`,
+          repository: `${organization}/project/_git/web`,
+          provider: "azure-devops",
+          host: "dev.azure.com",
+        }),
+      ),
+      providers: [
+        fakeProvider("azure-devops", {
+          listChangeRequests: (input) =>
+            Effect.sync(() => {
+              seen.push(input.cwd);
+              return {
+                items: [changeRequest(7, "2026-07-02T00:00:00Z")],
+                truncated: true,
+                continues: true,
+              };
+            }),
+        }),
+      ],
+    });
+    const first = yield* service.list({ state: "open" });
+    assert.lengthOf(Object.keys(first.nextCursors), 2);
+    const key = Object.keys(first.nextCursors).find((key) => key.includes("org-b"))!;
+    seen.length = 0;
+    yield* service.list({ state: "open", cursors: { [key]: first.nextCursors[key]! } });
+    assert.deepStrictEqual(seen, ["/org-b"]);
   }),
 );

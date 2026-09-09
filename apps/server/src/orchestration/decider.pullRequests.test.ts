@@ -92,6 +92,50 @@ const snapshot: ThreadPullRequestSnapshot = {
 };
 
 it.layer(NodeServices.layer)("pull request link decider", (it) => {
+  it.effect("legacy replacement preserves unrelated manual links", () =>
+    Effect.gen(function* () {
+      const other = makeLink({ number: 7, snapshot: { ...snapshot, state: "merged" } });
+      const current = makeLink({ linkedAt: "2026-01-02T00:00:00Z" });
+      let model = makeReadModel([other, current]);
+      const command = yield* Schema.decodeUnknownEffect(OrchestrationCommand)({
+        type: "thread.meta.update",
+        commandId: "replace",
+        threadId: THREAD_ID,
+        linkedPullRequest: {
+          projectId: "project-1",
+          repository: "t3tools/t3code",
+          number: 99,
+          url: "https://github.com/t3tools/t3code/pull/99",
+        },
+      });
+      const decided = yield* decideOrchestrationCommand({ readModel: model, command });
+      const events = Array.isArray(decided) ? decided : [decided];
+      expect(events.map((event) => event.type)).toEqual([
+        "thread.pull-request-unlinked",
+        "thread.pull-request-linked",
+      ]);
+      for (const event of events)
+        model = yield* projectEvent(model, { ...event, sequence: model.snapshotSequence + 1 });
+      expect(model.threads[0]!.pullRequests.map((link) => link.number)).toEqual([7, 99]);
+    }),
+  );
+  it.effect("legacy unlink alone does not emit an empty metadata event", () =>
+    Effect.gen(function* () {
+      const command = yield* Schema.decodeUnknownEffect(OrchestrationCommand)({
+        type: "thread.meta.update",
+        commandId: "unlink",
+        threadId: THREAD_ID,
+        linkedPullRequest: null,
+      });
+      const decided = yield* decideOrchestrationCommand({
+        readModel: makeReadModel([makeLink()]),
+        command,
+      });
+      const events = Array.isArray(decided) ? decided : [decided];
+      expect(events.map((event) => event.type)).toEqual(["thread.pull-request-unlinked"]);
+    }),
+  );
+
   for (const source of ["manual", "agent", "created", "stack"] as const) {
     it.effect(`legacy unlink removes the visible ${source} link and preserves other requests`, () =>
       Effect.gen(function* () {

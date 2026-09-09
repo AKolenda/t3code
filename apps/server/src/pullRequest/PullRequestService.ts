@@ -250,6 +250,7 @@ const LABEL_CHANGE_REFUSAL = "You need triage access on this repository to chang
 
 /** A project this page can read: its remote is on a host with an implementation. */
 interface SupportedProject {
+  readonly cursorKey: string;
   readonly project: OrchestrationProjectShell;
   readonly api: PullRequestProviderApi;
   readonly repository: string;
@@ -655,6 +656,7 @@ export const make = Effect.gen(function* () {
             continue;
           }
           supported.push({
+            cursorKey: key,
             project,
             api: withRateLimitBackoff(api, host, rateLimits),
             repository,
@@ -979,9 +981,7 @@ export const make = Effect.gen(function* () {
       const selected =
         continuation === null
           ? projects
-          : projects.filter(({ host, repository }) =>
-              continuation.has(listCursorKey(host, repository)),
-            );
+          : projects.filter(({ cursorKey }) => continuation.has(cursorKey));
       const readable = selected.filter(({ host }) => viewers[host] !== undefined);
       // A host that could not be read still has projects, and they are absent from the list.
       // Reporting them keeps "N repositories were unavailable" honest instead of dropping them.
@@ -1023,7 +1023,7 @@ export const make = Effect.gen(function* () {
 
       const limit = input.limit ?? DEFAULT_REPOSITORY_LIST_LIMIT;
       const cursorOf = (project: SupportedProject): ListCursor | undefined =>
-        continuation?.get(listCursorKey(project.host, project.repository));
+        continuation?.get(project.cursorKey);
 
       /**
        * One repository asked on its own. What every host without a search across repositories
@@ -1032,7 +1032,7 @@ export const make = Effect.gen(function* () {
       const readRepository = (project: SupportedProject): Effect.Effect<RepositoryBatch> => {
         {
           const viewer = viewers[project.host]!;
-          const key = listCursorKey(project.host, project.repository);
+          const key = project.cursorKey;
           const cursor = cursorOf(project);
           return project.api
             .listChangeRequests({
@@ -1191,7 +1191,7 @@ export const make = Effect.gen(function* () {
                             !cursorHere.seenAt.includes(item.number),
                         );
                   return Effect.succeed({
-                    key: listCursorKey(project.host, project.repository),
+                    key: project.cursorKey,
                     entries: items
                       .filter((item) => matchesRowFilters(item, input.filters, viewer))
                       .map((item) => toEntry({ project, item, viewer })),

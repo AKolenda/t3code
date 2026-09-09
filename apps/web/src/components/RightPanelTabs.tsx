@@ -772,12 +772,12 @@ function PullRequestSurfaceIcon({
     resolvedEnvironmentId === null
       ? undefined
       : configs.get(resolvedEnvironmentId)?.environment.capabilities;
-  const linked =
+  const linkedSnapshot =
     capabilities?.threadPullRequests === true
-      ? resolvePullRequestTabLink(threads, resolvedEnvironmentId, host, surface)
-      : undefined;
+      ? (resolvePullRequestTabLink(threads, resolvedEnvironmentId, host, surface)?.snapshot ?? null)
+      : null;
   const detail = useEnvironmentQuery(
-    resolvedEnvironmentId === null || capabilities?.pullRequests !== true || linked !== undefined
+    resolvedEnvironmentId === null || capabilities?.pullRequests !== true || linkedSnapshot !== null
       ? null
       : pullRequestEnvironment.detail({
           environmentId: resolvedEnvironmentId,
@@ -794,8 +794,8 @@ function PullRequestSurfaceIcon({
   // Only state and draft reach the tab. A list seed cannot know mergeability, so feeding the
   // full detail would flip an open tab to the conflict glyph the moment its read lands.
   const status =
-    linked !== undefined
-      ? linked.snapshot
+    linkedSnapshot !== null
+      ? linkedSnapshot
       : detail === null
         ? (seed ?? null)
         : { state: detail.state, isDraft: detail.isDraft };
