@@ -467,7 +467,7 @@ export function ThreadArrangementSheet(props: { onClose: () => void }) {
             {preview ? (
               <Animated.View
                 pointerEvents="none"
-                className="absolute left-5 right-5 justify-center rounded-xl bg-subtle-strong px-4"
+                className="absolute left-5 right-5 justify-center rounded-xl border border-border bg-screen px-4"
                 style={{ top: 0, height: ROW_HEIGHT, transform: [{ translateY }] }}
               >
                 <Text numberOfLines={2} className="text-base font-t3-medium">
