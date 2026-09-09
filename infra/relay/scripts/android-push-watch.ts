@@ -23,6 +23,7 @@ import * as Socket from "effect/unstable/socket/Socket";
 
 import * as RelayConfiguration from "../src/Config.ts";
 import { androidActivityData, fitFcmData } from "../src/agentActivity/fcmPayloads.ts";
+import * as FcmAssertionSigner from "../src/agentActivity/FcmAssertionSigner.ts";
 import * as FcmClient from "../src/agentActivity/FcmClient.ts";
 import * as FcmDeliveries from "../src/agentActivity/FcmDeliveries.ts";
 import { makeAggregateState } from "../src/agentActivity/agentActivityAggregate.ts";
@@ -77,6 +78,7 @@ const main = Effect.gen(function* () {
     Layer.provide(RpcSerialization.layerJson),
   );
   const fcm = FcmClient.layer.pipe(
+    Layer.provide(FcmAssertionSigner.layer),
     Layer.provide(
       Layer.mergeAll(
         FetchHttpClient.layer,

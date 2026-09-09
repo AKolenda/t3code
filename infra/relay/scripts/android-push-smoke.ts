@@ -9,6 +9,7 @@ import * as Schema from "effect/Schema";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
 import * as RelayConfiguration from "../src/Config.ts";
+import * as FcmAssertionSigner from "../src/agentActivity/FcmAssertionSigner.ts";
 import * as FcmClient from "../src/agentActivity/FcmClient.ts";
 
 const Device = Schema.Struct({
@@ -102,6 +103,7 @@ const main = Effect.gen(function* () {
     ),
     Effect.provide(
       FcmClient.layer.pipe(
+        Layer.provide(FcmAssertionSigner.layer),
         Layer.provide(
           Layer.mergeAll(
             Layer.succeed(RelayConfiguration.RelayConfiguration, config),

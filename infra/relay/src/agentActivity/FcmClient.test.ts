@@ -12,7 +12,9 @@ import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import type * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
 import { RelayConfiguration } from "../Config.ts";
-import { FcmClient, layer, makeFcmAssertion } from "./FcmClient.ts";
+import { FcmClient, layer } from "./FcmClient.ts";
+
+import * as FcmAssertionSigner from "./FcmAssertionSigner.ts";
 
 const { privateKey, publicKey } = NodeCrypto.generateKeyPairSync("rsa", {
   modulusLength: 2048,
@@ -61,6 +63,7 @@ function testLayer(requests: HttpClientRequest.HttpClientRequest[], responses: R
       : Effect.die("unexpected request");
   });
   return layer.pipe(
+    Layer.provide(FcmAssertionSigner.layer),
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(RelayConfiguration, config),
@@ -112,6 +115,7 @@ describe("FCM delivery", () => {
       }).pipe(
         Effect.provide(
           layer.pipe(
+            Layer.provide(FcmAssertionSigner.layer),
             Layer.provide(Layer.succeed(RelayConfiguration, config)),
             Layer.provide(Layer.succeed(HttpClient.HttpClient, http)),
           ),
@@ -122,7 +126,12 @@ describe("FCM delivery", () => {
 
   it.effect("signs a verifiable Google OAuth assertion scoped to messaging", () =>
     Effect.gen(function* () {
-      const assertion = yield* makeFcmAssertion(account, 1000);
+      const signer = yield* FcmAssertionSigner.FcmAssertionSigner;
+      const assertion = yield* signer.sign({
+        privateKey: account.private_key,
+        clientEmail: account.client_email,
+        issuedAt: 1000,
+      });
       const [header, claims, signature] = assertion.split(".");
       expect(
         NodeCrypto.verify(
@@ -139,7 +148,7 @@ describe("FCM delivery", () => {
         iat: 1000,
         exp: 4600,
       });
-    }),
+    }).pipe(Effect.provide(FcmAssertionSigner.layer)),
   );
 
   it.effect(

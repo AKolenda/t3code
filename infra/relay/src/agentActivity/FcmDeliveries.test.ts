@@ -1,6 +1,7 @@
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import type { RelayAgentActivityState } from "@t3tools/contracts/relay";
 import { describe, expect, it } from "@effect/vitest";
+import * as NodeCryptoLayer from "@effect/platform-node/NodeCrypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
@@ -11,7 +12,7 @@ import { RelayDb } from "../db.ts";
 import { EnvironmentLinks } from "../environments/EnvironmentLinks.ts";
 import { AgentActivityRows } from "./AgentActivityRows.ts";
 import { LiveActivities, type TargetRow } from "./LiveActivities.ts";
-import { FcmClient } from "./FcmClient.ts";
+import { FcmClient, FcmClientError } from "./FcmClient.ts";
 import {
   FcmDeliveries,
   FcmDeliveryQueueSender,
@@ -97,8 +98,10 @@ function harness() {
     notificationOnlyEnvironments: [] as string[],
     revokedEnvironments: [] as string[],
     linked: true,
+    deliveryFailure: null as FcmClientError | null,
   };
   const services = Layer.mergeAll(
+    NodeCryptoLayer.layer,
     Layer.succeed(RelayConfiguration, config),
     Layer.succeed(FcmDeliveryQueueSender, {
       send: (job) =>
@@ -108,10 +111,14 @@ function harness() {
     }),
     Layer.succeed(FcmClient, {
       send: (input) =>
-        Effect.sync(() => {
-          sent.push(input);
-          return { unregistered: false };
-        }),
+        Effect.suspend(() =>
+          current.deliveryFailure
+            ? Effect.fail(current.deliveryFailure)
+            : Effect.sync(() => {
+                sent.push(input);
+                return { unregistered: false };
+              }),
+        ),
     }),
     Layer.succeed(LiveActivities, {
       register: () => Effect.void,
@@ -729,4 +736,24 @@ it.effect("notification-only jobs do not consume another environment's card aler
     yield* deliveries.process({ ...h.job, state: h.current.otherStates[0]! });
     expect(h.sent.filter((delivery) => delivery.alert)).toHaveLength(2);
   }).pipe(Effect.provide(h.layer));
+});
+
+it.effect("preserves a structured Firebase failure through the queue consumer", () => {
+  const h = harness();
+  const failure = new FcmClientError({ operation: "send", status: 503 });
+  h.current.deliveryFailure = failure;
+  return Effect.gen(function* () {
+    const deliveries = yield* FcmDeliveries;
+    expect(yield* deliveries.process(h.job).pipe(Effect.flip)).toBe(failure);
+  }).pipe(Effect.provide(h.layer));
+});
+
+it("stops reducing five-character row fields and fits the remaining alert", () => {
+  const data = fitFcmData({
+    device_id: "x".repeat(3710),
+    activity_line_0: "Approval\taaaaa\tbbbbb",
+    alert_body: "y".repeat(200),
+  });
+  expect(data.activity_line_0).toBe("Approval\taaaaa\tbbbbb");
+  expect(new TextEncoder().encode(encodeJson(data)).length).toBeLessThanOrEqual(3800);
 });

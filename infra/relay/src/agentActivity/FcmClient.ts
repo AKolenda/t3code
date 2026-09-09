@@ -9,6 +9,7 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
 import * as RelayConfiguration from "../Config.ts";
+import * as FcmAssertionSigner from "./FcmAssertionSigner.ts";
 
 const FCM_HTTP_STAGE_TIMEOUT = "10 seconds";
 
@@ -60,53 +61,9 @@ export class FcmClient extends Context.Service<
   }
 >()("t3code-relay/agentActivity/FcmClient") {}
 
-function base64Url(bytes: Uint8Array): string {
-  return btoa(String.fromCharCode(...bytes))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replace(/=+$/, "");
-}
-
-export const makeFcmAssertion = Effect.fn("relay.fcm.assertion")(function* (
-  account: typeof ServiceAccount.Type,
-  issuedAt: number,
-) {
-  return yield* Effect.tryPromise({
-    try: async () => {
-      const encoder = new TextEncoder();
-      const header = base64Url(encoder.encode(encodeJson({ alg: "RS256", typ: "JWT" })));
-      const claims = base64Url(
-        encoder.encode(
-          encodeJson({
-            iss: account.client_email,
-            scope: "https://www.googleapis.com/auth/firebase.messaging",
-            aud: "https://oauth2.googleapis.com/token",
-            iat: issuedAt,
-            exp: issuedAt + 3600,
-          }),
-        ),
-      );
-      const pem = account.private_key.replace(/-----[^-]+-----|\s/g, "");
-      const key = await crypto.subtle.importKey(
-        "pkcs8",
-        Uint8Array.from(atob(pem), (c) => c.charCodeAt(0)),
-        { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
-        false,
-        ["sign"],
-      );
-      const signature = await crypto.subtle.sign(
-        "RSASSA-PKCS1-v1_5",
-        key,
-        encoder.encode(`${header}.${claims}`),
-      );
-      return `${header}.${claims}.${base64Url(new Uint8Array(signature))}`;
-    },
-    catch: (cause) => new FcmClientError({ operation: "authorize", status: null, cause }),
-  });
-});
-
 export const make = Effect.gen(function* () {
   const config = yield* RelayConfiguration.RelayConfiguration;
+  const signer = yield* FcmAssertionSigner.FcmAssertionSigner;
   const client = yield* HttpClient.HttpClient;
   const account = config.fcmServiceAccount
     ? decodeServiceAccount(Redacted.value(config.fcmServiceAccount))
@@ -115,10 +72,17 @@ export const make = Effect.gen(function* () {
     if (Option.isNone(account))
       return yield* new FcmClientError({ operation: "configuration", status: null });
     const now = yield* DateTime.now;
-    const assertion = yield* makeFcmAssertion(
-      account.value,
-      Math.floor(now.epochMilliseconds / 1000),
-    );
+    const assertion = yield* signer
+      .sign({
+        privateKey: account.value.private_key,
+        clientEmail: account.value.client_email,
+        issuedAt: Math.floor(now.epochMilliseconds / 1000),
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) => new FcmClientError({ operation: "authorize", status: null, cause }),
+        ),
+      );
     const response = yield* client
       .execute(
         HttpClientRequest.post("https://oauth2.googleapis.com/token").pipe(

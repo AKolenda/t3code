@@ -6,6 +6,8 @@ import {
   RelayAgentAwarenessPreferences,
   type RelayDeliveryResult,
 } from "@t3tools/contracts/relay";
+import * as Crypto from "effect/Crypto";
+import type * as PlatformError from "effect/PlatformError";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -47,7 +49,7 @@ const decodePreviousActivity = Schema.decodeUnknownOption(
 );
 
 export class FcmDeliveryError extends Schema.TaggedError<FcmDeliveryError>()("FcmDeliveryError", {
-  operation: Schema.Literals(["enqueue", "process"]),
+  operation: Schema.Literals(["enqueue", "decode-job", "invalidate-token"]),
   cause: Schema.Defect(),
 }) {
   override get message() {
@@ -69,7 +71,19 @@ export class FcmDeliveries extends Context.Service<
       readonly target: LiveActivities.TargetRow;
       readonly state: RelayAgentActivityState | null;
     }) => Effect.Effect<RelayDeliveryResult | null, FcmDeliveryError>;
-    readonly process: (body: unknown) => Effect.Effect<void, FcmDeliveryError>;
+    readonly process: (
+      body: unknown,
+    ) => Effect.Effect<
+      void,
+      | FcmDeliveryError
+      | FcmClient.FcmClientError
+      | PlatformError.PlatformError
+      | LiveActivities.LiveActivityTargetListPersistenceError
+      | LiveActivities.LiveActivityDeliveryMarkPersistenceError
+      | AgentActivityRows.AgentActivityRowListPersistenceError
+      | EnvironmentLinks.EnvironmentLinkLookupPersistenceError
+      | EnvironmentLinks.EnvironmentLinkUserListPersistenceError
+    >;
   }
 >()("t3code-relay/agentActivity/FcmDeliveries") {}
 
@@ -128,6 +142,7 @@ export function androidAlertForAggregate(input: {
 
 export const make = Effect.gen(function* () {
   const config = yield* RelayConfiguration.RelayConfiguration;
+  const crypto = yield* Crypto.Crypto;
   const sender = yield* FcmDeliveryQueueSender;
   const client = yield* FcmClient.FcmClient;
   const devices = yield* LiveActivities.LiveActivities;
@@ -169,165 +184,162 @@ export const make = Effect.gen(function* () {
         apnsId: null,
       };
     }),
-    process: Effect.fn("relay.fcm.process")(
-      function* (body) {
-        const job = yield* decodeJob(body);
-        const now = yield* DateTime.now;
-        if (now.epochMilliseconds - job.queuedAt > 5 * 60_000) return;
-        const targets = yield* devices.listTargets({ userId: job.userId });
-        const target = targets.find(
-          (device) =>
-            device.device_id === job.deviceId &&
-            device.platform === "android" &&
-            device.push_token === job.token,
-        );
-        if (!target) return;
-        const preferences = decodePreferences(target.preferences_json);
-        if (Option.isNone(preferences)) return;
+    process: Effect.fn("relay.fcm.process")(function* (body) {
+      const job = yield* decodeJob(body).pipe(
+        Effect.mapError((cause) => new FcmDeliveryError({ operation: "decode-job", cause })),
+      );
+      const now = yield* DateTime.now;
+      if (now.epochMilliseconds - job.queuedAt > 5 * 60_000) return;
+      const targets = yield* devices.listTargets({ userId: job.userId });
+      const target = targets.find(
+        (device) =>
+          device.device_id === job.deviceId &&
+          device.platform === "android" &&
+          device.push_token === job.token,
+      );
+      if (!target) return;
+      const preferences = decodePreferences(target.preferences_json);
+      if (Option.isNone(preferences)) return;
 
-        // Re-read links and state when consuming: queued messages must honor
-        // sign-out, token rotation, disabled publishing, and newer thread states.
-        const states = preferences.value.liveActivitiesEnabled
-          ? yield* rows.listForUser({ userId: job.userId })
+      // Re-read links and state when consuming: queued messages must honor
+      // sign-out, token rotation, disabled publishing, and newer thread states.
+      const states = preferences.value.liveActivitiesEnabled
+        ? yield* rows.listForUser({ userId: job.userId })
+        : [];
+      const aggregate = makeAggregateState({
+        activeStates: states,
+        terminalState: null,
+        nowMs: now.epochMilliseconds,
+      });
+      const previousAggregate = target.last_aggregate_json
+        ? Option.getOrNull(decodePreviousActivity(target.last_aggregate_json))
+        : null;
+      let alert: ReturnType<typeof androidAlertForState> = null;
+      let acknowledgeAggregate = true;
+      if (job.state && preferences.value.notificationsEnabled) {
+        const state = yield* rows.getForUserThread({
+          userId: job.userId,
+          environmentId: job.state.environmentId,
+          threadId: job.state.threadId,
+        });
+        if (
+          !previousAggregate &&
+          (!state || state.phase !== job.state.phase || state.updatedAt !== job.state.updatedAt)
+        )
+          return;
+        const link = yield* links.getForUser({
+          userId: job.userId,
+          environmentId: job.state.environmentId,
+        });
+        const deliveryUsers = link
+          ? yield* links.listDeliveryUsersForEnvironment({
+              environmentId: job.state.environmentId,
+              environmentPublicKey: link.environmentPublicKey,
+            })
           : [];
-        const aggregate = makeAggregateState({
-          activeStates: states,
-          terminalState: null,
-          nowMs: now.epochMilliseconds,
-        });
-        const previousAggregate = target.last_aggregate_json
-          ? Option.getOrNull(decodePreviousActivity(target.last_aggregate_json))
-          : null;
-        let alert: ReturnType<typeof androidAlertForState> = null;
-        let acknowledgeAggregate = true;
-        if (job.state && preferences.value.notificationsEnabled) {
-          const state = yield* rows.getForUserThread({
-            userId: job.userId,
-            environmentId: job.state.environmentId,
-            threadId: job.state.threadId,
-          });
-          if (
-            !previousAggregate &&
-            (!state || state.phase !== job.state.phase || state.updatedAt !== job.state.updatedAt)
-          )
-            return;
-          const link = yield* links.getForUser({
-            userId: job.userId,
-            environmentId: job.state.environmentId,
-          });
-          const deliveryUsers = link
-            ? yield* links.listDeliveryUsersForEnvironment({
-                environmentId: job.state.environmentId,
-                environmentPublicKey: link.environmentPublicKey,
-              })
-            : [];
-          const deliveryUser = deliveryUsers.find((user) => user.userId === job.userId);
-          // A notification-only job must not acknowledge transitions on another
-          // environment's live card before that environment's own job can alert.
-          acknowledgeAggregate =
-            deliveryUser?.liveActivitiesEnabled === true ||
-            !preferences.value.liveActivitiesEnabled;
-          if (
-            deliveryUser?.liveActivitiesEnabled &&
-            preferences.value.liveActivitiesEnabled &&
-            previousAggregate &&
-            aggregate
-          ) {
-            const environmentIds = [
-              ...new Set(aggregate.activities.map((row) => row.environmentId)),
-            ];
-            const allowedEnvironments = new Set<string>();
-            for (const environmentId of environmentIds) {
-              const environmentLink = yield* links.getForUser({
-                userId: job.userId,
-                environmentId,
-              });
-              if (!environmentLink) continue;
-              const users = yield* links.listDeliveryUsersForEnvironment({
-                environmentId,
-                environmentPublicKey: environmentLink.environmentPublicKey,
-              });
-              if (users.some((user) => user.userId === job.userId && user.notificationsEnabled)) {
-                allowedEnvironments.add(environmentId);
-              }
-            }
-            alert = androidAlertForAggregate({
-              previousAggregate,
-              nextAggregate: {
-                ...aggregate,
-                activities: aggregate.activities.filter((row) =>
-                  allowedEnvironments.has(row.environmentId),
-                ),
-              },
-              preferences: preferences.value,
-              nowMs: now.epochMilliseconds,
+        const deliveryUser = deliveryUsers.find((user) => user.userId === job.userId);
+        // A notification-only job must not acknowledge transitions on another
+        // environment's live card before that environment's own job can alert.
+        acknowledgeAggregate =
+          deliveryUser?.liveActivitiesEnabled === true || !preferences.value.liveActivitiesEnabled;
+        if (
+          deliveryUser?.liveActivitiesEnabled &&
+          preferences.value.liveActivitiesEnabled &&
+          previousAggregate &&
+          aggregate
+        ) {
+          const environmentIds = [...new Set(aggregate.activities.map((row) => row.environmentId))];
+          const allowedEnvironments = new Set<string>();
+          for (const environmentId of environmentIds) {
+            const environmentLink = yield* links.getForUser({
+              userId: job.userId,
+              environmentId,
             });
-          } else if (
-            deliveryUser?.notificationsEnabled &&
-            state?.phase === job.state.phase &&
-            state.updatedAt === job.state.updatedAt &&
-            !isExpiredAgentActivityState(state, now.epochMilliseconds)
-          ) {
-            alert = androidAlertForState(state, preferences.value, now.epochMilliseconds);
+            if (!environmentLink) continue;
+            const users = yield* links.listDeliveryUsersForEnvironment({
+              environmentId,
+              environmentPublicKey: environmentLink.environmentPublicKey,
+            });
+            if (users.some((user) => user.userId === job.userId && user.notificationsEnabled)) {
+              allowedEnvironments.add(environmentId);
+            }
           }
-        }
-        const displayedAggregate =
-          preferences.value.notificationsEnabled && preferences.value.liveActivitiesEnabled
-            ? aggregate
-            : null;
-        const active = (displayedAggregate?.activeCount ?? 0) > 0;
-        // A registration replay must clear an orphan even when the relay has
-        // already forgotten its baseline. Finished cards are visible, but idle.
-        if (!displayedAggregate && !alert && !previousAggregate && job.state !== null) return;
-        const data = {
-          t3_kind: "agent_activity",
-          device_id: job.deviceId,
-          user_id: job.userId,
-          updated_at: String(now.epochMilliseconds),
-          ...androidActivityData(displayedAggregate),
-          ...alert,
-        };
-        if (alert) {
-          // Group identities can contain five sets of IDs. Hash the full,
-          // stable identity rather than spending the payload budget on it.
-          const digest = yield* Effect.promise(() =>
-            crypto.subtle.digest("SHA-256", new TextEncoder().encode(alert.alert_id)),
-          );
-          data.alert_id = Array.from(new Uint8Array(digest), (byte) =>
-            byte.toString(16).padStart(2, "0"),
-          ).join("");
-        }
-        const result = yield* client.send({
-          token: job.token,
-          packageName: target.bundle_id,
-          alert: alert !== null,
-          data: fitFcmData(data),
-        });
-        if (result.unregistered) {
-          yield* db
-            .update(relayMobileDevices)
-            .set({ pushToken: null })
-            .where(
-              and(
-                eq(relayMobileDevices.userId, job.userId),
-                eq(relayMobileDevices.deviceId, job.deviceId),
-                eq(relayMobileDevices.pushToken, job.token),
+          alert = androidAlertForAggregate({
+            previousAggregate,
+            nextAggregate: {
+              ...aggregate,
+              activities: aggregate.activities.filter((row) =>
+                allowedEnvironments.has(row.environmentId),
               ),
-            );
-        } else if (acknowledgeAggregate) {
-          yield* devices.markDelivery({
-            userId: job.userId,
-            deviceId: job.deviceId,
-            kind: active ? "live_activity_update" : "live_activity_end",
-            // Keep the delivered terminal rows as the next transition baseline,
-            // so replaying the finished card cannot alert again.
-            aggregate: preferences.value.liveActivitiesEnabled ? aggregate : null,
-            deliveredAt: DateTime.formatIso(now),
+            },
+            preferences: preferences.value,
+            nowMs: now.epochMilliseconds,
           });
+        } else if (
+          deliveryUser?.notificationsEnabled &&
+          state?.phase === job.state.phase &&
+          state.updatedAt === job.state.updatedAt &&
+          !isExpiredAgentActivityState(state, now.epochMilliseconds)
+        ) {
+          alert = androidAlertForState(state, preferences.value, now.epochMilliseconds);
         }
-      },
-      Effect.mapError((cause) => new FcmDeliveryError({ operation: "process", cause })),
-    ),
+      }
+      const displayedAggregate =
+        preferences.value.notificationsEnabled && preferences.value.liveActivitiesEnabled
+          ? aggregate
+          : null;
+      const active = (displayedAggregate?.activeCount ?? 0) > 0;
+      // A registration replay must clear an orphan even when the relay has
+      // already forgotten its baseline. Finished cards are visible, but idle.
+      if (!displayedAggregate && !alert && !previousAggregate && job.state !== null) return;
+      const data = {
+        t3_kind: "agent_activity",
+        device_id: job.deviceId,
+        user_id: job.userId,
+        updated_at: String(now.epochMilliseconds),
+        ...androidActivityData(displayedAggregate),
+        ...alert,
+      };
+      if (alert) {
+        // Group identities can contain five sets of IDs. Hash the full,
+        // stable identity rather than spending the payload budget on it.
+        const digest = yield* crypto.digest("SHA-256", new TextEncoder().encode(alert.alert_id));
+        data.alert_id = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
+      }
+      const result = yield* client.send({
+        token: job.token,
+        packageName: target.bundle_id,
+        alert: alert !== null,
+        data: fitFcmData(data),
+      });
+      if (result.unregistered) {
+        yield* db
+          .update(relayMobileDevices)
+          .set({ pushToken: null })
+          .where(
+            and(
+              eq(relayMobileDevices.userId, job.userId),
+              eq(relayMobileDevices.deviceId, job.deviceId),
+              eq(relayMobileDevices.pushToken, job.token),
+            ),
+          )
+          .pipe(
+            Effect.mapError(
+              (cause) => new FcmDeliveryError({ operation: "invalidate-token", cause }),
+            ),
+          );
+      } else if (acknowledgeAggregate) {
+        yield* devices.markDelivery({
+          userId: job.userId,
+          deviceId: job.deviceId,
+          kind: active ? "live_activity_update" : "live_activity_end",
+          // Keep the delivered terminal rows as the next transition baseline,
+          // so replaying the finished card cannot alert again.
+          aggregate: preferences.value.liveActivitiesEnabled ? aggregate : null,
+          deliveredAt: DateTime.formatIso(now),
+        });
+      }
+    }),
   });
 });
 

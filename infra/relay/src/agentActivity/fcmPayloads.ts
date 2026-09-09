@@ -70,7 +70,8 @@ export function fitFcmData(input: Readonly<Record<string, string>>): Record<stri
     const parts = key.startsWith("activity_line_") ? data[key]!.split("\t") : [data[key]!];
     const part = parts.length === 3 ? (parts[1]!.length > parts[2]!.length ? 1 : 2) : 0;
     const characters = Array.from(parts[part]!);
-    if (characters.length <= 4) {
+    // Five characters would become four plus the ellipsis and never shrink.
+    if (characters.length <= 5) {
       textKeys.splice(textKeys.indexOf(key), 1);
       continue;
     }

@@ -52,6 +52,7 @@ import {
   RelayFcmDeliveryQueue,
   RelayFcmDeliveryDeadLetterQueue,
 } from "./queues.ts";
+import * as FcmAssertionSigner from "./agentActivity/FcmAssertionSigner.ts";
 import * as FcmClient from "./agentActivity/FcmClient.ts";
 import * as FcmDeliveries from "./agentActivity/FcmDeliveries.ts";
 import * as RelayConfiguration from "./Config.ts";
@@ -230,7 +231,7 @@ export const ApiLive = Api.make(
                   .pipe(Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext)),
             }),
           ),
-          Layer.provideMerge(FcmClient.layer),
+          Layer.provideMerge(FcmClient.layer.pipe(Layer.provide(FcmAssertionSigner.layer))),
         ),
       ),
       Layer.provideMerge(ApnsClient.layer.pipe(Layer.provideMerge(ApnsProviderTokens.layer))),
