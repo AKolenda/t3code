@@ -204,6 +204,7 @@ function cardSubtitle(agent: RuntimeSubagent): { text: string; mono: boolean } |
   return step === null ? null : { text: step, mono: true };
 }
 
+/** Pair each status color with a readable label so color is never the only status signal. */
 function AgentChip({ agent }: { agent: RuntimeSubagent }) {
   return (
     <span
@@ -750,6 +751,7 @@ function FleetMeter({ agents }: { agents: ReadonlyArray<RuntimeSubagent> }) {
 /** Stable identity: a literal default would break the derivation's memo. */
 const NO_ACTIVITIES: ReadonlyArray<OrchestrationThreadActivity> = [];
 
+/** Keep expansion local to the roster while routing saved history through the selected environment. */
 export function AgentsPanel({
   model,
   activities = NO_ACTIVITIES,
