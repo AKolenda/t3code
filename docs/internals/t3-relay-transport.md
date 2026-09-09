@@ -44,7 +44,11 @@ The edge reads HTTP request bodies incrementally and rejects them above 16 MiB;
 the built-in connector buffers at most that same limit before calling the
 loopback origin. HTTP responses stream back to the edge using per-stream credit
 updates with a 256 KiB initial window, so a slow public client cannot create an
-unbounded response queue in the Durable Object. Ticket and WebSocket connection
+unbounded response queue in the Durable Object. An in-flight response keeps the
+object awake and billed, so the body stream aborts after 60 seconds with no
+chunk consumed. A slow client that keeps reading is unaffected; an abandoned
+download is released. A stuck object costs about $4 a month, so this bound is
+the main guard against it. Ticket and WebSocket connection
 attempts have bounded deadlines, and reconnects use jittered exponential
 backoff. Hibernatable socket attachments restore connector and client roles
 after a Durable Object wake-up. Connector attachments also carry a unique

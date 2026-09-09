@@ -231,11 +231,43 @@ try {
     "Effect RPC ping reached the origin instead of using the Durable Object auto-response.",
   );
 
+  // Slow reader: keep pulling 16 KiB every 500 ms for ~10 s. This must finish
+  // even though total time exceeds any single idle window.
+  const slowResponse = await fetch(new URL("/large", workerUrl));
+  assert(slowResponse.ok, `Slow-reader response failed with ${slowResponse.status}.`);
+  const slowReader = slowResponse.body.getReader();
+  let slowBytes = 0;
+  for (;;) {
+    const chunk = await slowReader.read();
+    if (chunk.done) break;
+    slowBytes += chunk.value.byteLength;
+    await Bun.sleep(150);
+  }
+  assert(slowBytes === largeResponse.length, "Slow reader did not receive the whole body.");
+
+  // Abandoned reader: open a download and never read it. The Durable Object
+  // must drop the pending request on its own so it can hibernate again.
+  const abandoned = await fetch(new URL("/large", workerUrl));
+  assert(abandoned.ok, `Abandoned response failed with ${abandoned.status}.`);
+  const abandonedAt = Date.now();
+  await waitFor(() => Date.now() - abandonedAt > 1_000, "unreachable", 5_000);
+  const pendingWhileAbandoned = await (await control("diagnostics")).json();
+  assert(
+    pendingWhileAbandoned.pendingHttpCount >= 1,
+    "Abandoned download was not tracked as a pending request.",
+  );
+
   const beforeIdle = await (await control("diagnostics")).json();
   assert(beforeIdle.connectorConnected, "Connector was not visible in Durable Object diagnostics.");
-  await Bun.sleep(20_000);
+  // Wait past the 60 s response idle timeout plus hibernation slack.
+  await Bun.sleep(85_000);
   const afterIdle = await (await control("diagnostics")).json();
   assert(afterIdle.connectorConnected, "Connector was not restored after Durable Object wake.");
+  assert(
+    afterIdle.pendingHttpCount === 0,
+    `Abandoned download still pending after the idle timeout (${afterIdle.pendingHttpCount}).`,
+  );
+  await abandoned.body.cancel().catch(() => undefined);
   assert(
     afterIdle.activationId !== beforeIdle.activationId,
     "Durable Object did not hibernate during the idle validation window.",
@@ -262,6 +294,8 @@ try {
       websocketText: "passed",
       websocketFragmentation: "passed",
       websocketAutoResponse: "passed",
+      slowReader: "passed",
+      abandonedReader: "passed",
       hibernation: "passed",
       revocation: "passed",
     }),
