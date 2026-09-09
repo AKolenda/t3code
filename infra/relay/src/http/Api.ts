@@ -546,6 +546,20 @@ export const clientApi = HttpApiBuilder.group(
         "listDevices",
         Effect.fn("relay.api.client.listDevices")(function* () {
           const { userId } = yield* RelayClientPrincipal;
+          const registered = yield* devices.listForUser({ userId });
+          return {
+            devices: registered.flatMap((device) =>
+              device.platform === "ios" && device.iosMajorVersion !== null
+                ? [{ ...device, platform: "ios" as const, iosMajorVersion: device.iosMajorVersion }]
+                : [],
+            ),
+          };
+        }, mapRelayCommonApiErrors("not_authorized")),
+      )
+      .handle(
+        "listDevicesV2",
+        Effect.fn("relay.api.client.listDevicesV2")(function* () {
+          const { userId } = yield* RelayClientPrincipal;
           return { devices: yield* devices.listForUser({ userId }) };
         }, mapRelayCommonApiErrors("not_authorized")),
       )

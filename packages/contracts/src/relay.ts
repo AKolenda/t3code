@@ -97,6 +97,17 @@ export const RelayListDevicesResponse = Schema.Struct({
 });
 export type RelayListDevicesResponse = typeof RelayListDevicesResponse.Type;
 
+// Installed clients decode v1 as iOS-only. Keep that response contract frozen.
+export const RelayListDevicesResponseV1 = Schema.Struct({
+  devices: Schema.Array(
+    Schema.Struct({
+      ...RelayClientDeviceRecord.fields,
+      platform: Schema.Literal("ios"),
+      iosMajorVersion: Schema.Int.check(Schema.isGreaterThanOrEqualTo(18)),
+    }),
+  ),
+});
+
 export const RelayLiveActivityRegistrationRequest = Schema.Struct({
   deviceId: TrimmedNonEmptyString,
   activityPushToken: TrimmedNonEmptyString,
@@ -975,6 +986,11 @@ const RelayClientGroup = HttpApiGroup.make("client")
       error: RelayAuthAndInternalErrors,
     }).annotate(OpenApi.Summary, "List linked environments"),
     HttpApiEndpoint.get("listDevices", "/v1/client/devices", {
+      headers: RelayBearerRequestHeaders,
+      success: RelayListDevicesResponseV1,
+      error: RelayAuthAndInternalErrors,
+    }).annotate(OpenApi.Summary, "List registered iOS devices (legacy clients)"),
+    HttpApiEndpoint.get("listDevicesV2", "/v2/client/devices", {
       headers: RelayBearerRequestHeaders,
       success: RelayListDevicesResponse,
       error: RelayAuthAndInternalErrors,
