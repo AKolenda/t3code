@@ -25,24 +25,37 @@ const Phase = Schema.Literals(["running", "approval", "input", "completed", "fai
 const decodePhase = Schema.decodeUnknownEffect(Phase);
 
 class SmokeError extends Schema.TaggedError<SmokeError>()("SmokeError", {
-  message: Schema.String,
-}) {}
+  reason: Schema.Literals(["usage", "read-credentials", "read-device", "unregistered"]),
+  cause: Schema.optional(Schema.Defect()),
+}) {
+  override get message() {
+    switch (this.reason) {
+      case "usage":
+        return "Usage: node scripts/android-push-smoke.ts <service-account.json> <device.json> <running|approval|input|completed|failed|end>";
+      case "read-credentials":
+        return "Could not read service-account file.";
+      case "read-device":
+        return "Could not read device file.";
+      case "unregistered":
+        return "This device token is no longer registered with Firebase.";
+    }
+  }
+}
 
 const main = Effect.gen(function* () {
   const [credentialPath, devicePath, phaseArg] = process.argv.slice(2);
   if (!credentialPath || !devicePath || !phaseArg)
     return yield* new SmokeError({
-      message:
-        "Usage: node scripts/android-push-smoke.ts <service-account.json> <device.json> <running|approval|input|completed|failed|end>",
+      reason: "usage",
     });
   const phase = yield* decodePhase(phaseArg);
   const credentials = yield* Effect.tryPromise({
     try: () => NodeFSP.readFile(credentialPath, "utf8"),
-    catch: () => new SmokeError({ message: "Could not read service-account file." }),
+    catch: (cause) => new SmokeError({ reason: "read-credentials", cause }),
   });
   const device = yield* Effect.tryPromise({
     try: () => NodeFSP.readFile(devicePath, "utf8"),
-    catch: () => new SmokeError({ message: "Could not read device file." }),
+    catch: (cause) => new SmokeError({ reason: "read-device", cause }),
   }).pipe(Effect.flatMap(decodeDevice));
   const title =
     phase === "completed"
@@ -120,7 +133,7 @@ const main = Effect.gen(function* () {
   );
   if (result.unregistered)
     return yield* new SmokeError({
-      message: "This device token is no longer registered with Firebase.",
+      reason: "unregistered",
     });
   yield* Effect.logInfo(
     `Firebase accepted the ${phase} notification. Verify delivery on the device.`,

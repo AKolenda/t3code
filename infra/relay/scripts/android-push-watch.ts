@@ -43,8 +43,15 @@ const Connection = Schema.Struct({
 const readFile = (path: string) => Effect.tryPromise(() => NodeFSP.readFile(path, "utf8"));
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 class WatchError extends Schema.TaggedError<WatchError>()("AndroidPushWatchError", {
-  message: Schema.String,
-}) {}
+  reason: Schema.Literals(["unregistered", "stopped"]),
+  cause: Schema.optional(Schema.Defect()),
+}) {
+  override get message() {
+    return this.reason === "unregistered"
+      ? "Device token is no longer registered"
+      : "Android push watcher stopped. Check the private connection and Firebase configuration.";
+  }
+}
 const preferences = {
   notificationsEnabled: true,
   liveActivitiesEnabled: true,
@@ -181,8 +188,7 @@ const main = Effect.gen(function* () {
               ...alert,
             }),
           });
-          if (result.unregistered)
-            return yield* new WatchError({ message: "Device token is no longer registered" });
+          if (result.unregistered) return yield* new WatchError({ reason: "unregistered" });
           previouslyActive = active;
           yield* Effect.logInfo(
             `Android push accepted: ${state?.phase ?? (active ? "active" : "ended")}`,
@@ -196,14 +202,10 @@ const main = Effect.gen(function* () {
 NodeRuntime.runMain(
   main.pipe(
     Effect.scoped,
-    // Socket failures may contain credential-bearing request headers.
-    Effect.catchCause(() =>
-      Effect.fail(
-        new WatchError({
-          message:
-            "Android push watcher stopped. Check the private connection and Firebase configuration.",
-        }),
-      ),
-    ),
+    Effect.catchCause((cause) => Effect.fail(new WatchError({ reason: "stopped", cause }))),
+    // Socket failures may contain credential-bearing request headers. Keep the
+    // cause on the error, but print only the fixed message at the CLI boundary.
+    Effect.tapError((error) => Effect.logError(error.message)),
   ),
+  { disableErrorReporting: true },
 );
