@@ -312,7 +312,7 @@ function RecentAgentTools({
           <span className="block truncate font-mono text-[.8125rem] text-foreground/70">
             {entry.title}
           </span>
-          {entry.detail ? (
+          {entry.detail && entry.kind !== "file-edit" ? (
             <span className="mt-0.5 block truncate text-xs text-muted-foreground">
               {entry.detail}
             </span>
@@ -576,31 +576,47 @@ function AgentHistory({
           No saved activity is available yet. Refresh to check again.
         </p>
       ) : null}
-      {history.data?.entries.map((entry) => (
-        <div key={entry.id} className="min-w-0 rounded-md border border-border bg-card px-2.5 py-2">
-          <p
-            className={cn(
-              "whitespace-pre-wrap break-words text-xs text-foreground/80",
-              entry.kind === "tool" && "font-mono",
-            )}
+      {history.data?.entries.map((entry) => {
+        const tool = entry.kind === "tool" || entry.kind === "file-edit";
+        const detail = (
+          <>
+            {entry.detail ? (
+              <pre
+                className={cn(
+                  "mt-1 whitespace-pre-wrap break-words text-xs text-muted-foreground",
+                  tool ? "font-mono" : "font-sans",
+                )}
+              >
+                {entry.detail}
+              </pre>
+            ) : null}
+            {entry.truncated ? (
+              <p className="mt-1 text-xs text-muted-foreground">Long entry shortened.</p>
+            ) : null}
+          </>
+        );
+        return tool ? (
+          <details
+            key={entry.id}
+            className="min-w-0 rounded-md border border-border bg-card px-2.5 py-2"
           >
-            {entry.title}
-          </p>
-          {entry.detail ? (
-            <pre
-              className={cn(
-                "mt-1 whitespace-pre-wrap break-words text-xs text-muted-foreground",
-                entry.kind === "tool" ? "font-mono" : "font-sans",
-              )}
-            >
-              {entry.detail}
-            </pre>
-          ) : null}
-          {entry.truncated ? (
-            <p className="mt-1 text-xs text-muted-foreground">Long entry shortened.</p>
-          ) : null}
-        </div>
-      ))}
+            <summary className="cursor-pointer break-words font-mono text-xs text-foreground/80">
+              {entry.title}
+            </summary>
+            {detail}
+          </details>
+        ) : (
+          <div
+            key={entry.id}
+            className="min-w-0 rounded-md border border-border bg-card px-2.5 py-2"
+          >
+            <p className="whitespace-pre-wrap break-words text-xs text-foreground/80">
+              {entry.title}
+            </p>
+            {detail}
+          </div>
+        );
+      })}
       <div className="flex items-center justify-between gap-2">
         <Button
           size="xs"
