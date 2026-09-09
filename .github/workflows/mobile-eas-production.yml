@@ -21,7 +21,7 @@ concurrency:
 jobs:
   staging:
     runs-on: blacksmith-8vcpu-ubuntu-2404
-    timeout-minutes: 30
+    timeout-minutes: 45
     # Read the existing credentials; the Alchemy stage and domain below are isolated.
     environment: production
     env:
@@ -143,6 +143,8 @@ jobs:
               T3CODE_CLERK_PUBLISHABLE_KEY: process.env.CLERK_PUBLISHABLE_KEY,
               T3CODE_CLERK_JWT_TEMPLATE: 't3-relay',
               T3CODE_MOBILE_UPDATES_ENABLED: '0',
+              // This standalone APK has OTA updates disabled and does not need fingerprint matching.
+              MOBILE_VERSION_POLICY: 'appVersion',
             },
             android: { buildType: 'apk' },
           };
@@ -163,3 +165,26 @@ jobs:
         with:
           name: staging-android-build
           path: ${{ runner.temp }}/staging-android-build.json
+      - name: Wait for Android APK
+        if: inputs.phase == 'build'
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          build_id="$(node -p "require(process.env.RUNNER_TEMP + '/staging-android-build.json')[0].id")"
+          for attempt in $(seq 1 40); do
+            eas build:view "$build_id" --json > "$RUNNER_TEMP/staging-android-status.json"
+            status="$(node -p "require(process.env.RUNNER_TEMP + '/staging-android-status.json').status")"
+            echo "Android build status: $status"
+            case "$status" in
+              FINISHED)
+                node -e 'const b = require(process.env.RUNNER_TEMP + "/staging-android-status.json"); const url = b.artifacts.applicationArchiveUrl; if (!url) throw new Error("APK URL missing"); console.log(url); require("node:fs").appendFileSync(process.env.GITHUB_STEP_SUMMARY, `APK: ${url}\n`);'
+                exit 0 ;;
+              ERRORED|CANCELED)
+                node -e 'console.error(JSON.stringify(require(process.env.RUNNER_TEMP + "/staging-android-status.json").error))'
+                exit 1 ;;
+            esac
+            sleep 45
+          done
+          echo "Timed out waiting for Android APK"
+          exit 1
