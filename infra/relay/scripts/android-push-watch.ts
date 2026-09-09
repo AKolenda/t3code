@@ -11,6 +11,8 @@ import {
 } from "@t3tools/contracts";
 import type { RelayAgentActivityState } from "@t3tools/contracts/relay";
 import { projectThreadAwareness } from "@t3tools/shared/agentAwareness";
+import * as Cause from "effect/Cause";
+import * as Option from "effect/Option";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -58,6 +60,8 @@ class WatchStoppedError extends Schema.TaggedError<WatchStoppedError>()("WatchSt
     return "Android push watcher stopped. Check the private connection and Firebase configuration.";
   }
 }
+
+const isWatchUnregisteredDeviceError = Schema.is(WatchUnregisteredDeviceError);
 
 const preferences = {
   notificationsEnabled: true,
@@ -207,7 +211,14 @@ const main = Effect.gen(function* () {
 NodeRuntime.runMain(
   main.pipe(
     Effect.scoped,
-    Effect.catchCause((cause) => Effect.fail(new WatchStoppedError({ cause }))),
+    Effect.catchCause((cause) => {
+      const failure = Cause.findErrorOption(cause);
+      return Effect.fail(
+        Option.isSome(failure) && isWatchUnregisteredDeviceError(failure.value)
+          ? failure.value
+          : new WatchStoppedError({ cause }),
+      );
+    }),
     // Socket failures may contain credential-bearing request headers. Keep the
     // cause on the error, but print only the fixed message at the CLI boundary.
     Effect.tapError((error) => Effect.logError(error.message)),
