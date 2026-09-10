@@ -30,6 +30,7 @@ import { cn } from "~/lib/utils";
 import { orchestrationEnvironment } from "~/state/orchestration";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Button } from "~/components/ui/button";
+import { allPanelAgents, workflowIsVisible, workflowMembers } from "./AgentsPanel.logic";
 
 /**
  * In-flight states all present as Working (one steady state, per the
@@ -73,6 +74,7 @@ const STATUS_VISUALS: Record<
   },
 };
 
+/** Render the status marker used by compact workflow summaries and the fleet meter. */
 function StatusDot({ status }: { status: RuntimeSubagent["status"] }) {
   return (
     <span
@@ -82,6 +84,7 @@ function StatusDot({ status }: { status: RuntimeSubagent["status"] }) {
   );
 }
 
+/** Format an elapsed duration without sub-second churn. */
 function formatElapsedSeconds(totalSeconds: number): string {
   const seconds = Math.max(0, Math.floor(totalSeconds));
   const minutes = Math.floor(seconds / 60);
@@ -95,6 +98,7 @@ function formatElapsedSeconds(totalSeconds: number): string {
   return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
 }
 
+/** Calculate an agent activation's elapsed display from persisted timestamps. */
 function elapsedBetween(startedAt: string, endIso: string | null): string {
   const start = Date.parse(startedAt);
   const end = endIso ? Date.parse(endIso) : Date.now();
@@ -204,10 +208,6 @@ function workflowIsLive(group: AgentPanelWorkflowGroup): boolean {
     status !== "cancelled" &&
     status !== "interrupted"
   );
-}
-
-function workflowMembers(group: AgentPanelWorkflowGroup): ReadonlyArray<RuntimeSubagent> {
-  return [...group.phases.flatMap((phase) => phase.members), ...group.unphasedMembers];
 }
 
 /**
@@ -454,12 +454,15 @@ function WorkflowSection({
 /** Fixed-width fleet meter: one segment per agent without growing the header. */
 function FleetMeter({ agents }: { agents: ReadonlyArray<RuntimeSubagent> }) {
   return (
-    <span aria-hidden className="flex w-14 shrink-0 gap-0.5">
+    <span
+      aria-hidden
+      className={cn("flex w-14 shrink-0 overflow-hidden", agents.length <= 14 && "gap-0.5")}
+    >
       {agents.map((agent) => (
         <span
           key={agent.id}
           className={cn(
-            "h-[3px] min-w-0.5 flex-1 rounded-[1px]",
+            "h-[3px] min-w-0 flex-1 rounded-[1px]",
             agent.status === "completed"
               ? "bg-success"
               : isActiveSubagentStatus(agent.status)
@@ -472,6 +475,7 @@ function FleetMeter({ agents }: { agents: ReadonlyArray<RuntimeSubagent> }) {
   );
 }
 
+/** Render the complete source-neutral agent roster for one thread. */
 export function AgentsPanel({
   model,
   environmentId = null,
@@ -482,10 +486,7 @@ export function AgentsPanel({
   threadId?: ThreadId | null;
 }) {
   const [finishedOpen, setFinishedOpen] = useState(true);
-  const allAgents = [
-    ...model.workflows.flatMap((group) => workflowMembers(group)),
-    ...model.directAgents,
-  ];
+  const allAgents = allPanelAgents(model);
   const liveDirect = model.directAgents.filter((agent) => isActiveSubagentStatus(agent.status));
   const finished = allAgents.filter((agent) => !isActiveSubagentStatus(agent.status));
 
@@ -519,18 +520,14 @@ export function AgentsPanel({
       </div>
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col gap-3 p-2.5">
-          {model.workflows
-            .filter((group) =>
-              workflowMembers(group).some((agent) => isActiveSubagentStatus(agent.status)),
-            )
-            .map((group) => (
-              <WorkflowSection
-                key={group.workflow.id}
-                group={group}
-                environmentId={environmentId}
-                threadId={threadId}
-              />
-            ))}
+          {model.workflows.filter(workflowIsVisible).map((group) => (
+            <WorkflowSection
+              key={group.workflow.id}
+              group={group}
+              environmentId={environmentId}
+              threadId={threadId}
+            />
+          ))}
           {liveDirect.length > 0 ? (
             <section className="flex flex-col gap-2.5">
               <div className="px-1 pt-0.5 text-xs text-muted-foreground">
