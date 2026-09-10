@@ -200,6 +200,7 @@ function AgentRow({ agent }: { agent: RuntimeSubagent }) {
   );
 }
 
+/** Keep workflow presentation expanded while its coordinator has not settled. */
 function workflowIsLive(group: AgentPanelWorkflowGroup): boolean {
   const status = group.workflow.status;
   return (
