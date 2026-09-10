@@ -1,7 +1,29 @@
 import { describe, it, expect } from "@effect/vitest";
-import { agentHistoryEntry, collectAgentHistory } from "./agentHistory.ts";
+import {
+  agentHistoryEntry,
+  boundedHistoryJson,
+  boundedHistoryText,
+  collectAgentHistory,
+} from "./agentHistory.ts";
 
 describe("agent history selection", () => {
+  it("bounds text before advancing through later provider values", () => {
+    function* values() {
+      yield "x".repeat(9000);
+      throw new Error("iterator advanced past the detail limit");
+    }
+    expect(boundedHistoryText(values())).toEqual({ text: "x".repeat(8000), truncated: true });
+  });
+  it("bounds nested JSON before serialization", () => {
+    const value = {
+      longValue: "x".repeat(2000),
+      rows: Array.from({ length: 1000 }, (_, index) => index),
+    };
+    const result = boundedHistoryJson(value);
+    expect(result.text.length).toBeLessThanOrEqual(8000);
+    expect(result.truncated).toBe(true);
+    expect(result.text).toContain("more items");
+  });
   it("keeps file edits in recent tools", () => {
     const page = collectAgentHistory({ offset: 0, view: "recent-tools" });
     page.add(agentHistoryEntry("edit", "file-edit", "Edit X.jsx", "patch"));

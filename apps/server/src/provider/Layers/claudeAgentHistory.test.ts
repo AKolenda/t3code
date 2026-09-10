@@ -17,7 +17,7 @@ afterEach(async () => {
   await NodeFSP.rm(configDir, { recursive: true, force: true });
 });
 
-/** Write a linked SDK transcript so reader tests exercise real chain reconstruction. */
+/** Write a linked JSONL transcript in Claude's persisted child-agent layout. */
 async function save(agentId: string, contents: ReadonlyArray<unknown>, nested = false) {
   const directory = NodePath.join(
     configDir,
@@ -165,5 +165,23 @@ describe("Claude saved agent history", () => {
     expect((await read()).entries).toHaveLength(2);
     await NodeFSP.appendFile(file, "\n");
     await expect(read()).rejects.toThrow();
+  });
+
+  it("stops reading once the requested page is complete", async () => {
+    const file = await save("child", [
+      Array.from({ length: 51 }, (_, index) => ({ type: "text", text: `entry ${index}` })),
+    ]);
+    await NodeFSP.appendFile(file, '{"type":\n');
+    const result = await read();
+    expect(result.entries).toHaveLength(50);
+    expect(result.nextOffset).toBe(50);
+  });
+
+  it("rejects transcripts with more than the bounded record count", async () => {
+    const file = await save("child", ["Prompt"]);
+    await NodeFSP.appendFile(file, `${'{"type":"progress"}\n'.repeat(50_000)}`);
+    const result = await read();
+    expect(result.status).toBe("unavailable");
+    expect(result.message).toContain("too many records");
   });
 });

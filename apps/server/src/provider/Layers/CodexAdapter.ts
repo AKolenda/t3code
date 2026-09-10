@@ -2237,6 +2237,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
   const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
   const sessions = new Map<ThreadId, CodexAdapterSessionContext>();
 
+  /** Reuse one read-only app-server per workspace across short history refreshes. */
   const withHistoryClient = yield* makeAgentHistoryClient((cwd) =>
     withCodexAppServerClient({
       binaryPath: codexConfig.binaryPath,

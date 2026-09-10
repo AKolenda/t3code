@@ -8,7 +8,6 @@
  */
 import * as NodeOS from "node:os";
 import { readClaudeAgentHistory } from "./claudeAgentHistory.ts";
-import { expandHomePath } from "../../pathExpansion.ts";
 import {
   type CanUseTool,
   query,
@@ -5050,13 +5049,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             offset: input.offset,
             view: input.view,
             configDir: claudeEnvironment.CLAUDE_CONFIG_DIR
-              ? expandHomePath(claudeEnvironment.CLAUDE_CONFIG_DIR)
+              ? path.resolve(input.cwd ?? process.cwd(), claudeEnvironment.CLAUDE_CONFIG_DIR)
               : path.join(NodeOS.homedir(), ".claude"),
           }),
         catch: (cause) =>
           new ProviderAdapterRequestError({
             provider: PROVIDER,
-            method: "getSubagentMessages",
+            method: "getAgentHistory",
             detail: "Could not read saved Claude agent history.",
             cause,
           }),

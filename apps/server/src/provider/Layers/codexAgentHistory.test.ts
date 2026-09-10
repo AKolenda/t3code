@@ -83,6 +83,21 @@ describe("saved Codex agent history", () => {
       codexHistoryEntry({ type: "reasoning", id: "r", summary: [" "], content: [] }),
     ).toBeNull();
   });
+  it("bounds MCP payloads before serializing them", () => {
+    const entry = codexHistoryEntry({
+      type: "mcpToolCall",
+      id: "mcp",
+      server: "test",
+      tool: "large-result",
+      arguments: { rows: Array.from({ length: 1000 }, () => "x".repeat(2000)) },
+      durationMs: 1,
+      error: null,
+      result: null,
+      status: "completed",
+    });
+    expect(entry?.detail.length).toBeLessThanOrEqual(8000);
+    expect(entry?.truncated).toBe(true);
+  });
   it.effect("reads a stopped nested child's history with bounded, nonoverlapping pages", () =>
     Effect.gen(function* () {
       const calls: Array<[string, boolean]> = [];
@@ -151,6 +166,48 @@ describe("saved Codex agent history", () => {
         readThread: () => Effect.fail(error),
       }).pipe(Effect.flip);
       expect(result).toBe(error);
+    }),
+  );
+
+  it.effect("does not normalize entries before a requested offset", () =>
+    Effect.gen(function* () {
+      const snapshot = thread("child", "parent", 0);
+      const argumentsWithThrowingGetter = Object.defineProperty({}, "payload", {
+        enumerable: true,
+        get() {
+          throw new Error("skipped payload was read");
+        },
+      });
+      snapshot.thread.turns[0]!.items = [
+        {
+          type: "mcpToolCall",
+          id: "skipped",
+          server: "test",
+          tool: "skipped",
+          arguments: argumentsWithThrowingGetter,
+          durationMs: 1,
+          error: null,
+          result: null,
+          status: "completed",
+        },
+        {
+          id: "visible",
+          type: "commandExecution",
+          command: "read visible",
+          cwd: "/workspace",
+          commandActions: [],
+          status: "completed",
+          exitCode: 0,
+          aggregatedOutput: "visible output",
+        },
+      ];
+      const result = yield* readCodexAgentHistory({
+        parentThreadId: "parent",
+        agentId: "child",
+        offset: 1,
+        readThread: () => Effect.succeed(snapshot),
+      });
+      expect(result.entries.map((entry) => entry.id)).toEqual(["turn:visible"]);
     }),
   );
 });

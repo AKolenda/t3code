@@ -7280,9 +7280,17 @@ describe("ClaudeAdapterLive", () => {
   });
 });
 
-for (const source of ["configured", "inherited"] as const) {
+for (const source of ["configured", "inherited", "relative", "literal-tilde"] as const) {
   it.effect(`reads child history from the ${source} Claude home without starting a session`, () => {
-    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "claude-history-adapter-"));
+    const workspace = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "claude-history-workspace-"),
+    );
+    const relativeHome =
+      source === "literal-tilde" ? NodePath.join("~", ".claude") : "relative-home";
+    const home =
+      source === "relative" || source === "literal-tilde"
+        ? NodePath.join(workspace, relativeHome)
+        : NodePath.join(workspace, "home");
     const sessionId = "0945fcd9-8a8d-450a-b8cf-4ebd0ef17468";
     const directory = NodePath.join(home, "projects", "-workspace", sessionId, "subagents");
     NodeFS.mkdirSync(directory, { recursive: true });
@@ -7302,7 +7310,12 @@ for (const source of ["configured", "inherited"] as const) {
       claudeConfig: { homePath: source === "configured" ? home : "" },
       environment: {
         ...process.env,
-        CLAUDE_CONFIG_DIR: source === "configured" ? "/unused-claude-home" : home,
+        CLAUDE_CONFIG_DIR:
+          source === "configured"
+            ? "/unused-claude-home"
+            : source === "relative" || source === "literal-tilde"
+              ? relativeHome
+              : home,
       },
     });
     return Effect.gen(function* () {
@@ -7313,6 +7326,7 @@ for (const source of ["configured", "inherited"] as const) {
         agentId: "child",
         offset: 0,
         resumeCursor: { resume: sessionId },
+        cwd: workspace,
       });
       assert.equal(result.status, "ready");
       assert.equal(result.entries[0]?.detail, "Saved task");
@@ -7320,7 +7334,9 @@ for (const source of ["configured", "inherited"] as const) {
       assert.deepStrictEqual(yield* adapter.listSessions(), []);
     }).pipe(
       Effect.provide(harness.layer),
-      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(home, { recursive: true, force: true }))),
+      Effect.ensuring(
+        Effect.sync(() => NodeFS.rmSync(workspace, { recursive: true, force: true })),
+      ),
     );
   });
 }
