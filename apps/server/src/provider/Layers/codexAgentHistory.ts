@@ -82,7 +82,7 @@ export function codexHistoryEntry(
           item.exitCode === null || item.exitCode === undefined
             ? null
             : `Exit code: ${item.exitCode}`,
-        ].filter((value): value is string => value !== null),
+        ].filter((value): value is string => typeof value === "string"),
       );
       return agentHistoryEntry(item.id, "tool", item.command, detail.text, detail.truncated);
     }

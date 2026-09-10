@@ -98,6 +98,18 @@ describe("saved Codex agent history", () => {
     expect(entry?.detail.length).toBeLessThanOrEqual(8000);
     expect(entry?.truncated).toBe(true);
   });
+  it("keeps command history readable when Codex omits aggregated output", () => {
+    expect(
+      codexHistoryEntry({
+        type: "commandExecution",
+        id: "command",
+        command: "pwd",
+        cwd: "/workspace",
+        commandActions: [],
+        status: "inProgress",
+      }),
+    ).toMatchObject({ kind: "tool", title: "pwd", detail: "" });
+  });
   it.effect("reads a stopped nested child's history with bounded, nonoverlapping pages", () =>
     Effect.gen(function* () {
       const calls: Array<[string, boolean]> = [];
