@@ -60,6 +60,7 @@ export function boundedHistoryJson(value: unknown): BoundedHistoryText {
   let truncated = false;
   const seen = new WeakSet<object>();
 
+  /** Copy one provider value while enforcing the shared traversal budget. */
   const project = (current: unknown, depth: number): unknown => {
     if (remainingNodes-- <= 0) {
       truncated = true;

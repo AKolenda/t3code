@@ -11,9 +11,11 @@ export const makeAgentHistoryClient = Effect.fn("makeAgentHistoryClient")(functi
     idleTimeToLive: "30 seconds",
     capacity: 8,
   });
-  return <B, E2>(cwd: string, read: (client: A) => Effect.Effect<B, E2>) =>
+  /** Borrow a workspace client for one bounded read and evict it after failures. */
+  const useClient = <B, E2>(cwd: string, read: (client: A) => Effect.Effect<B, E2>) =>
     Effect.scoped(RcMap.get(clients, cwd).pipe(Effect.flatMap(read))).pipe(
       Effect.timeout("20 seconds"),
       Effect.onError(() => RcMap.invalidate(clients, cwd)),
     );
+  return useClient;
 });
