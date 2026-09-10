@@ -156,6 +156,29 @@ describe("saved Codex agent history", () => {
     );
   }
 
+  it.effect("rejects a descendant of an unrelated parent thread", () =>
+    Effect.gen(function* () {
+      const parents: Record<string, string | null> = {
+        child: "other-coordinator",
+        "other-coordinator": "other-parent",
+        "other-parent": null,
+      };
+      const calls: boolean[] = [];
+      const result = yield* readCodexAgentHistory({
+        parentThreadId: "parent",
+        agentId: "child",
+        offset: 0,
+        readThread: (id, includeTurns) => {
+          calls.push(includeTurns);
+          return Effect.succeed(thread(id, parents[id] ?? null));
+        },
+      });
+      expect(result.status).toBe("unavailable");
+      expect(result.entries).toEqual([]);
+      expect(calls).not.toContain(true);
+    }),
+  );
+
   it.effect("surfaces provider read failures instead of claiming there is no activity", () =>
     Effect.gen(function* () {
       const error = new Error("history missing");
