@@ -17,7 +17,13 @@ import {
 import { useAtomValue } from "@effect/atom-react";
 import { useFocusEffect } from "@react-navigation/native";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Platform, View } from "react-native";
+import {
+  ActivityIndicator,
+  Platform,
+  View,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+} from "react-native";
 import type { SwipeableMethods } from "react-native-gesture-handler/ReanimatedSwipeable";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -269,10 +275,6 @@ export function HomeScreen(props: HomeScreenProps) {
     openSwipeableRef.current?.close();
   }, []);
   const onMaterialFabScroll = useMaterialFabScroll();
-  const { swipeEnabled, scrollGateHandlers } = useSwipeableScrollGate({
-    onScroll: onMaterialFabScroll,
-    onScrollBeginDrag: handleScrollBeginDrag,
-  });
   const listRef = useRef<LegendListRef>(null);
   const swipeRowActivation = useMemo(() => createSwipeRowActivation(), []);
   const activateVisibleRows = useCallback(
@@ -285,6 +287,25 @@ export function HomeScreen(props: HomeScreenProps) {
     },
     [swipeRowActivation],
   );
+  // Status-bar, accessibility and programmatic scrolls never arm the scroll
+  // gate, so every scroll also activates the visible rows once it settles.
+  const activationTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(activationTimerRef.current), []);
+  const handleListScroll = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      onMaterialFabScroll?.(event);
+      clearTimeout(activationTimerRef.current);
+      activationTimerRef.current = setTimeout(
+        () => activateVisibleRows(listRef.current?.getState().data ?? []),
+        200,
+      );
+    },
+    [activateVisibleRows, onMaterialFabScroll],
+  );
+  const { swipeEnabled, scrollGateHandlers } = useSwipeableScrollGate({
+    onScroll: handleListScroll,
+    onScrollBeginDrag: handleScrollBeginDrag,
+  });
 
   const projectScopes = useMemo(
     () =>
@@ -976,8 +997,12 @@ export function HomeScreen(props: HomeScreenProps) {
             ref={listRef}
             onLoad={() => activateVisibleRows(threadListV2Items)}
             onTouchStart={() => swipeRowActivation.setTouching(true)}
-            onTouchEnd={() => swipeRowActivation.setTouching(false)}
-            onTouchCancel={() => swipeRowActivation.setTouching(false)}
+            onTouchEnd={(event) =>
+              swipeRowActivation.setTouching(event.nativeEvent.touches.length > 0)
+            }
+            onTouchCancel={(event) =>
+              swipeRowActivation.setTouching(event.nativeEvent.touches.length > 0)
+            }
             data={threadListV2Items}
             renderItem={renderV2Item}
             keyExtractor={v2KeyExtractor}
