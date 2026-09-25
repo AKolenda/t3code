@@ -22,6 +22,7 @@ import {
   ActivityIndicator,
   Platform,
   View,
+  type GestureResponderEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from "react-native";
@@ -299,6 +300,16 @@ export function HomeScreen(props: HomeScreenProps) {
       );
     },
     [activateVisibleRows, onMaterialFabScroll],
+  );
+  const trackListTouches = useCallback(
+    (event: GestureResponderEvent, started: boolean) => {
+      const { changedTouches, touches } = event.nativeEvent;
+      swipeRowActivation.trackTouches(
+        started ? changedTouches.map((touch) => touch.identifier) : [],
+        touches.map((touch) => touch.identifier),
+      );
+    },
+    [swipeRowActivation],
   );
   const { swipeEnabled, scrollGateHandlers } = useSwipeableScrollGate({
     onScroll: handleListScroll,
@@ -994,13 +1005,9 @@ export function HomeScreen(props: HomeScreenProps) {
           <LegendList
             ref={listRef}
             onLoad={() => activateVisibleRows(threadListV2Items)}
-            onTouchStart={() => swipeRowActivation.setTouching(true)}
-            onTouchEnd={(event) =>
-              swipeRowActivation.setTouching(event.nativeEvent.touches.length > 0)
-            }
-            onTouchCancel={(event) =>
-              swipeRowActivation.setTouching(event.nativeEvent.touches.length > 0)
-            }
+            onTouchStart={(event) => trackListTouches(event, true)}
+            onTouchEnd={(event) => trackListTouches(event, false)}
+            onTouchCancel={(event) => trackListTouches(event, false)}
             data={threadListV2Items}
             renderItem={renderV2Item}
             keyExtractor={v2KeyExtractor}

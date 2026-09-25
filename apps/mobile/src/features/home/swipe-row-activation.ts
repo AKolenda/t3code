@@ -10,8 +10,9 @@ import { createContext, use, useSyncExternalStore } from "react";
 export function createSwipeRowActivation() {
   let activeKeys = new Set<string>();
   // Swapping a row's frame remounts it, which would cancel a press or long
-  // press in progress, so changes wait for the finger to lift.
-  let touching = false;
+  // press in progress, so changes wait until every finger that started on the
+  // list has lifted.
+  const listTouches = new Set<string>();
   let pendingKeys: ReadonlyArray<string> | null = null;
   const listeners = new Set<() => void>();
   const apply = (keys: ReadonlyArray<string>) => {
@@ -26,12 +27,18 @@ export function createSwipeRowActivation() {
     },
     isActive: (key: string) => activeKeys.has(key),
     activate(keys: ReadonlyArray<string>) {
-      if (touching) pendingKeys = keys;
+      if (listTouches.size > 0) pendingKeys = keys;
       else apply(keys);
     },
-    setTouching(next: boolean) {
-      touching = next;
-      if (next || pendingKeys === null) return;
+    /**
+     * `started` are touches that just began on the list; `onScreen` is every
+     * finger still down anywhere. A finger on another control never holds
+     * changes, and one whose end event went missing is dropped here.
+     */
+    trackTouches(started: ReadonlyArray<string>, onScreen: ReadonlyArray<string>) {
+      for (const id of started) listTouches.add(id);
+      for (const id of listTouches) if (!onScreen.includes(id)) listTouches.delete(id);
+      if (listTouches.size > 0 || pendingKeys === null) return;
       const keys = pendingKeys;
       pendingKeys = null;
       apply(keys);
