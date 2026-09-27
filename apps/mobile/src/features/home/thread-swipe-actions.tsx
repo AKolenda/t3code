@@ -271,9 +271,9 @@ interface ThreadSwipeableProps {
 }
 
 export function ThreadSwipeable(props: ThreadSwipeableProps) {
-  // Recycled content gets fresh native and animation state. Late callbacks
-  // from the previous row retain its action, never the replacement's action.
-  return <ThreadSwipeableRow key={props.resetKey} {...props} />;
+  // Not keyed by resetKey: remounting a recycled row rebuilt its whole tree
+  // while the list scrolled. ThreadSwipeableRow resets itself in place.
+  return <ThreadSwipeableRow {...props} />;
 }
 
 function ThreadSwipeableRow(props: ThreadSwipeableProps) {
@@ -329,6 +329,21 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
       finishDismiss();
     };
   }, [actionOpacity, collapse, fallbackTranslation, finishDismiss]);
+
+  // Recycled content gets fresh swipe and animation state. Late callbacks
+  // from the previous content keep that render's action, never the new one's.
+  const resetKeyRef = useRef(props.resetKey);
+  useLayoutEffect(() => {
+    if (resetKeyRef.current === props.resetKey) return;
+    resetKeyRef.current = props.resetKey;
+    cancelAnimation(collapse);
+    cancelAnimation(actionOpacity);
+    cancelAnimation(fallbackTranslation);
+    if (activeTranslationRef.current) cancelAnimation(activeTranslationRef.current);
+    finishDismiss();
+    fullSwipeArmedRef.current = false;
+    restoreRow();
+  }, [actionOpacity, collapse, fallbackTranslation, finishDismiss, props.resetKey, restoreRow]);
 
   const dismiss = useCallback(
     (translation: SharedValue<number>) => {
