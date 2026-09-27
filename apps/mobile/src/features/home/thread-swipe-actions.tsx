@@ -264,30 +264,13 @@ interface ThreadSwipeableProps {
    * open/mid-drag state can't leak onto another row.
    */
   readonly resetKey?: string;
-  /** Paints the row without swipe machinery; see swipe-row-activation. */
+  /** Leaves out the swipe actions and gesture; see swipe-row-activation. */
   readonly dormant?: boolean;
   readonly simultaneousWith?: ComponentProps<typeof ReanimatedSwipeable>["simultaneousWith"];
   readonly threadTitle: string;
 }
 
-const closeDormant = () => {};
-
 export function ThreadSwipeable(props: ThreadSwipeableProps) {
-  if (props.dormant) {
-    // Mirrors ReanimatedSwipeable's container and children views.
-    return (
-      <View
-        style={[
-          { overflow: "hidden", backgroundColor: props.backgroundColor },
-          props.containerStyle,
-        ]}
-      >
-        <View style={{ backgroundColor: props.backgroundColor }}>
-          {props.children(closeDormant)}
-        </View>
-      </View>
-    );
-  }
   // Recycled content gets fresh native and animation state. Late callbacks
   // from the previous row retain its action, never the replacement's action.
   return <ThreadSwipeableRow key={props.resetKey} {...props} />;
@@ -432,7 +415,7 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
           childrenContainerStyle={{ backgroundColor: props.backgroundColor }}
           containerStyle={[{ backgroundColor: props.backgroundColor }, props.containerStyle]}
           dragOffsetFromRight={-8}
-          enabled={!isDismissing && props.enabled !== false && gateEnabled}
+          enabled={!props.dormant && !isDismissing && props.enabled !== false && gateEnabled}
           enableTrackpadTwoFingerGesture={props.enableTrackpadSwipe ?? true}
           // Fail the swipe once the pan is vertically dominant (patched-in RNGH
           // prop) — otherwise trackpad scrolls with ~8px of horizontal drift
@@ -467,33 +450,38 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
           }}
           overshootFriction={1}
           overshootRight
-          renderRightActions={(_progress, translation, methods) => (
-            <Animated.View
-              ref={() => {
-                activeTranslationRef.current = translation;
-              }}
-              style={actionStyle}
-            >
-              <ThreadSwipeActions
-                backgroundColor={props.backgroundColor}
-                compact={props.compactActions === true}
-                fullSwipeAction={fullSwipeAction}
-                fullSwipeThreshold={fullSwipeThreshold}
-                onFullSwipeArmedChange={handleFullSwipeArmedChange}
-                primaryAction={{
-                  ...primaryAction,
-                  onPress: commitPrimaryAction,
+          // Dormant rows keep this same tree, so waking one only adds its
+          // actions. Swapping trees remounted the content right under a tap,
+          // which flashed the icons and dropped the tap.
+          renderRightActions={(_progress, translation, methods) =>
+            props.dormant ? null : (
+              <Animated.View
+                ref={() => {
+                  activeTranslationRef.current = translation;
                 }}
-                secondaryAction={resolveSecondaryAction({
-                  close: () => methods.close(),
-                  onDelete: props.onDelete,
-                  secondaryAction: props.secondaryAction,
-                  threadTitle: props.threadTitle,
-                })}
-                translation={translation}
-              />
-            </Animated.View>
-          )}
+                style={actionStyle}
+              >
+                <ThreadSwipeActions
+                  backgroundColor={props.backgroundColor}
+                  compact={props.compactActions === true}
+                  fullSwipeAction={fullSwipeAction}
+                  fullSwipeThreshold={fullSwipeThreshold}
+                  onFullSwipeArmedChange={handleFullSwipeArmedChange}
+                  primaryAction={{
+                    ...primaryAction,
+                    onPress: commitPrimaryAction,
+                  }}
+                  secondaryAction={resolveSecondaryAction({
+                    close: () => methods.close(),
+                    onDelete: props.onDelete,
+                    secondaryAction: props.secondaryAction,
+                    threadTitle: props.threadTitle,
+                  })}
+                  translation={translation}
+                />
+              </Animated.View>
+            )
+          }
           rightThreshold={actionsWidth * 0.42}
           simultaneousWith={props.simultaneousWith}
         >
