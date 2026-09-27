@@ -927,21 +927,30 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           // Encoding a large running window is heavy: let the pop and the next
           // screen's first frames go first. persist drops the write if the
           // thread was reopened meanwhile (the owner check). Removing the
-          // environment also closes this view, and remove() clears its cache
-          // right after, so skip the write once the environment is gone or it
-          // would leave an orphan row behind.
-          const stillRegistered = Option.match(registry, {
-            onNone: () => Effect.succeed(true),
+          // environment also closes this view and clears its cache, and
+          // re-adding it installs a new target, so the write checks the
+          // registration itself, not the id, or a removed snapshot could come
+          // back as an orphan row. Enabling or disabling keeps the target.
+          const registration: Effect.Effect<unknown> = Option.match(registry, {
+            onNone: () => Effect.succeed<unknown>(null),
             onSome: (service) =>
               SubscriptionRef.get(service.entries).pipe(
-                Effect.map((entries) => entries.has(environmentId)),
+                Effect.map((entries) => entries.get(environmentId)?.target),
               ),
           });
-          return Effect.sleep("750 millis").pipe(
-            Effect.andThen(stillRegistered),
-            Effect.flatMap((registered) => (registered ? persist(snapshot) : Effect.void)),
-            Effect.forkDetach,
-            Effect.asVoid,
+          return registration.pipe(
+            Effect.flatMap((closing) =>
+              closing === undefined
+                ? Effect.void
+                : Effect.sleep("750 millis").pipe(
+                    Effect.andThen(registration),
+                    Effect.flatMap((current) =>
+                      current === closing ? persist(snapshot) : Effect.void,
+                    ),
+                    Effect.forkDetach,
+                    Effect.asVoid,
+                  ),
+            ),
           );
         },
       });

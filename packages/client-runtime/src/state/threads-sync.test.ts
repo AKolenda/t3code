@@ -823,6 +823,31 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
+  it.effect("drops the close-time write when the environment was re-added meanwhile", () =>
+    Effect.gen(function* () {
+      const registered = (target: unknown) =>
+        new Map([[TARGET.environmentId, { target } as never]]) as ReadonlyMap<EnvironmentId, never>;
+      const entries = yield* SubscriptionRef.make(registered({}));
+      const savedThreads = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness({
+            httpSnapshot: Option.some({ snapshotSequence: 7, thread: ACTIVE_THREAD }),
+            registryEntries: entries as unknown as EnvironmentRegistry["Service"]["entries"],
+          });
+          yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+          return harness.savedThreads;
+        }),
+      );
+
+      // Same environment id, new registration: the removed snapshot must not
+      // be written back into the fresh cache.
+      yield* SubscriptionRef.set(entries, registered({}));
+      yield* TestClock.adjust("750 millis");
+      yield* Effect.yieldNow;
+      expect(yield* Ref.get(savedThreads)).toEqual([]);
+    }),
+  );
+
   it.effect("seeds the thread from the HTTP snapshot and resumes live events", () =>
     Effect.gen(function* () {
       const httpThread: OrchestrationThread = { ...BASE_THREAD, title: "HTTP title" };
