@@ -31,6 +31,7 @@ import {
   type SupervisorConnectionState,
 } from "../connection/model.ts";
 import * as ConnectionWakeups from "../connection/wakeups.ts";
+import { EnvironmentRegistry } from "../connection/registry.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
 import * as Persistence from "../platform/persistence.ts";
 import * as RpcSession from "../rpc/session.ts";
@@ -142,6 +143,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
   readonly resumeCache?: NonNullable<Parameters<typeof makeEnvironmentThreadState>[1]>;
   readonly loadCached?: Effect.Effect<Option.Option<OrchestrationThreadDetailSnapshot>>;
   readonly saveThread?: Persistence.EnvironmentCacheStore["Service"]["saveThread"];
+  readonly registryEntries?: EnvironmentRegistry["Service"]["entries"];
 }) {
   const inputs = yield* Queue.unbounded<TestThreadInput>();
   const observed = yield* Queue.unbounded<EnvironmentThreadState>();
@@ -242,7 +244,7 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
     clearVcsRefs: () => Effect.void,
     clear: () => Effect.void,
   });
-  const threadState = yield* makeEnvironmentThreadState(THREAD_ID, options?.resumeCache).pipe(
+  const makeState = makeEnvironmentThreadState(THREAD_ID, options?.resumeCache).pipe(
     Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor),
     Effect.provideService(Persistence.EnvironmentCacheStore, cache),
     Effect.provideService(ThreadSnapshotLoader, snapshotLoader),
@@ -251,6 +253,13 @@ const makeHarness = Effect.fn("TestEnvironmentThreads.makeHarness")(function* (o
       ConnectionWakeups.ConnectionWakeups.of({ changes: Stream.fromQueue(wakeups) }),
     ),
   );
+  const threadState = yield* options?.registryEntries === undefined
+    ? makeState
+    : makeState.pipe(
+        Effect.provideService(EnvironmentRegistry, {
+          entries: options.registryEntries,
+        } as unknown as EnvironmentRegistry["Service"]),
+      );
   yield* SubscriptionRef.changes(threadState).pipe(
     Stream.runForEach((state) =>
       Ref.update(stateChangeCount, (count) => count + 1).pipe(
@@ -783,6 +792,31 @@ describe("EnvironmentThreads", () => {
 
       // The approval can be answered elsewhere after the view closes; a disk
       // copy would bring the answered card back on the next cold open.
+      yield* TestClock.adjust("750 millis");
+      yield* Effect.yieldNow;
+      expect(yield* Ref.get(savedThreads)).toEqual([]);
+    }),
+  );
+
+  it.effect("drops the close-time write when the environment was removed meanwhile", () =>
+    Effect.gen(function* () {
+      const entries = yield* SubscriptionRef.make<
+        ReadonlyMap<EnvironmentId, never>
+      >(new Map([[TARGET.environmentId, undefined as never]]));
+      const savedThreads = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness({
+            httpSnapshot: Option.some({ snapshotSequence: 7, thread: ACTIVE_THREAD }),
+            registryEntries: entries as unknown as EnvironmentRegistry["Service"]["entries"],
+          });
+          yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+          return harness.savedThreads;
+        }),
+      );
+
+      // remove() drops the entry and then clears the cache; a late write
+      // would leave an orphan row for a re-added environment to cold-open.
+      yield* SubscriptionRef.set(entries, new Map<EnvironmentId, never>());
       yield* TestClock.adjust("750 millis");
       yield* Effect.yieldNow;
       expect(yield* Ref.get(savedThreads)).toEqual([]);

@@ -192,6 +192,10 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   const cache = yield* EnvironmentCacheStore;
   const snapshotLoader = yield* ThreadSnapshotLoader;
   const wakeups = yield* Effect.serviceOption(ConnectionWakeups.ConnectionWakeups);
+  // Optional so harnesses that run this state without a registry still work.
+  // Read `entries` directly: registry.state() would acquire a supervisor and
+  // recreate the service scope of an environment that was just removed.
+  const registry = yield* Effect.serviceOption(EnvironmentRegistry);
   const environmentId = supervisor.target.environmentId;
   const retained = resumeCache?.snapshot;
   const owner = {};
@@ -915,9 +919,20 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           if (pending.approvals.length > 0 || pending.userInputs.length > 0) return Effect.void;
           // Encoding a large running window is heavy: let the pop and the next
           // screen's first frames go first. persist drops the write if the
-          // thread was reopened meanwhile (the owner check).
-          return persist(snapshot).pipe(
-            Effect.delay("750 millis"),
+          // thread was reopened meanwhile (the owner check). Removing the
+          // environment also closes this view, and remove() clears its cache
+          // right after, so skip the write once the environment is gone or it
+          // would leave an orphan row behind.
+          const stillRegistered = Option.match(registry, {
+            onNone: () => Effect.succeed(true),
+            onSome: (service) =>
+              SubscriptionRef.get(service.entries).pipe(
+                Effect.map((entries) => entries.has(environmentId)),
+              ),
+          });
+          return Effect.sleep("750 millis").pipe(
+            Effect.andThen(stillRegistered),
+            Effect.flatMap((registered) => (registered ? persist(snapshot) : Effect.void)),
             Effect.forkDetach,
             Effect.asVoid,
           );
