@@ -948,6 +948,10 @@ export function HomeScreen(props: HomeScreenProps) {
             itemsAreEqual={threadListV2ListItemsAreEqual}
             estimatedItemSize={ESTIMATED_THREAD_LIST_V2_ROW_HEIGHT}
             drawDistance={THREAD_LIST_V2_DRAW_DISTANCE}
+            // Android's stretch overscroll claims any touch that lands while it
+            // springs back, so a tap on a row just after a fling to either end
+            // did nothing.
+            overScrollMode="never"
             recycleItems
             extraData={v2ExtraData}
             ListHeaderComponent={v2ListHeader}
