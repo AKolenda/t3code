@@ -172,6 +172,11 @@ function matchesThreadSnapshot(
 // marker the first replayed event moves the status to "synchronizing" on its
 // own. Downgrading here would flash a sync label on every return to a
 // recently viewed thread.
+// Thread cache writes run one at a time, each re-checking its owner inside
+// the permit. A closed view's delayed write can otherwise finish after the
+// write of a view reopened meanwhile and leave the older copy on disk.
+const threadCacheWrites = Semaphore.makeUnsafe(1);
+
 function cachedThreadState(value: EnvironmentThreadState): EnvironmentThreadState {
   return {
     ...value,
@@ -281,7 +286,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   } | null>(null);
   const persistence = yield* Queue.sliding<OrchestrationThreadDetailSnapshot>(1);
 
-  const persist = Effect.fn("EnvironmentThreadState.persist")(function* (
+  const persistUnlocked = Effect.fn("EnvironmentThreadState.persist")(function* (
     snapshot: OrchestrationThreadDetailSnapshot,
   ) {
     if (resumeCache !== undefined && resumeCache.owner !== owner) return;
@@ -317,6 +322,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       ),
     );
   });
+  const persist = (snapshot: OrchestrationThreadDetailSnapshot) =>
+    threadCacheWrites.withPermits(1)(persistUnlocked(snapshot));
 
   yield* Stream.fromQueue(persistence).pipe(
     Stream.debounce("500 millis"),

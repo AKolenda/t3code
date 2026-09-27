@@ -129,6 +129,7 @@ export function useThreadComposerState() {
   const {
     selectedThread: selectedThreadShell,
     selectedThreadCreation,
+    selectedThreadListShell,
     selectedEnvironmentRuntime,
   } = useThreadSelection();
   const selectedThreadDetailState = useSelectedThreadDetailState();
@@ -259,13 +260,13 @@ export function useThreadComposerState() {
       )
     : null;
 
-  // Run state (working or not) comes from the detail only once it is live.
-  // Before that the detail may be a disk snapshot written when a view closed
+  // Run state (working or not) comes from whichever copy holds the newer
+  // event: the detail can be a copy retained in memory or written to disk
   // mid-turn, still running long after that turn ended (thread-run-state.ts).
   const selectedThreadRunState = selectThreadRunStateSource({
     detail: selectedThreadDetail,
     detailIsLive: selectedThreadDetailState.status === "live",
-    shell: selectedThreadShell,
+    shell: selectedThreadListShell,
   });
   const selectedThreadSessionActivity = useMemo(() => {
     if (!selectedThreadRunState?.session) {

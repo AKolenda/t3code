@@ -178,6 +178,8 @@ function useResolvedThreadSelection(params: ThreadSelectionRouteParams | undefin
     () => ({
       selectedThreadRef,
       selectedThread,
+      /** The thread-list shell only; selectedThread can be derived from the detail. */
+      selectedThreadListShell: selectedThreadShell,
       selectedThreadCreation,
       selectedThreadDetailState,
       selectedThreadProject,
@@ -192,6 +194,7 @@ function useResolvedThreadSelection(params: ThreadSelectionRouteParams | undefin
       selectedThreadDetailState,
       selectedThreadProject,
       selectedThreadRef,
+      selectedThreadShell,
     ],
   );
 }

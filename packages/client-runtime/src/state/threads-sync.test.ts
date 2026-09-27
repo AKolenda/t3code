@@ -800,9 +800,9 @@ describe("EnvironmentThreads", () => {
 
   it.effect("drops the close-time write when the environment was removed meanwhile", () =>
     Effect.gen(function* () {
-      const entries = yield* SubscriptionRef.make<
-        ReadonlyMap<EnvironmentId, never>
-      >(new Map([[TARGET.environmentId, undefined as never]]));
+      const entries = yield* SubscriptionRef.make<ReadonlyMap<EnvironmentId, never>>(
+        new Map([[TARGET.environmentId, undefined as never]]),
+      );
       const savedThreads = yield* Effect.scoped(
         Effect.gen(function* () {
           const harness = yield* makeHarness({
