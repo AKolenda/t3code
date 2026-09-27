@@ -18,6 +18,8 @@ import {
   ActivityIndicator,
   Platform,
   View,
+  type ScrollView,
+  type ScrollViewInstance,
   type GestureResponderEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -139,6 +141,26 @@ const ESTIMATED_THREAD_LIST_V2_ROW_HEIGHT = 72;
 // rows that are already built instead of rows still being rebuilt.
 const THREAD_LIST_V2_DRAW_DISTANCE = 1_000;
 const PRE_LIQUID_GLASS_BOTTOM_TOOLBAR_HEIGHT = 44;
+
+/**
+ * React Native's JS scroll view takes every tap while it believes momentum is
+ * still running: until onMomentumScrollEnd arrives and for 16 ms after it.
+ * Android sends that event three frames after the list stops, later still
+ * while JS renders the rows a fling revealed, so a tap on a list that had
+ * visibly stopped was spent stopping it. The native scroll view already takes
+ * taps that land during a fling, so Android can skip the JS check.
+ */
+function letTapsThroughAfterFling(scrollView: ScrollView | null) {
+  if (Platform.OS !== "android" || scrollView === null) return;
+  // `_isAnimating` is private to ScrollView.js; if it goes away this no-ops.
+  // LegendList types this ref as the ScrollView component; it receives the instance.
+  const instance = scrollView as unknown as ScrollViewInstance;
+  const responder = instance.getScrollResponder() as unknown as {
+    _isAnimating?: () => boolean;
+  };
+  if (typeof responder._isAnimating === "function") responder._isAnimating = () => false;
+}
+
 /**
  * Top spacing between the list and the Android custom header. The Android
  * header is rendered in-flow above this screen and
@@ -937,6 +959,7 @@ export function HomeScreen(props: HomeScreenProps) {
         <SwipeableScrollGateProvider enabled={swipeEnabled} activation={swipeRowActivation}>
           <LegendList
             ref={listRef}
+            refScrollView={letTapsThroughAfterFling}
             onLoad={() => activateVisibleRows(threadListV2Items)}
             onTouchStart={(event) => trackListTouches(event, true)}
             onTouchEnd={(event) => trackListTouches(event, false)}
