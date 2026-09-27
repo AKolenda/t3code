@@ -2,6 +2,7 @@ import type { ComposerTextPaste } from "../native/T3ComposerEditor.types";
 import { useAtomValue } from "@effect/atom-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert } from "react-native";
+import * as Option from "effect/Option";
 
 import {
   CommandId,
@@ -65,8 +66,9 @@ import {
   useComposerDraft,
 } from "./use-composer-drafts";
 import { setPendingConnectionError } from "../state/use-remote-environment-registry";
-import { useSelectedThreadDetail } from "../state/use-thread-detail";
+import { useSelectedThreadDetailState } from "../state/use-thread-detail";
 import { useThreadSelection } from "../state/use-thread-selection";
+import { selectThreadRunStateSource } from "./thread-run-state";
 import { enqueueThreadOutboxMessage } from "./thread-outbox";
 import { dispatchingQueuedMessageIdAtom, useThreadOutboxMessages } from "./use-thread-outbox";
 import { threadEnvironment } from "./threads";
@@ -129,7 +131,8 @@ export function useThreadComposerState() {
     selectedThreadCreation,
     selectedEnvironmentRuntime,
   } = useThreadSelection();
-  const selectedThreadDetail = useSelectedThreadDetail();
+  const selectedThreadDetailState = useSelectedThreadDetailState();
+  const selectedThreadDetail = Option.getOrNull(selectedThreadDetailState.data);
   const composerDrafts = useAtomValue(composerDraftsAtom);
   const acknowledgedMessages = useAtomValue(acknowledgedThreadMessagesAtom);
   const queuedMessagesByThreadKey = useThreadOutboxMessages();
@@ -256,17 +259,24 @@ export function useThreadComposerState() {
       )
     : null;
 
+  // Run state (working or not) comes from the detail only once it is live.
+  // Before that the detail may be a disk snapshot written when a view closed
+  // mid-turn, still running long after that turn ended (thread-run-state.ts).
+  const selectedThreadRunState = selectThreadRunStateSource({
+    detail: selectedThreadDetail,
+    detailIsLive: selectedThreadDetailState.status === "live",
+    shell: selectedThreadShell,
+  });
   const selectedThreadSessionActivity = useMemo(() => {
-    const selectedThread = selectedThreadDetail ?? selectedThreadShell;
-    if (!selectedThread?.session) {
+    if (!selectedThreadRunState?.session) {
       return null;
     }
 
     return {
-      orchestrationStatus: selectedThread.session.status,
-      activeTurnId: selectedThread.session.activeTurnId ?? undefined,
+      orchestrationStatus: selectedThreadRunState.session.status,
+      activeTurnId: selectedThreadRunState.session.activeTurnId ?? undefined,
     };
-  }, [selectedThreadDetail, selectedThreadShell]);
+  }, [selectedThreadRunState]);
 
   const isCompacting = useMemo(() => {
     const queuedMessage = selectedThreadQueuedMessages.findLast(
@@ -281,12 +291,14 @@ export function useThreadComposerState() {
         message.text.trim().toLowerCase() === "/compact" &&
         !message.attachments?.length,
     );
+    // Run state comes from selectedThreadRunState: a cached detail can carry a
+    // session and turn that finished while the view was closed.
     const compactRequestIsActive =
       latestCompactMessage !== undefined &&
       (latestCompactMessage.createdAt >
-        (selectedThread?.latestTurn?.requestedAt ?? latestCompactMessage.createdAt) ||
-        (selectedThread?.latestTurn?.state === "running" &&
-          latestCompactMessage.createdAt === selectedThread.latestTurn.requestedAt));
+        (selectedThreadRunState?.latestTurn?.requestedAt ?? latestCompactMessage.createdAt) ||
+        (selectedThreadRunState?.latestTurn?.state === "running" &&
+          latestCompactMessage.createdAt === selectedThreadRunState.latestTurn.requestedAt));
     const compactionSettled = selectedThreadDetail?.activities.some((activity) => {
       if (!["context-compaction", "provider.turn.start.failed"].includes(activity.kind))
         return false;
@@ -298,30 +310,29 @@ export function useThreadComposerState() {
     });
     return (
       queuedMessage !== undefined ||
-      ((selectedThread?.session?.status === "starting" ||
-        selectedThread?.session?.status === "running") &&
+      ((selectedThreadRunState?.session?.status === "starting" ||
+        selectedThreadRunState?.session?.status === "running") &&
         compactRequestIsActive &&
         !compactionSettled)
     );
   }, [
     dispatchingQueuedMessageId,
-    selectedThread,
+    selectedThreadRunState,
     selectedThreadDetail,
     selectedThreadQueuedMessages,
   ]);
 
   const activeWorkStartedAt = useMemo(() => {
-    const selectedThread = selectedThreadDetail ?? selectedThreadShell;
-    if (!selectedThread) {
+    if (!selectedThreadRunState) {
       return null;
     }
 
     return deriveActiveWorkStartedAt(
-      selectedThread.latestTurn,
+      selectedThreadRunState.latestTurn,
       selectedThreadSessionActivity,
       null,
     );
-  }, [selectedThreadDetail, selectedThreadSessionActivity, selectedThreadShell]);
+  }, [selectedThreadRunState, selectedThreadSessionActivity]);
 
   const onSendMessage = useCallback(async () => {
     if (!selectedThreadShell) {

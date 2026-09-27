@@ -23,6 +23,7 @@ import { connectionProjectionPhase } from "../connection/model.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import * as ConnectionWakeups from "../connection/wakeups.ts";
 import { EnvironmentCacheStore } from "../platform/persistence.ts";
+import { derivePendingRequests } from "../pendingRequests.ts";
 import { subscribeDynamic } from "../rpc/client.ts";
 import { ThreadSnapshotLoader, type ThreadSnapshotWindow } from "./threadSnapshotHttp.ts";
 import { parseThreadKey, threadKey } from "./entities.ts";
@@ -128,7 +129,8 @@ function formatThreadError(cause: Cause.Cause<unknown>): string {
 
 /**
  * A starting or running session is mid-turn. Its detail can change many times
- * per second, so the disk cache waits for it to settle.
+ * per second, so streamed updates never reach the disk cache; the view writes
+ * its last state once when it closes (see the scope finalizer).
  */
 export function isThreadSessionRunning(session: OrchestrationThread["session"]): boolean {
   return session?.status === "starting" || session?.status === "running";
@@ -878,29 +880,48 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   );
   yield* Effect.addFinalizer(() => Effect.sync(deregister));
 
+  // Closing the view writes its last committed state once, even mid-turn.
+  // Streamed updates of a running thread never reach the disk cache
+  // (setThread), so without this every cold open of a Working thread waits
+  // for the network. The next open renders this snapshot at once and resumes
+  // after its sequence, like a warm return from the resume cache. Its session
+  // can be stale by then, so clients take run state from the shell meanwhile.
   yield* Effect.addFinalizer(() =>
     Effect.suspend(() => {
       const { state: current, sequence: snapshotSequence } = committed;
       return Option.match(current.data, {
         onNone: () => Effect.void,
-        onSome: (thread) =>
-          shouldPersistThread(thread)
-            ? persist({
-                snapshotSequence,
-                thread,
-                ...Option.match(current.page, {
-                  onNone: () => ({}),
-                  onSome: (page) =>
-                    ({
-                      page: {
-                        beforeCursor: page.beforeCursor,
-                        hasMore: page.hasMore,
-                        snapshotSequence,
-                      },
-                    }) as const,
-                }),
-              })
-            : Effect.void,
+        onSome: (thread) => {
+          const snapshot: OrchestrationThreadDetailSnapshot = {
+            snapshotSequence,
+            thread,
+            ...Option.match(current.page, {
+              onNone: () => ({}),
+              onSome: (page) =>
+                ({
+                  page: {
+                    beforeCursor: page.beforeCursor,
+                    hasMore: page.hasMore,
+                    snapshotSequence,
+                  },
+                }) as const,
+            }),
+          };
+          if (shouldPersistThread(thread)) return persist(snapshot);
+          // An open approval or question can be answered elsewhere after the
+          // view closes; a disk copy would bring the answered card back on the
+          // next cold open, so those threads keep their last settled copy.
+          const pending = derivePendingRequests(thread.activities);
+          if (pending.approvals.length > 0 || pending.userInputs.length > 0) return Effect.void;
+          // Encoding a large running window is heavy: let the pop and the next
+          // screen's first frames go first. persist drops the write if the
+          // thread was reopened meanwhile (the owner check).
+          return persist(snapshot).pipe(
+            Effect.delay("750 millis"),
+            Effect.forkDetach,
+            Effect.asVoid,
+          );
+        },
       });
     }),
   );

@@ -692,7 +692,7 @@ describe("EnvironmentThreads", () => {
     }),
   );
 
-  it.effect("does not persist active thread snapshots during streaming or teardown", () =>
+  it.effect("does not persist active threads while streaming or rewrite them on teardown", () =>
     Effect.gen(function* () {
       const savedThreads = yield* Effect.scoped(
         Effect.gen(function* () {
@@ -713,6 +713,78 @@ describe("EnvironmentThreads", () => {
         }),
       );
 
+      expect(yield* Ref.get(savedThreads)).toEqual([]);
+    }),
+  );
+
+  it.effect("writes a running thread once, when its view closes", () =>
+    Effect.gen(function* () {
+      const savedThreads = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness({
+            httpSnapshot: Option.some({ snapshotSequence: 7, thread: ACTIVE_THREAD }),
+          });
+          yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+          yield* Queue.offer(harness.inputs, titleUpdated("Streaming", 8));
+          yield* awaitThreadState(
+            harness.observed,
+            (value) => Option.getOrNull(value.data)?.title === "Streaming",
+          );
+          yield* TestClock.adjust("500 millis");
+          yield* Effect.yieldNow;
+
+          // Streamed updates of a running thread never encode it.
+          expect(yield* Ref.get(harness.savedThreads)).toEqual([]);
+          return harness.savedThreads;
+        }),
+      );
+
+      // Closing the view writes the committed state once, after the pop has
+      // settled, under the sequence it reflects, so the next cold open renders
+      // it and resumes after 8.
+      expect(yield* Ref.get(savedThreads)).toEqual([]);
+      yield* TestClock.adjust("750 millis");
+      yield* Effect.yieldNow;
+      expect(
+        (yield* Ref.get(savedThreads)).map((saved) => [
+          saved.snapshotSequence,
+          saved.thread.title,
+          saved.thread.session?.status,
+        ]),
+      ).toEqual([[8, "Streaming", "running"]]);
+    }),
+  );
+
+  it.effect("keeps a running thread waiting on an approval off the disk", () =>
+    Effect.gen(function* () {
+      const waiting: OrchestrationThread = {
+        ...ACTIVE_THREAD,
+        activities: [
+          {
+            id: EventId.make("approval-open"),
+            createdAt: "2026-02-23T00:00:01.000Z",
+            kind: "approval.requested",
+            summary: "Command approval requested",
+            tone: "approval",
+            payload: { requestId: "req-1", requestKind: "command", detail: "bun run lint" },
+            turnId: TurnId.make("turn-1"),
+          },
+        ],
+      };
+      const savedThreads = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const harness = yield* makeHarness({
+            httpSnapshot: Option.some({ snapshotSequence: 7, thread: waiting }),
+          });
+          yield* awaitThreadState(harness.observed, (value) => value.status === "live");
+          return harness.savedThreads;
+        }),
+      );
+
+      // The approval can be answered elsewhere after the view closes; a disk
+      // copy would bring the answered card back on the next cold open.
+      yield* TestClock.adjust("750 millis");
+      yield* Effect.yieldNow;
       expect(yield* Ref.get(savedThreads)).toEqual([]);
     }),
   );
