@@ -300,10 +300,20 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
   const primaryAction = props.primaryAction;
   const onSwipeableClose = props.onSwipeableClose;
 
+  // Tracks the swipeable's open state, which it does not expose.
+  const openRef = useRef(false);
+  // Bumped when the row is reused for other content, so a late restore from
+  // the previous content's dismissal cannot reset the new content.
+  const contentGenerationRef = useRef(0);
+
   const restoreRow = useCallback(() => {
     if (!mountedRef.current) return;
     dismissalRef.current = null;
     swipeableRef.current?.reset();
+    // reset() leaves an open row's tap-to-close gesture on, and that gesture
+    // cancels the next press on the row. Closing the now-closed row turns it
+    // off without moving anything.
+    if (openRef.current) swipeableRef.current?.close();
     fallbackTranslation.set(0);
     collapse.set(0);
     actionOpacity.set(1);
@@ -341,9 +351,17 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
     cancelAnimation(fallbackTranslation);
     if (activeTranslationRef.current) cancelAnimation(activeTranslationRef.current);
     finishDismiss();
+    contentGenerationRef.current += 1;
     fullSwipeArmedRef.current = false;
     restoreRow();
   }, [actionOpacity, collapse, fallbackTranslation, finishDismiss, props.resetKey, restoreRow]);
+
+  // A dormant row has no actions, so it must not stay open.
+  useLayoutEffect(() => {
+    if (props.dormant && openRef.current && dismissalRef.current === null) {
+      swipeableRef.current?.close();
+    }
+  }, [props.dormant]);
 
   const dismiss = useCallback(
     (translation: SharedValue<number>) => {
@@ -381,7 +399,13 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
         setIsDismissing(true);
         if (swipeableRef.current) onSwipeableClose?.(swipeableRef.current);
         runOnUI(dismiss)(activeTranslationRef.current ?? fallbackTranslation);
-        dismissalRef.current = { finished, restore: restoreRow };
+        const generation = contentGenerationRef.current;
+        dismissalRef.current = {
+          finished,
+          restore: () => {
+            if (contentGenerationRef.current === generation) restoreRow();
+          },
+        };
         return dismissalRef.current;
       }),
     [dismiss, fallbackTranslation, onSwipeableClose, props.threadKey, restoreRow],
@@ -439,6 +463,7 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
           failOffsetY={[-10, 10]}
           friction={1}
           onSwipeableClose={() => {
+            openRef.current = false;
             fullSwipeArmedRef.current = false;
             if (swipeableRef.current) {
               props.onSwipeableClose?.(swipeableRef.current);
@@ -451,6 +476,7 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
             }
           }}
           onSwipeableWillOpen={() => {
+            openRef.current = true;
             const methods = swipeableRef.current;
             if (!methods) {
               return;
