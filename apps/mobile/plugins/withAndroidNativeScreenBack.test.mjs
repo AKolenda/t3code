@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { JS_BACK_HANDLER_NATIVE_ID } from "../src/lib/androidNativeBack";
 import withAndroidNativeScreenBack from "./withAndroidNativeScreenBack.cjs";
 import withAndroidPredictiveBackCompat from "./withAndroidPredictiveBackCompat.cjs";
 
@@ -37,6 +38,17 @@ describe("Android native screen back generation", () => {
     expect(result).toContain("onBackPressedDispatcher.addCallback(this, nativeScreenBackCallback)");
     expect(result).toContain("target.dismissFromContainer()");
     expect(result).toContain("top.nativeBackButtonDismissalEnabled");
+  });
+
+  it("leaves back to JS while in-window UI marked for JS back is on screen", async () => {
+    const result = await transform(withAndroidNativeScreenBack, mainActivity);
+    expect(result).toContain("import com.facebook.react.uimanager.util.ReactFindViewUtil");
+    expect(result).toContain(
+      "if (ReactFindViewUtil.findView(window.decorView, JS_BACK_HANDLER_NATIVE_ID) != null) return null",
+    );
+    expect(result).toContain(
+      `const val JS_BACK_HANDLER_NATIVE_ID = "${JS_BACK_HANDLER_NATIVE_ID}"`,
+    );
   });
 
   it("turns the callback off while the default back action runs", async () => {

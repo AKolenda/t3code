@@ -618,7 +618,7 @@ const RootStackConfig = createNativeStackNavigator({
       screen: ThreadRouteScreen,
       linking: THREAD_LINKING_PREFIX,
       // Android back pops the thread without waiting for JS; see
-      // withAndroidNativeScreenBack and ThreadRouteScreen.
+      // withAndroidNativeScreenBack.
       options: { ...GLASS_HEADER_OPTIONS, unstable_nativeBackDismissalEnabled: true },
     }),
     ThreadTerminal: createNativeStackScreen({

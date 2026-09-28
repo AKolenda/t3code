@@ -7,11 +7,15 @@ const { withMainActivity } = require("expo/config-plugins");
 // instead when the screen opted in (native-stack's
 // unstable_nativeBackDismissalEnabled), the same native dismissal an iOS swipe
 // back uses: JS learns of it through onDismissed and updates its state then.
-// Everything else still goes to JS.
+// Everything else still goes to JS, including back while in-window UI that
+// handles back in JS is on screen (marked with JS_BACK_HANDLER_NATIVE_ID).
+
+const JS_BACK_HANDLER_NATIVE_ID = "t3-js-back-handler";
 
 const IMPORTS = `
 import android.view.View
 import android.view.ViewGroup
+import com.facebook.react.uimanager.util.ReactFindViewUtil
 import com.swmansion.rnscreens.ScreenStack
 import com.swmansion.rnscreens.ScreenStackFragmentWrapper`;
 
@@ -44,6 +48,9 @@ const CALLBACK_PROPERTY = `
   private fun nativeScreenBackTarget(): ScreenStackFragmentWrapper? {
     // Wide layouts show more than one stack at a time; leave those to JS.
     if (resources.configuration.smallestScreenWidthDp >= 600) return null
+    // In-window UI that handles back in JS (an open menu) closes first. It is
+    // marked on the view itself, so the check holds from its first frame.
+    if (ReactFindViewUtil.findView(window.decorView, JS_BACK_HANDLER_NATIVE_ID) != null) return null
     var stack = findScreenStack(window.decorView, Int.MAX_VALUE) ?: return null
     while (true) {
       val top = stack.topScreen ?: return null
@@ -79,6 +86,8 @@ const CALLBACK_PROPERTY = `
   private companion object {
     // A nested navigator's stack sits a few views inside its screen.
     const val NESTED_SCREEN_STACK_DEPTH = 10
+    // Matches src/lib/androidNativeBack.ts.
+    const val JS_BACK_HANDLER_NATIVE_ID = "${JS_BACK_HANDLER_NATIVE_ID}"
   }
 `;
 
