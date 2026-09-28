@@ -16,7 +16,9 @@ import {
   useNavigation,
   type StaticScreenProps,
 } from "@react-navigation/native";
+import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useJsBackHeld } from "../../lib/jsBackHold";
 import * as Option from "effect/Option";
 import {
   CommandId,
@@ -248,7 +250,24 @@ function ThreadUnavailableScreen(props: {
   );
 }
 
+/**
+ * Back pops the thread natively on Android (withAndroidNativeScreenBack), so it
+ * never waits for a thread that is still loading or syncing. While in-screen
+ * UI takes back in JS (an in-window menu), back goes to it.
+ */
+function useNativeBackUnlessJsHolds() {
+  const navigation = useNavigation<NativeStackNavigationProp<ReactNavigation.RootParamList>>();
+  const jsBackHeld = useJsBackHeld();
+  const appliedRef = useRef(false);
+  useEffect(() => {
+    if (appliedRef.current === jsBackHeld) return;
+    appliedRef.current = jsBackHeld;
+    navigation.setOptions({ unstable_nativeBackDismissalEnabled: !jsBackHeld });
+  }, [jsBackHeld, navigation]);
+}
+
 export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
+  useNativeBackUnlessJsHolds();
   const { state: workspaceState } = useWorkspaceState();
   const { connectionState } = useRemoteConnectionStatus();
   const { selectedThread } = useThreadSelection();

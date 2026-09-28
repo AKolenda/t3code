@@ -6,6 +6,7 @@ import { BackHandler, Pressable, ScrollView, View } from "react-native";
 import { useKeyboardState } from "react-native-keyboard-controller";
 import Animated, { FadeIn } from "react-native-reanimated";
 
+import { useJsBackHold } from "../lib/jsBackHold";
 import { OverlayPortal } from "./OverlayPortal";
 import { useAndroidControlSizing } from "./useAndroidControlSizing";
 import { MaterialMenuPopup } from "./MaterialMenuPopup";
@@ -115,6 +116,7 @@ export function AndroidAnchoredMenu(props: AndroidAnchoredMenuProps) {
     });
     return () => subscription.remove();
   }, [anchor, close, submenuDepth]);
+  useJsBackHold(anchor !== null && anchor.keyboardWasVisible);
 
   const parent = path[path.length - 1] ?? null;
   const levelActions = (parent?.subactions ?? props.actions).filter(
