@@ -388,27 +388,30 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
     },
     [actionOpacity, collapse, dismissing, finishDismiss, rowWidth],
   );
+  // A dormant row is out of view: an exit animation there only delays the action.
   useLayoutEffect(
     () =>
-      registerThreadDismissal(props.threadKey, () => {
-        if (dismissalRef.current) return dismissalRef.current;
-        const finished = new Promise<void>((resolve) => {
-          pendingDismissRef.current = resolve;
-        });
-        fullSwipeArmedRef.current = false;
-        setIsDismissing(true);
-        if (swipeableRef.current) onSwipeableClose?.(swipeableRef.current);
-        runOnUI(dismiss)(activeTranslationRef.current ?? fallbackTranslation);
-        const generation = contentGenerationRef.current;
-        dismissalRef.current = {
-          finished,
-          restore: () => {
-            if (contentGenerationRef.current === generation) restoreRow();
-          },
-        };
-        return dismissalRef.current;
-      }),
-    [dismiss, fallbackTranslation, onSwipeableClose, props.threadKey, restoreRow],
+      props.dormant
+        ? undefined
+        : registerThreadDismissal(props.threadKey, () => {
+            if (dismissalRef.current) return dismissalRef.current;
+            const finished = new Promise<void>((resolve) => {
+              pendingDismissRef.current = resolve;
+            });
+            fullSwipeArmedRef.current = false;
+            setIsDismissing(true);
+            if (swipeableRef.current) onSwipeableClose?.(swipeableRef.current);
+            runOnUI(dismiss)(activeTranslationRef.current ?? fallbackTranslation);
+            const generation = contentGenerationRef.current;
+            dismissalRef.current = {
+              finished,
+              restore: () => {
+                if (contentGenerationRef.current === generation) restoreRow();
+              },
+            };
+            return dismissalRef.current;
+          }),
+    [dismiss, fallbackTranslation, onSwipeableClose, props.dormant, props.threadKey, restoreRow],
   );
   const dismissStyle = useAnimatedStyle(() => ({
     height: dismissing.value ? rowHeight.value * (1 - collapse.value) : undefined,
