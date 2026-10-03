@@ -288,7 +288,8 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
   const gateEnabled = use(SwipeableScrollGateContext);
   const mountedRef = useRef(true);
   const dismissalRef = useRef<{ finished: Promise<void>; restore: () => void } | null>(null);
-  const pendingDismissRef = useRef<(() => void) | null>(null);
+  const pendingDismissRef = useRef<{ id: number; resolve: () => void } | null>(null);
+  const dismissalIdRef = useRef(0);
   const activeTranslationRef = useRef<SharedValue<number> | null>(null);
   const [isDismissing, setIsDismissing] = useState(false);
   const dismissing = useSharedValue(false);
@@ -321,10 +322,13 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
     setIsDismissing(false);
   }, [actionOpacity, collapse, dismissing, fallbackTranslation]);
 
-  const finishDismiss = useCallback(() => {
-    const finish = pendingDismissRef.current;
+  // The collapse passes its dismissal id: a completion queued before the row was
+  // reused must not finish a newer dismissal.
+  const finishDismiss = useCallback((id?: number) => {
+    const pending = pendingDismissRef.current;
+    if (!pending || (id !== undefined && pending.id !== id)) return;
     pendingDismissRef.current = null;
-    finish?.();
+    pending.resolve();
   }, []);
 
   useLayoutEffect(() => {
@@ -364,7 +368,7 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
   }, [props.dormant]);
 
   const dismiss = useCallback(
-    (translation: SharedValue<number>) => {
+    (translation: SharedValue<number>, id: number) => {
       "worklet";
       if (dismissing.value) return;
       dismissing.set(true);
@@ -380,7 +384,7 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
           if (!finished) return;
           collapse.set(
             withTiming(1, { ...timing, duration: 180 }, (collapsed) => {
-              if (collapsed) runOnJS(finishDismiss)();
+              if (collapsed) runOnJS(finishDismiss)(id);
             }),
           );
         }),
@@ -395,13 +399,14 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
         ? undefined
         : registerThreadDismissal(props.threadKey, () => {
             if (dismissalRef.current) return dismissalRef.current;
+            const id = ++dismissalIdRef.current;
             const finished = new Promise<void>((resolve) => {
-              pendingDismissRef.current = resolve;
+              pendingDismissRef.current = { id, resolve };
             });
             fullSwipeArmedRef.current = false;
             setIsDismissing(true);
             if (swipeableRef.current) onSwipeableClose?.(swipeableRef.current);
-            runOnUI(dismiss)(activeTranslationRef.current ?? fallbackTranslation);
+            runOnUI(dismiss)(activeTranslationRef.current ?? fallbackTranslation, id);
             const generation = contentGenerationRef.current;
             dismissalRef.current = {
               finished,
