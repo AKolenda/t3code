@@ -474,6 +474,9 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
           }}
           onSwipeableRelease={handleRelease}
           onSwipeableOpenStartDrag={() => {
+            // WillOpen reaches JS after the release; count the row open from the
+            // drag so going dormant in between still closes it.
+            openRef.current = true;
             if (swipeableRef.current) {
               props.onSwipeableWillOpen?.(swipeableRef.current);
             }
