@@ -1,5 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
-import { useIsFocused, useNavigation } from "@react-navigation/native";
+import { StackActions, useIsFocused, useNavigation } from "@react-navigation/native";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { summarizeSubagentStatuses } from "@t3tools/client-runtime/state/subagent-display";
 import {
@@ -175,11 +175,15 @@ export function ThreadSubagentGroup(props: {
                 }
                 disabled={threadId === null}
                 onPress={() => {
+                  // Push, not navigate: navigate reuses this Thread route, so back
+                  // would skip the parent thread.
                   if (threadId !== null)
-                    navigation.navigate("Thread", {
-                      environmentId: String(props.environmentId),
-                      threadId: String(threadId),
-                    });
+                    navigation.dispatch(
+                      StackActions.push("Thread", {
+                        environmentId: String(props.environmentId),
+                        threadId: String(threadId),
+                      }),
+                    );
                 }}
                 className="min-h-14 flex-row items-center gap-3 rounded-lg px-2 py-2 active:bg-subtle"
               >
