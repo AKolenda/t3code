@@ -1,5 +1,6 @@
 import { ComputerUseAppIcon } from "~/components/Icons";
 import { useChatCanvas } from "./ChatCanvasContext";
+import { ThreadFindBar } from "./ThreadFindBar";
 import { WorkLogBlock, WorkLogButton, WorkLogDetails, WorkLogList, WorkLogRow } from "./WorkLog";
 import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import type { WorktreeSetupSnapshot } from "@t3tools/contracts";
@@ -1381,6 +1382,7 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             ListHeaderComponent={listHeader}
             ListFooterComponent={timelineListFooter}
           />
+          <ThreadFindBar rows={rows} listRef={listRef} onManualNavigation={onManualNavigation} />
           <TimelineMinimap
             items={minimapItems}
             hasPersistentGutter={minimapHasPersistentGutter}
