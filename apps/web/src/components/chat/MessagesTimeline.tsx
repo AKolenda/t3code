@@ -1382,7 +1382,12 @@ export const MessagesTimeline = memo(function MessagesTimeline({
             ListHeaderComponent={listHeader}
             ListFooterComponent={timelineListFooter}
           />
-          <ThreadFindBar rows={rows} listRef={listRef} onManualNavigation={onManualNavigation} />
+          <ThreadFindBar
+            key={listIdentityKey}
+            rows={rows}
+            listRef={listRef}
+            onManualNavigation={onManualNavigation}
+          />
           <TimelineMinimap
             items={minimapItems}
             hasPersistentGutter={minimapHasPersistentGutter}

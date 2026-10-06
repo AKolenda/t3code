@@ -17,6 +17,9 @@ const indexesOf = (text: string, needle: string) => {
   }
   return found;
 };
+// Rendered message and plan bodies; mirrors what `rowText` counts.
+const SEARCHABLE_BODY =
+  '[data-timeline-row-kind="message"] :is([data-user-message-body], .chat-markdown), [data-timeline-row-kind="proposed-plan"] .chat-markdown';
 const foldedRows = new WeakMap<MessagesTimelineRow, string>();
 const rowText = (row: MessagesTimelineRow) => {
   let text = foldedRows.get(row);
@@ -27,7 +30,8 @@ const rowText = (row: MessagesTimelineRow) => {
         : row.kind === "proposed-plan"
           ? row.proposedPlan.planMarkdown
           : "";
-    foldedRows.set(row, (text = fold(raw)));
+    // Link targets are not rendered, so they must not count as matches.
+    foldedRows.set(row, (text = fold(raw.replace(/\]\([^)]*\)/g, "]"))));
   }
   return text;
 };
@@ -75,7 +79,7 @@ export function ThreadFindBar(props: {
   const activeIndex = Math.min(current, matches.length - 1);
   const match = matches[activeIndex];
   // Keyed so streaming rows don't re-trigger the jump to the same match.
-  const active = useMemo(() => match, [needle, match?.rowId, match?.nth]);
+  const active = useMemo(() => match, [needle, match?.rowId, match?.nth, match?.rowIndex]);
 
   // Highlights only the rendered rows, so the cost tracks the viewport, not the thread.
   const paint = useCallback(
@@ -86,7 +90,11 @@ export function ThreadFindBar(props: {
       const activeRanges: Range[] = [];
       const activeRow =
         active && scroller.querySelector(`[data-timeline-row-id="${CSS.escape(active.rowId)}"]`);
-      const walker = document.createTreeWalker(scroller, NodeFilter.SHOW_TEXT);
+      const walker = document.createTreeWalker(scroller, NodeFilter.SHOW_TEXT, (node) =>
+        node.parentElement?.closest(SEARCHABLE_BODY)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT,
+      );
       for (let node = needle ? walker.nextNode() : null; node; node = walker.nextNode()) {
         for (const at of indexesOf(fold(node.nodeValue!), needle)) {
           const range = new Range();
@@ -125,14 +133,10 @@ export function ThreadFindBar(props: {
     return () => cancelAnimationFrame(frame);
   }, [active, listRef, onManualNavigation, open, paint]);
 
-  // Repaint as rows mount while scrolling or stream in; clear on close.
+  // Repaint as rows mount while scrolling or stream in; clear on close and unmount.
   useEffect(() => {
     const scroller = listRef.current?.getScrollableNode() as HTMLElement | undefined;
-    if (!open || !scroller) {
-      CSS.highlights?.delete("t3-thread-find");
-      CSS.highlights?.delete("t3-thread-find-current");
-      return;
-    }
+    if (!open || !scroller) return;
     paint(false);
     let frame = 0;
     const onScroll = () => {
@@ -143,6 +147,8 @@ export function ThreadFindBar(props: {
     return () => {
       cancelAnimationFrame(frame);
       scroller.removeEventListener("scroll", onScroll);
+      CSS.highlights?.delete("t3-thread-find");
+      CSS.highlights?.delete("t3-thread-find-current");
     };
   }, [listRef, open, paint, rows]);
 
