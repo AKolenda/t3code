@@ -29,11 +29,6 @@ export function createSwipeRowActivation() {
       if (listTouches.size > 0) pendingKeys = keys;
       else apply(keys);
     },
-    /**
-     * `started` are touches that just began on the list; `onScreen` is every
-     * finger still down anywhere. A finger on another control never holds
-     * changes, and one whose end event went missing is dropped here.
-     */
     trackTouches(started: ReadonlyArray<string>, onScreen: ReadonlyArray<string>) {
       for (const id of started) listTouches.add(id);
       for (const id of listTouches) if (!onScreen.includes(id)) listTouches.delete(id);
@@ -51,7 +46,6 @@ export const SwipeRowActivationContext = createContext<SwipeRowActivation | null
 
 const subscribeNever = () => () => {};
 
-/** Rows outside an activation provider (e.g. the iPad sidebar) stay live. */
 export function useSwipeRowDormant(key: string | undefined): boolean {
   const activation = use(SwipeRowActivationContext);
   return useSyncExternalStore(
