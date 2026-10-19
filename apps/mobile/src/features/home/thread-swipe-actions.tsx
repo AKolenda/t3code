@@ -8,6 +8,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ComponentProps,
@@ -244,21 +245,13 @@ interface ThreadSwipeableProps {
    */
   readonly secondaryAction?: ThreadSwipeAction | null;
   readonly resetKey?: string;
-  /** Leaves out the swipe actions and gesture; see swipe-row-activation. */
   readonly dormant?: boolean;
   readonly simultaneousWith?: ComponentProps<typeof ReanimatedSwipeable>["simultaneousWith"];
   readonly threadTitle: string;
 }
 
 export function ThreadSwipeable(props: ThreadSwipeableProps) {
-  // Not keyed by resetKey: remounting a recycled row rebuilt its whole tree
-  // while the list scrolled. ThreadSwipeableRow resets itself in place.
-  return <ThreadSwipeableRow {...props} />;
-}
-
-function ThreadSwipeableRow(props: ThreadSwipeableProps) {
   const swipeableRef = useRef<SwipeableMethods | null>(null);
-  const fullSwipeArmedRef = useRef(false);
   const hasSecondaryAction = props.secondaryAction !== null;
   const actionsWidth = swipeActionsWidth(hasSecondaryAction);
   const fullSwipeThreshold = Math.max(actionsWidth + 44, props.fullSwipeWidth * 0.58);
@@ -271,6 +264,11 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
   const pendingDismissRef = useRef<{ id: number; resolve: () => void } | null>(null);
   const dismissalIdRef = useRef(0);
   const activeTranslationRef = useRef<SharedValue<number> | null>(null);
+  const content = useMemo(
+    () => ({ resetKey: props.resetKey, threadKey: props.threadKey }),
+    [props.resetKey, props.threadKey],
+  );
+  const contentRef = useRef(content);
   const [isDismissing, setIsDismissing] = useState(false);
   const dismissing = useSharedValue(false);
   const rowHeight = useSharedValue(0);
@@ -279,31 +277,26 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
   const fallbackTranslation = useSharedValue(0);
   const actionOpacity = useSharedValue(1);
   const primaryAction = props.primaryAction;
+  const onDelete = props.onDelete;
   const onSwipeableClose = props.onSwipeableClose;
-
-  // Tracks the swipeable's open state, which it does not expose.
-  const openRef = useRef(false);
-  // Bumped when the row is reused for other content, so a late restore from
-  // the previous content's dismissal cannot reset the new content.
-  const contentGenerationRef = useRef(0);
 
   const restoreRow = useCallback(() => {
     if (!mountedRef.current) return;
     dismissalRef.current = null;
-    swipeableRef.current?.reset();
-    // reset() leaves an open row's tap-to-close gesture on, and that gesture
-    // cancels the next press on the row. Closing the now-closed row turns it
-    // off without moving anything.
-    if (openRef.current) swipeableRef.current?.close();
-    fallbackTranslation.set(0);
-    collapse.set(0);
-    actionOpacity.set(1);
-    dismissing.set(false);
+    // RN-to-UI jobs run in order, so this also resets a queued dismissal.
+    runOnUI((methods: SwipeableMethods | null) => {
+      "worklet";
+      methods?.reset();
+      // RNGH reset() leaves tap-to-close enabled; close() clears it.
+      methods?.close();
+      fallbackTranslation.set(0);
+      collapse.set(0);
+      actionOpacity.set(1);
+      dismissing.set(false);
+    })(swipeableRef.current);
     setIsDismissing(false);
   }, [actionOpacity, collapse, dismissing, fallbackTranslation]);
 
-  // The collapse passes its dismissal id: a completion queued before the row was
-  // reused must not finish a newer dismissal.
   const finishDismiss = useCallback((id?: number) => {
     const pending = pendingDismissRef.current;
     if (!pending || (id !== undefined && pending.id !== id)) return;
@@ -323,28 +316,19 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
     };
   }, [actionOpacity, collapse, fallbackTranslation, finishDismiss]);
 
-  // Recycled content gets fresh swipe and animation state. Late callbacks
-  // from the previous content keep that render's action, never the new one's.
-  const resetKeyRef = useRef(props.resetKey);
+  // Reset recycled rows in place so their child views stay mounted.
   useLayoutEffect(() => {
-    if (resetKeyRef.current === props.resetKey) return;
-    resetKeyRef.current = props.resetKey;
-    cancelAnimation(collapse);
-    cancelAnimation(actionOpacity);
-    cancelAnimation(fallbackTranslation);
-    if (activeTranslationRef.current) cancelAnimation(activeTranslationRef.current);
+    if (contentRef.current === content) return;
+    contentRef.current = content;
     finishDismiss();
-    contentGenerationRef.current += 1;
-    fullSwipeArmedRef.current = false;
     restoreRow();
-  }, [actionOpacity, collapse, fallbackTranslation, finishDismiss, props.resetKey, restoreRow]);
+  }, [content, finishDismiss, restoreRow]);
 
-  // A dormant row has no actions, so it must not stay open.
   useLayoutEffect(() => {
-    if (props.dormant && openRef.current && dismissalRef.current === null) {
-      swipeableRef.current?.close();
+    if (props.dormant && activeTranslationRef.current && dismissalRef.current === null) {
+      restoreRow();
     }
-  }, [props.dormant]);
+  }, [props.dormant, restoreRow]);
 
   const dismiss = useCallback(
     (translation: SharedValue<number>, id: number) => {
@@ -370,7 +354,6 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
     },
     [actionOpacity, collapse, dismissing, finishDismiss, rowWidth],
   );
-  // A dormant row is out of view: an exit animation there only delays the action.
   useLayoutEffect(
     () =>
       props.dormant
@@ -381,18 +364,17 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
             const finished = new Promise<void>((resolve) => {
               pendingDismissRef.current = { id, resolve };
             });
-            fullSwipeArmedRef.current = false;
             setIsDismissing(true);
             if (swipeableRef.current) onSwipeableClose?.(swipeableRef.current);
             runOnUI(dismiss)(activeTranslationRef.current ?? fallbackTranslation, id);
-            const generation = contentGenerationRef.current;
-            dismissalRef.current = {
+            const dismissal = {
               finished,
               restore: () => {
-                if (contentGenerationRef.current === generation) restoreRow();
+                if (dismissalRef.current === dismissal) restoreRow();
               },
             };
-            return dismissalRef.current;
+            dismissalRef.current = dismissal;
+            return dismissal;
           }),
     [dismiss, fallbackTranslation, onSwipeableClose, props.dormant, props.threadKey, restoreRow],
   );
@@ -404,27 +386,44 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
   }));
   const actionStyle = useAnimatedStyle(() => ({ opacity: actionOpacity.value, height: "100%" }));
   const commitPrimaryAction = useCallback(() => {
+    if (!mountedRef.current || contentRef.current !== content) return;
     primaryAction.onPress();
     if (!pendingDismissRef.current) swipeableRef.current?.close();
-  }, [primaryAction]);
+  }, [content, primaryAction]);
+  // RNGH lifecycle events call the latest handler, so commit from this release.
+  const commitFullSwipe = useCallback(() => {
+    if (!mountedRef.current || contentRef.current !== content) return;
+    if (fullSwipeAction === "primary") commitPrimaryAction();
+    else {
+      swipeableRef.current?.close();
+      onDelete();
+    }
+  }, [commitPrimaryAction, content, fullSwipeAction, onDelete]);
   const handleRelease = useCallback(
     (translation: SharedValue<number>) => {
       "worklet";
       if (dismissing.value) return true;
-      if (fullSwipeAction === "primary" && -translation.value >= fullSwipeThreshold) {
-        runOnJS(commitPrimaryAction)();
+      if (-translation.value >= fullSwipeThreshold) {
+        runOnJS(commitFullSwipe)();
         return true;
       }
       return false;
     },
-    [commitPrimaryAction, dismissing, fullSwipeAction, fullSwipeThreshold],
+    [commitFullSwipe, dismissing, fullSwipeThreshold],
   );
-  const handleFullSwipeArmedChange = useCallback((armed: boolean) => {
-    if (armed && !fullSwipeArmedRef.current) {
-      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+  const handleFullSwipeArmedChange = useCallback(
+    (armed: boolean) => {
+      if (mountedRef.current && contentRef.current === content && armed) {
+        void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+      }
+    },
+    [content],
+  );
+  const handleWillOpen = () => {
+    if (!props.dormant && !dismissalRef.current && swipeableRef.current) {
+      props.onSwipeableWillOpen?.(swipeableRef.current);
     }
-    fullSwipeArmedRef.current = armed;
-  }, []);
+  };
 
   return (
     <Animated.View style={dismissStyle}>
@@ -449,40 +448,15 @@ function ThreadSwipeableRow(props: ThreadSwipeableProps) {
           failOffsetY={[-10, 10]}
           friction={1}
           onSwipeableClose={() => {
-            openRef.current = false;
-            fullSwipeArmedRef.current = false;
             if (swipeableRef.current) {
               props.onSwipeableClose?.(swipeableRef.current);
             }
           }}
           onSwipeableRelease={handleRelease}
-          onSwipeableOpenStartDrag={() => {
-            // WillOpen reaches JS after the release; count the row open from the
-            // drag so going dormant in between still closes it.
-            openRef.current = true;
-            if (swipeableRef.current) {
-              props.onSwipeableWillOpen?.(swipeableRef.current);
-            }
-          }}
-          onSwipeableWillOpen={() => {
-            openRef.current = true;
-            const methods = swipeableRef.current;
-            if (!methods) {
-              return;
-            }
-
-            props.onSwipeableWillOpen?.(methods);
-            if (fullSwipeArmedRef.current && fullSwipeAction !== "primary") {
-              fullSwipeArmedRef.current = false;
-              methods.close();
-              props.onDelete();
-            }
-          }}
+          onSwipeableOpenStartDrag={handleWillOpen}
+          onSwipeableWillOpen={handleWillOpen}
           overshootFriction={1}
           overshootRight
-          // Dormant rows keep this same tree, so waking one only adds its
-          // actions. Swapping trees remounted the content right under a tap,
-          // which flashed the icons and dropped the tap.
           renderRightActions={(_progress, translation, methods) =>
             props.dormant ? null : (
               <Animated.View

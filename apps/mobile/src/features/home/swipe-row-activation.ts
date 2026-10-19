@@ -1,11 +1,8 @@
 import { createContext, use, useSyncExternalStore } from "react";
 
 /**
- * Swipe actions (the live swipe gesture and the hidden action buttons) only
- * exist around the viewport. Every other Home row is dormant: the same row
- * tree without them, so a row the list rebuilds while scrolling is cheaper and
- * waking it never remounts its content. The scroll gate already disables
- * swipes while the list moves, so rows are activated once it rests.
+ * Only rows around the viewport enable swipe gestures and render actions.
+ * Dormant rows keep the same child views so waking them preserves touches.
  */
 export function createSwipeRowActivation() {
   let activeKeys = new Set<string>();
