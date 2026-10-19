@@ -379,7 +379,8 @@ export function ThreadSwipeable(props: ThreadSwipeableProps) {
     [dismiss, fallbackTranslation, onSwipeableClose, props.dormant, props.threadKey, restoreRow],
   );
   const dismissStyle = useAnimatedStyle(() => ({
-    height: dismissing.value ? rowHeight.value * (1 - collapse.value) : undefined,
+    // Native prop updates omit undefined, leaving a collapsed height in place.
+    height: dismissing.value ? rowHeight.value * (1 - collapse.value) : "auto",
     pointerEvents: dismissing.value ? "none" : "auto",
     overflow: "hidden",
     transform: [{ translateX: fallbackTranslation.value }],
