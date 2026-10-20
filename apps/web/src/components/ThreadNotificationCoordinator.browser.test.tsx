@@ -380,7 +380,7 @@ describe("thread notifications", () => {
     });
   });
 
-  it("keeps Windows system alerts on screen so a click still reaches the app", async () => {
+  it("keeps Windows completion alerts on screen so a click still reaches the app", async () => {
     await using app = setup();
     state.mode = "notifications";
     state.focused = false;
@@ -390,6 +390,20 @@ describe("thread notifications", () => {
     expect(state.notification).toHaveBeenCalledWith(
       "Thread completed",
       expect.objectContaining({ requireInteraction: true }),
+    );
+  });
+
+  it("lets Windows attention alerts time out since another client may resolve them", async () => {
+    await using app = setup();
+    state.mode = "notifications";
+    state.focused = false;
+    state.platform = "Win32";
+    await app.render();
+    state.input = true;
+    await app.render();
+    expect(state.notification).toHaveBeenCalledWith(
+      "Input needed",
+      expect.objectContaining({ requireInteraction: false }),
     );
   });
 

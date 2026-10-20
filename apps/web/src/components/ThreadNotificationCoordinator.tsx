@@ -222,9 +222,10 @@ function EnvironmentNotifications({
           body: thread.title,
           tag: threadNotificationTag(environmentId, thread.id),
           silent: true,
-          // Windows drops clicks once a toast times out into Notification Center, so keep it
-          // on screen until it is clicked or the window regains focus and clears it.
-          requireInteraction: isWindowsPlatform(navigator.platform),
+          // Windows drops clicks once a toast times out into Notification Center, so keep
+          // completions on screen until clicked or cleared on focus. Attention alerts still time
+          // out because another client can resolve them while this window stays unfocused.
+          requireInteraction: kind === "completion" && isWindowsPlatform(navigator.platform),
         });
         onNotification(environmentId, notification);
         notification.addEventListener("click", () => {
