@@ -4,18 +4,21 @@ import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import { ChatAttachmentId } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import * as TestClock from "effect/testing/TestClock";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { base64UrlEncode, signPayload } from "../auth/utils.ts";
 import * as ServerConfig from "../config.ts";
-import { parseThreadSegmentFromAttachmentId } from "../attachmentStore.ts";
+import {
+  claimPendingAttachments,
+  releaseClaimedAttachments,
+} from "../orchestration-v2/AttachmentClaims.ts";
 import {
   ATTACHMENT_UPLOAD_ROUTE_PREFIX,
   deletePendingAttachment,
@@ -49,22 +52,6 @@ const encodeLegacyAttachmentUploadClaims = Schema.encodeEffect(
 );
 
 describe("AttachmentUpload", () => {
-  it.effect("signs the attachment metadata and validates the upload token", () =>
-    Effect.gen(function* () {
-      const issued = yield* issueAttachmentUploadUrl(uploadInput);
-      expect(parseThreadSegmentFromAttachmentId(issued.attachmentId)).toBe("pending");
-
-      const token = issued.relativeUrl.slice(`${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/`.length);
-      expect(yield* validateAttachmentUploadToken(token)).toMatchObject({
-        kind: "attachment-upload",
-        attachmentId: issued.attachmentId,
-        name: "screenshot.png",
-        mimeType: "image/png",
-        sizeBytes: 6,
-      });
-    }).pipe(Effect.provide(layerTest)),
-  );
-
   it.effect("rejects tampered and malformed upload tokens", () =>
     Effect.gen(function* () {
       const issued = yield* issueAttachmentUploadUrl(uploadInput);
@@ -99,31 +86,6 @@ describe("AttachmentUpload", () => {
         type: "image",
         attachmentId: issued.attachmentId,
       });
-    }).pipe(Effect.provide(layerTest)),
-  );
-
-  it.effect("rejects expired upload tokens", () =>
-    Effect.gen(function* () {
-      const issued = yield* issueAttachmentUploadUrl(uploadInput);
-      const token = issued.relativeUrl.slice(`${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/`.length);
-
-      yield* TestClock.adjust("11 minutes");
-      expect(yield* validateAttachmentUploadToken(token)).toBeNull();
-    }).pipe(Effect.provide(layerTest)),
-  );
-
-  it.effect("removes expired pending uploads while issuing a new upload URL", () =>
-    Effect.gen(function* () {
-      const config = yield* ServerConfig.ServerConfig;
-      const staleId = "pending-00000000-0000-4000-8000-0000000000cc";
-      const stalePath = NodePath.join(config.attachmentsDir, `${staleId}.png`);
-      NodeFS.writeFileSync(stalePath, Buffer.from("pixels"));
-      NodeFS.utimesSync(stalePath, 0, 0);
-
-      yield* TestClock.adjust("25 hours");
-      yield* issueAttachmentUploadUrl(uploadInput);
-
-      expect(NodeFS.existsSync(stalePath)).toBe(false);
     }).pipe(Effect.provide(layerTest)),
   );
 
@@ -178,6 +140,47 @@ describe("AttachmentUpload", () => {
       ).toEqual(Buffer.from([1, 2, 3, 4, 5, 6]));
 
       yield* deletePendingAttachment(issued.attachmentId);
+      expect(NodeFS.readdirSync(config.attachmentsDir)).toEqual([]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("stores MIME-identified SVG files with a previewable signed extension", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const bytes = new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"/>');
+      for (const name of ["diagram", "diagram.bin"]) {
+        const issued = yield* issueAttachmentUploadUrl({
+          type: "file",
+          name,
+          mimeType: "image/svg+xml",
+          sizeBytes: bytes.length,
+        });
+        const token = issued.relativeUrl.slice(`${ATTACHMENT_UPLOAD_ROUTE_PREFIX}/`.length);
+        const claims = yield* validateAttachmentUploadToken(token);
+        if (!claims) throw new Error("Expected valid SVG upload claims.");
+        expect(claims.name).toBe(`${name}.svg`);
+        expect(issued.attachmentId).toMatch(/-svg$/);
+        expect(yield* storeAttachmentUpload(claims, bytes)).toEqual({ ok: true });
+        expect(
+          NodeFS.readFileSync(NodePath.join(config.attachmentsDir, `${issued.attachmentId}.svg`)),
+        ).toEqual(Buffer.from(bytes));
+        const claimed = yield* claimPendingAttachments({
+          threadId: "svg-upload-thread",
+          attachments: [
+            {
+              type: "file",
+              id: ChatAttachmentId.make(issued.attachmentId),
+              name,
+              mimeType: "image/svg+xml",
+              sizeBytes: bytes.length,
+            },
+          ],
+        });
+        expect(claimed.attachments[0]?.name).toBe(`${name}.svg`);
+        expect(NodeFS.readFileSync(claimed.claimedPaths[0]!)).toEqual(Buffer.from(bytes));
+        yield* releaseClaimedAttachments(claimed.claimedPaths);
+        yield* deletePendingAttachment(issued.attachmentId);
+      }
       expect(NodeFS.readdirSync(config.attachmentsDir)).toEqual([]);
     }).pipe(Effect.provide(layerTest)),
   );

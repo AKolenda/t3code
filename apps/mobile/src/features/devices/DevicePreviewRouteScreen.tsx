@@ -9,7 +9,7 @@ import {
 import { useIsFocused, useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import * as Haptics from "expo-haptics";
 import { Accelerometer } from "expo-sensors";
 import { AppState, BackHandler, Pressable, StatusBar, View } from "react-native";
@@ -27,6 +27,8 @@ import {
   findHeaderMenuAction,
 } from "../../components/ui/headerMenu.android";
 import type { AppBarMenuItem } from "../../components/ui/AppBar.types";
+import { deriveBottomControlInsets } from "../../lib/reserved-regions";
+import { useNativeColumnLayoutMetrics } from "../../native/native-layout-metrics";
 import { deviceEnvironment, refreshDeviceHubAccess, useDeviceHubAccess } from "../../state/device";
 import { useEnvironmentQuery } from "../../state/query";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -45,6 +47,7 @@ const OVERLAY_EXITING = FadeOut.duration(120).reduceMotion(ReduceMotion.System);
 type DevicePreviewRouteScreenProps = StaticScreenProps<{
   readonly environmentId: string;
   readonly threadId: string;
+  readonly deviceKey?: string;
 }>;
 
 export function DevicePreviewRouteScreen({ route }: DevicePreviewRouteScreenProps) {
@@ -60,25 +63,33 @@ export function DevicePreviewRouteScreen({ route }: DevicePreviewRouteScreenProp
     <DevicePreviewScreen
       environmentId={EnvironmentId.make(environmentId)}
       threadId={ThreadId.make(threadId)}
+      initialDeviceKey={route.params.deviceKey}
       onClose={onClose}
     />
   );
 }
 
-function DevicePreviewScreen({
+export function DevicePreviewScreen({
   environmentId,
   threadId,
   onClose,
+  onMaximize,
+  initialDeviceKey,
 }: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly onClose: () => void;
+  readonly onMaximize?: (deviceKey: string | null) => void;
+  readonly initialDeviceKey?: string;
 }) {
+  const embedded = onMaximize !== undefined;
   const insets = useSafeAreaInsets();
+  // NativeColumnContent already insets the sides, so only a book fold moves the reveal handle.
+  const handleBounds = deriveBottomControlInsets(useNativeColumnLayoutMetrics());
   const { themeVariables } = useAppearancePreferences();
   const focused = useIsFocused();
   const [foreground, setForeground] = useState(AppState.currentState !== "background");
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(initialDeviceKey ?? null);
   const [inputConnected, setInputConnected] = useState(false);
   const [streamAttempt, setStreamAttempt] = useState(0);
   const [shuttingDown, setShuttingDown] = useState(false);
@@ -89,10 +100,13 @@ function DevicePreviewScreen({
   const state = useEnvironmentQuery(deviceEnvironment.state({ environmentId, input: {} }));
   const previews = threadDevicePreviews(state.data, threadId);
   const preview = selectedThreadDevicePreview(previews, selectedKey);
-  const onInputConnected = async (connected: boolean) => {
-    setInputConnected(connected);
-    if (connected) setControlsVisible(false);
-  };
+  const onInputConnected = useCallback(
+    async (connected: boolean) => {
+      setInputConnected(connected);
+      if (connected && !embedded) setControlsVisible(false);
+    },
+    [embedded],
+  );
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (state) =>
       setForeground(state !== "background"),
@@ -103,7 +117,7 @@ function DevicePreviewScreen({
     if (focused && state.data !== null && previews.length === 0) onClose();
   }, [focused, state.data, previews.length, onClose]);
   useEffect(() => {
-    if (!focused || !foreground) return;
+    if (!focused || !foreground || embedded) return;
     const shaken = createShakeDetector();
     Accelerometer.setUpdateInterval(50);
     const subscription = Accelerometer.addListener((sample) => {
@@ -112,7 +126,7 @@ function DevicePreviewScreen({
       setControlsVisible((visible) => !visible);
     });
     return () => subscription.remove();
-  }, [focused, foreground]);
+  }, [focused, foreground, embedded]);
   useEffect(() => {
     if (controlsVisible) return;
     const subscription = BackHandler.addEventListener("hardwareBackPress", () => {
@@ -256,7 +270,23 @@ function DevicePreviewScreen({
   ];
   return (
     <View className="flex-1" style={{ backgroundColor: themeVariables["--color-sheet-solid"] }}>
-      <StatusBar hidden animated />
+      {!embedded ? <StatusBar hidden animated /> : null}
+      {embedded ? (
+        <View
+          className="flex-row items-center gap-1 px-2 pb-2"
+          style={{ paddingTop: Math.max(insets.top, 8) }}
+        >
+          <SheetCloseButton accessibilityLabel="Close device preview" onClose={onClose} />
+          <AppText numberOfLines={1} className="min-w-0 flex-1 font-t3-medium text-sm">
+            {preview?.name ?? "Devices"}
+          </AppText>
+          <ControlPill
+            accessibilityLabel="Maximize device"
+            icon="arrow.up.left.and.arrow.down.right"
+            onPress={() => onMaximize(preview?.key ?? null)}
+          />
+        </View>
+      ) : null}
       {preview && focused && foreground ? (
         <OpenDevicePreview
           key={`${preview.key}:${streamAttempt}`}
@@ -281,7 +311,20 @@ function DevicePreviewScreen({
           ) : null}
         </View>
       )}
-      {controlsVisible ? (
+      {embedded ? (
+        <View
+          className="flex-row items-center justify-center gap-2 px-3 py-2"
+          style={{ paddingBottom: Math.max(insets.bottom, 8) }}
+        >
+          <ControlPill
+            accessibilityLabel="Home"
+            icon="house"
+            disabled={!inputConnected}
+            onPress={pressHome}
+          />
+          <DeviceOptionsMenu items={menuItems} />
+        </View>
+      ) : controlsVisible ? (
         <Animated.View
           entering={OVERLAY_ENTERING}
           exiting={OVERLAY_EXITING}
@@ -317,8 +360,11 @@ function DevicePreviewScreen({
           accessibilityLabel="Show device controls"
           accessibilityHint="Shaking the phone also shows them"
           hitSlop={12}
-          className="absolute h-6 w-16 items-center justify-center self-center"
-          style={{ top: Math.max(insets.top - 18, 4) }}
+          className="absolute h-11 w-16 items-center justify-center self-center"
+          style={{
+            top: Math.max(insets.top, 12),
+            transform: [{ translateX: (handleBounds.left - handleBounds.right) / 2 }],
+          }}
           onPress={() => setControlsVisible(true)}
         >
           <View className="h-1.5 w-10 rounded-full bg-white/40" />
