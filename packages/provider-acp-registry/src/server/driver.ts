@@ -261,7 +261,11 @@ export function applyAcpRegistryLiveConfiguration(
   return {
     ...snapshot,
     status: provider.enabled ? "ready" : provider.status,
-    models: modelsFromDiscovery(configuration, customModels),
+    // session/load may omit models (Kimi returns `{}`); keep the probed list.
+    models:
+      configuration.models.length === 0
+        ? provider.models
+        : modelsFromDiscovery(configuration, customModels),
   };
 }
 

@@ -177,6 +177,42 @@ describe("acpRegistrySnapshotReadiness", () => {
     });
   });
 
+  it("keeps probed models when a loaded session advertises none", () => {
+    const provider = buildCheckedAcpRegistrySnapshot({
+      ...identity,
+      settings: decodeSettings({ agentId: "test-agent" }),
+      checkedAt: "2026-08-13T10:00:00.000Z",
+      inspection: {
+        status: "ready",
+        agentId: "test-agent",
+        version: "1.0.0",
+        distribution: "npx",
+      },
+      probe: {
+        probe: {
+          instanceId: identity.instanceId,
+          ready: true,
+          icon: null,
+          authMethods: [],
+          models: [{ id: "probe-model", name: "Probe model", description: null }],
+          currentModelId: "probe-model",
+          configOptions: [],
+          sessionManagement: noSessionManagement,
+        },
+        slashCommands: [],
+        skills: [],
+      },
+    });
+
+    expect(
+      applyAcpRegistryLiveConfiguration(
+        provider,
+        { models: [], currentModelId: null, configOptions: [] },
+        [],
+      ).models,
+    ).toEqual(provider.models);
+  });
+
   it("projects discovery without claiming authentication when no login methods are advertised", () => {
     const snapshot = buildCheckedAcpRegistrySnapshot({
       ...identity,
