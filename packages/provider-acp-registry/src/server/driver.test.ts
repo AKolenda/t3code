@@ -211,6 +211,29 @@ describe("acpRegistrySnapshotReadiness", () => {
         [],
       ).models,
     ).toEqual(provider.models);
+
+    const liveOptions = [
+      {
+        id: "effort",
+        label: "Effort",
+        type: "select" as const,
+        options: [{ id: "high", label: "High" }],
+        currentValue: "high",
+      },
+    ];
+    expect(
+      applyAcpRegistryLiveConfiguration(
+        provider,
+        { models: [], currentModelId: null, configOptions: liveOptions },
+        [],
+      ).models,
+    ).toMatchObject([
+      {
+        slug: "probe-model",
+        isDefault: true,
+        capabilities: { optionDescriptors: [{ id: "effort", currentValue: "high" }] },
+      },
+    ]);
   });
 
   it("projects discovery without claiming authentication when no login methods are advertised", () => {
